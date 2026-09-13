@@ -1,0 +1,2198 @@
+{
+  "schema_version": "research_r0_legacy_feature_map_v1",
+  "source_revision": "c969c74a66b148fa66396c3896e48760004683d4",
+  "source_root": "/home/liuming/.openclaw/workspace/SysQ",
+  "feature_list_id": "v3a_plus_liquidity_financial_rc",
+  "frozen_config": "data/forensic/sysq-c969c74-20260904/payload/configs/features/v3a_plus_liquidity_financial_rc.yaml",
+  "frozen_config_sha256": "740786fd59167cd913fefbabe3ee1db7650109664653f0ad82533d5bb7387fb9",
+  "scope": "FACT: frozen legacy source formula transcription; not source certification, artifact replay, or a new executable Axiom recipe.",
+  "window_sessions_definition": "Total prior daily-panel observations needed for the complete finite-window dependency closure, excluding current row. This is not min_periods, not a claim that legacy rows are dense exchange sessions, and not a bound on prior publication-event history. null means no fixed proven session bound.",
+  "lag_sessions_definition": "Explicit additional shift of the completed feature beyond its stated formula, 0 in this map. Formula-internal shifts are in formula/window_sessions. Source-publication delays and decision snapshot delays remain separate.",
+  "common_source_notes": [
+    "Native monetary units, price-adjustment basis, actual consumed source artifacts and revision visibility are not independently certified by this transcription.",
+    "Legacy research adapter get_features call omits margin_lag_sessions and therefore uses default 0; financial_rc live configuration separately pins a whole feature snapshot lag of 1.",
+    "Adapter pads 1461 calendar days; a lag of 756 observations needs current plus 756 prior rows and dense-calendar evidence.",
+    "Legacy shareholder and growth loaders perform external I/O; Axiom Core must instead consume registered facts or frozen pure-computation plugins.",
+    "Legacy daily/yoy pct_change calls without fill_method inherit frozen pandas defaults; do not silently substitute explicit fill_method=None."
+  ],
+  "common_evidence": [
+    {
+      "source_file": "qsys/data/adapter.py",
+      "source_lines": [
+        532,
+        632
+      ]
+    },
+    {
+      "source_file": "qsys/research/generators/lightgbm_single_label.py",
+      "source_lines": [
+        965,
+        988
+      ]
+    },
+    {
+      "source_file": "qsys/feature/transforms.py",
+      "source_lines": [
+        7,
+        54
+      ]
+    },
+    {
+      "source_file": "configs/strategies/financial_rc.yaml",
+      "source_lines": [
+        94,
+        102
+      ]
+    },
+    {
+      "source_file": "configs/audit/feature_dependencies/v3a_plus_liquidity_financial_rc_v1.yaml",
+      "source_lines": [
+        1,
+        14
+      ]
+    }
+  ],
+  "features": [
+    {
+      "ordinal": 1,
+      "name": "$roe",
+      "business_definition": "Return on equity source field",
+      "inputs": [
+        "roe"
+      ],
+      "formula": "Pass through requested native Qlib field $roe unchanged; semantic alias is roe.",
+      "source_file": "qsys/data/adapter.py",
+      "source_lines": [
+        421,
+        421
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Native field missing values are retained before model-input preprocessing.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Native provider value; actual unit, report basis, revision selection and availability require the source artifact contract."
+    },
+    {
+      "ordinal": 2,
+      "name": "$grossprofit_margin",
+      "business_definition": "Gross profit margin source field",
+      "inputs": [
+        "grossprofit_margin"
+      ],
+      "formula": "Pass through requested native Qlib field $grossprofit_margin unchanged; semantic alias is grossprofit_margin.",
+      "source_file": "qsys/data/adapter.py",
+      "source_lines": [
+        411,
+        411
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Native field missing values are retained before model-input preprocessing.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Native provider value; actual unit, report basis, revision selection and availability require the source artifact contract."
+    },
+    {
+      "ordinal": 3,
+      "name": "$debt_to_assets",
+      "business_definition": "Debt to assets source field",
+      "inputs": [
+        "debt_to_assets"
+      ],
+      "formula": "Pass through requested native Qlib field $debt_to_assets unchanged; semantic alias is debt_to_assets.",
+      "source_file": "qsys/data/adapter.py",
+      "source_lines": [
+        412,
+        412
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Native field missing values are retained before model-input preprocessing.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Native provider value; actual unit, report basis, revision selection and availability require the source artifact contract."
+    },
+    {
+      "ordinal": 4,
+      "name": "$op_cashflow",
+      "business_definition": "Operating cash flow source field",
+      "inputs": [
+        "op_cashflow"
+      ],
+      "formula": "Pass through requested native Qlib field $op_cashflow unchanged; semantic alias is op_cashflow.",
+      "source_file": "qsys/data/adapter.py",
+      "source_lines": [
+        418,
+        418
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Native field missing values are retained before model-input preprocessing.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Native provider value; actual unit, report basis, revision selection and availability require the source artifact contract."
+    },
+    {
+      "ordinal": 5,
+      "name": "operating_cf_to_profit",
+      "business_definition": "Operating cash flow divided by net income",
+      "inputs": [
+        "op_cashflow",
+        "net_income"
+      ],
+      "formula": "op_cashflow / net_income.replace(0, NaN)",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        25,
+        26
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 6,
+      "name": "net_margin",
+      "business_definition": "Net income divided by revenue",
+      "inputs": [
+        "net_income",
+        "revenue"
+      ],
+      "formula": "net_income / revenue.replace(0, NaN)",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        23,
+        24
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 7,
+      "name": "roa",
+      "business_definition": "Net income divided by total assets",
+      "inputs": [
+        "net_income",
+        "total_assets"
+      ],
+      "formula": "net_income / total_assets.replace(0, NaN)",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        27,
+        28
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 8,
+      "name": "roe_delta_252d",
+      "business_definition": "Change from 252 prior security-panel observations",
+      "inputs": [
+        "roe"
+      ],
+      "formula": "roe - groupby(ts_code)[roe].shift(252); row lag, not fiscal-period alignment.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        50,
+        64
+      ],
+      "window_sessions": 252,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 9,
+      "name": "grossprofit_margin_delta_252d",
+      "business_definition": "Change from 252 prior security-panel observations",
+      "inputs": [
+        "grossprofit_margin"
+      ],
+      "formula": "grossprofit_margin - groupby(ts_code)[grossprofit_margin].shift(252); row lag, not fiscal-period alignment.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        50,
+        64
+      ],
+      "window_sessions": 252,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 10,
+      "name": "debt_to_assets_delta_252d",
+      "business_definition": "Change from 252 prior security-panel observations",
+      "inputs": [
+        "debt_to_assets"
+      ],
+      "formula": "debt_to_assets - groupby(ts_code)[debt_to_assets].shift(252); row lag, not fiscal-period alignment.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        50,
+        64
+      ],
+      "window_sessions": 252,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 11,
+      "name": "op_cashflow_delta_252d",
+      "business_definition": "Change from 252 prior security-panel observations",
+      "inputs": [
+        "op_cashflow"
+      ],
+      "formula": "op_cashflow - groupby(ts_code)[op_cashflow].shift(252); row lag, not fiscal-period alignment.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        50,
+        64
+      ],
+      "window_sessions": 252,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 12,
+      "name": "revenue_yoy",
+      "business_definition": "Daily-panel 252-row relative change, not strict fiscal YoY",
+      "inputs": [
+        "revenue"
+      ],
+      "formula": "revenue / groupby(ts_code)[revenue].shift(252).replace(0, NaN) - 1",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        35,
+        41
+      ],
+      "window_sessions": 252,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 13,
+      "name": "profit_yoy",
+      "business_definition": "Daily-panel 252-row relative change, not strict fiscal YoY",
+      "inputs": [
+        "net_income"
+      ],
+      "formula": "net_income / groupby(ts_code)[net_income].shift(252).replace(0, NaN) - 1",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        35,
+        41
+      ],
+      "window_sessions": 252,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 14,
+      "name": "$pe",
+      "business_definition": "Native valuation multiple",
+      "inputs": [
+        "pe"
+      ],
+      "formula": "Pass through requested native Qlib field $pe unchanged.",
+      "source_file": "qsys/data/adapter.py",
+      "source_lines": [
+        406,
+        406
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Native daily valuation field; units and source version must be bound separately."
+    },
+    {
+      "ordinal": 15,
+      "name": "$pb",
+      "business_definition": "Native valuation multiple",
+      "inputs": [
+        "pb"
+      ],
+      "formula": "Pass through requested native Qlib field $pb unchanged.",
+      "source_file": "qsys/data/adapter.py",
+      "source_lines": [
+        407,
+        407
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Native daily valuation field; units and source version must be bound separately."
+    },
+    {
+      "ordinal": 16,
+      "name": "pe_rank_252d",
+      "business_definition": "Current valuation percentile in trailing 252 observations",
+      "inputs": [
+        "pe"
+      ],
+      "formula": "groupby(ts_code)[pe].transform(s => s.rolling(252, min_periods=60).rank(pct=True)); current row included; legacy pandas default average ties.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        66,
+        76
+      ],
+      "window_sessions": 251,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 17,
+      "name": "pb_rank_252d",
+      "business_definition": "Current valuation percentile in trailing 252 observations",
+      "inputs": [
+        "pb"
+      ],
+      "formula": "groupby(ts_code)[pb].transform(s => s.rolling(252, min_periods=60).rank(pct=True)); current row included; legacy pandas default average ties.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        66,
+        76
+      ],
+      "window_sessions": 251,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 18,
+      "name": "pe_delta_120d",
+      "business_definition": "Valuation change over 120 prior observations",
+      "inputs": [
+        "pe"
+      ],
+      "formula": "pe - groupby(ts_code)[pe].shift(120)",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        78,
+        84
+      ],
+      "window_sessions": 120,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 19,
+      "name": "pb_delta_120d",
+      "business_definition": "Valuation change over 120 prior observations",
+      "inputs": [
+        "pb"
+      ],
+      "formula": "pb - groupby(ts_code)[pb].shift(120)",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        78,
+        84
+      ],
+      "window_sessions": 120,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 20,
+      "name": "pe_percentile_756d",
+      "business_definition": "Current valuation percentile in trailing 756 observations",
+      "inputs": [
+        "pe"
+      ],
+      "formula": "groupby(ts_code)[pe].transform(s => s.rolling(756, min_periods=180).rank(pct=True)); current row included; legacy pandas default average ties.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        90,
+        95
+      ],
+      "window_sessions": 755,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 21,
+      "name": "pb_percentile_756d",
+      "business_definition": "Current valuation percentile in trailing 756 observations",
+      "inputs": [
+        "pb"
+      ],
+      "formula": "groupby(ts_code)[pb].transform(s => s.rolling(756, min_periods=180).rank(pct=True)); current row included; legacy pandas default average ties.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        90,
+        95
+      ],
+      "window_sessions": 755,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 22,
+      "name": "pe_distance_from_756d_low",
+      "business_definition": "Relative distance above trailing valuation minimum",
+      "inputs": [
+        "pe"
+      ],
+      "formula": "pe / groupby(ts_code)[pe].transform(s => s.rolling(756, min_periods=180).min()).replace(0, NaN) - 1",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        97,
+        116
+      ],
+      "window_sessions": 755,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 23,
+      "name": "pb_distance_from_756d_low",
+      "business_definition": "Relative distance above trailing valuation minimum",
+      "inputs": [
+        "pb"
+      ],
+      "formula": "pb / groupby(ts_code)[pb].transform(s => s.rolling(756, min_periods=180).min()).replace(0, NaN) - 1",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        97,
+        116
+      ],
+      "window_sessions": 755,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 24,
+      "name": "pe_repair_room_to_median",
+      "business_definition": "Trailing median valuation relative to current valuation",
+      "inputs": [
+        "pe"
+      ],
+      "formula": "groupby(ts_code)[pe].transform(s => s.rolling(756, min_periods=180).median()) / pe.replace(0, NaN) - 1",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        97,
+        116
+      ],
+      "window_sessions": 755,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 25,
+      "name": "pb_repair_room_to_median",
+      "business_definition": "Trailing median valuation relative to current valuation",
+      "inputs": [
+        "pb"
+      ],
+      "formula": "groupby(ts_code)[pb].transform(s => s.rolling(756, min_periods=180).median()) / pb.replace(0, NaN) - 1",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        97,
+        116
+      ],
+      "window_sessions": 755,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 26,
+      "name": "earnings_yield_proxy",
+      "business_definition": "Net income divided by total market value",
+      "inputs": [
+        "net_income",
+        "total_mv"
+      ],
+      "formula": "net_income / total_mv.replace(0, NaN); source monetary units must agree.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        118,
+        120
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 27,
+      "name": "peg_proxy",
+      "business_definition": "PE divided by magnitude of daily-panel profit growth",
+      "inputs": [
+        "pe",
+        "profit_yoy"
+      ],
+      "formula": "pe / profit_yoy.replace(0, NaN).abs(); denominator is absolute growth, including negative growth.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        122,
+        125
+      ],
+      "window_sessions": 252,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 28,
+      "name": "up_day_ratio_60d",
+      "business_definition": "Fraction of positive-return observations",
+      "inputs": [
+        "close"
+      ],
+      "formula": "daily_ret = groupby(ts_code).close.pct_change(fill_method=None); up = (daily_ret > 0).astype(float); groupby(ts_code).up.rolling(60, min_periods=20).mean(); missing daily_ret compares false.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        61,
+        66
+      ],
+      "window_sessions": 60,
+      "lag_sessions": 0,
+      "missing_policy": "Missing daily return becomes up=0; rolling uses min_periods as specified.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 29,
+      "name": "up_day_ratio_120d",
+      "business_definition": "Fraction of positive-return observations",
+      "inputs": [
+        "close"
+      ],
+      "formula": "daily_ret = groupby(ts_code).close.pct_change(fill_method=None); up = (daily_ret > 0).astype(float); groupby(ts_code).up.rolling(120, min_periods=40).mean(); missing daily_ret compares false.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        61,
+        66
+      ],
+      "window_sessions": 120,
+      "lag_sessions": 0,
+      "missing_policy": "Missing daily return becomes up=0; rolling uses min_periods as specified.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 30,
+      "name": "trend_smoothness_60d",
+      "business_definition": "Window return divided by sum of absolute daily returns",
+      "inputs": [
+        "ret_60d",
+        "close"
+      ],
+      "formula": "daily_ret = groupby(ts_code).close.pct_change(fill_method=None); ret_60d / groupby(ts_code).abs(daily_ret).rolling(60, min_periods=20).sum().replace(0, NaN)",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        68,
+        73
+      ],
+      "window_sessions": 60,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 31,
+      "name": "trend_smoothness_120d",
+      "business_definition": "Window return divided by sum of absolute daily returns",
+      "inputs": [
+        "ret_120d",
+        "close"
+      ],
+      "formula": "daily_ret = groupby(ts_code).close.pct_change(fill_method=None); ret_120d / groupby(ts_code).abs(daily_ret).rolling(120, min_periods=40).sum().replace(0, NaN)",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        68,
+        73
+      ],
+      "window_sessions": 120,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 32,
+      "name": "max_pullback_120d",
+      "business_definition": "Maximum high-to-current-price pullback over nested windows",
+      "inputs": [
+        "close"
+      ],
+      "formula": "high = groupby(ts_code).close.rolling(120, min_periods=40).max(); drawdown = high / close - 1; groupby(ts_code).drawdown.rolling(120, min_periods=40).max(); both windows include current row, giving 238 prior rows for full dependency closure.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        75,
+        80
+      ],
+      "window_sessions": 238,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 33,
+      "name": "volatility_adjusted_return_60d",
+      "business_definition": "Window return divided by daily-return volatility",
+      "inputs": [
+        "ret_60d",
+        "close"
+      ],
+      "formula": "daily_ret = groupby(ts_code).close.pct_change(fill_method=None); ret_60d / groupby(ts_code).daily_ret.rolling(60, min_periods=20).std(ddof=1).replace(0, NaN)",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        82,
+        86
+      ],
+      "window_sessions": 60,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 34,
+      "name": "volatility_adjusted_return_120d",
+      "business_definition": "Window return divided by daily-return volatility",
+      "inputs": [
+        "ret_120d",
+        "close"
+      ],
+      "formula": "daily_ret = groupby(ts_code).close.pct_change(fill_method=None); ret_120d / groupby(ts_code).daily_ret.rolling(120, min_periods=40).std(ddof=1).replace(0, NaN)",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        82,
+        86
+      ],
+      "window_sessions": 120,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 35,
+      "name": "rps_60d",
+      "business_definition": "Same-date percentile rank of window return",
+      "inputs": [
+        "ret_60d",
+        "_pit_member",
+        "trade_date"
+      ],
+      "formula": "cross_section_rank(frame, ret_60d, trade_date): eligible values.rank(pct=True, method='average').",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        88,
+        93
+      ],
+      "window_sessions": 60,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks."
+    },
+    {
+      "ordinal": 36,
+      "name": "rps_120d",
+      "business_definition": "Same-date percentile rank of window return",
+      "inputs": [
+        "ret_120d",
+        "_pit_member",
+        "trade_date"
+      ],
+      "formula": "cross_section_rank(frame, ret_120d, trade_date): eligible values.rank(pct=True, method='average').",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        88,
+        93
+      ],
+      "window_sessions": 120,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks."
+    },
+    {
+      "ordinal": 37,
+      "name": "rps_20d",
+      "business_definition": "Same-date percentile rank of window return",
+      "inputs": [
+        "ret_20d",
+        "_pit_member",
+        "trade_date"
+      ],
+      "formula": "cross_section_rank(frame, ret_20d, trade_date): eligible values.rank(pct=True, method='average').",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        88,
+        93
+      ],
+      "window_sessions": 20,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks."
+    },
+    {
+      "ordinal": 38,
+      "name": "rps_20d_minus_rps_60d",
+      "business_definition": "Short-horizon minus medium-horizon relative strength",
+      "inputs": [
+        "rps_20d",
+        "rps_60d"
+      ],
+      "formula": "rps_20d - rps_60d",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        90,
+        93
+      ],
+      "window_sessions": 60,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks."
+    },
+    {
+      "ordinal": 39,
+      "name": "rps_industry_60d",
+      "business_definition": "Industry-relative percentile rank of window return",
+      "inputs": [
+        "ret_60d",
+        "trade_date",
+        "industry",
+        "_pit_member"
+      ],
+      "formula": "cross_section_rank(frame, ret_60d, [trade_date, industry]); average-tie percentile rank. Absent or entirely missing industry produces missing output.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        95,
+        106
+      ],
+      "window_sessions": 60,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks. Group by (trade_date, industry); missing group keys excluded by legacy pandas groupby."
+    },
+    {
+      "ordinal": 40,
+      "name": "rps_industry_120d",
+      "business_definition": "Industry-relative percentile rank of window return",
+      "inputs": [
+        "ret_120d",
+        "trade_date",
+        "industry",
+        "_pit_member"
+      ],
+      "formula": "cross_section_rank(frame, ret_120d, [trade_date, industry]); average-tie percentile rank. Absent or entirely missing industry produces missing output.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        95,
+        106
+      ],
+      "window_sessions": 120,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks. Group by (trade_date, industry); missing group keys excluded by legacy pandas groupby."
+    },
+    {
+      "ordinal": 41,
+      "name": "price_percentile_252d",
+      "business_definition": "Current price percentile in trailing observations",
+      "inputs": [
+        "close"
+      ],
+      "formula": "groupby(ts_code).close.transform(s => s.rolling(252, min_periods=60).rank(pct=True)); average ties, current row included.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        108,
+        111
+      ],
+      "window_sessions": 251,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 42,
+      "name": "distance_to_252d_low",
+      "business_definition": "Price relative to trailing minimum",
+      "inputs": [
+        "close"
+      ],
+      "formula": "close / groupby(ts_code).close.transform(s => s.rolling(252, min_periods=60).min()) - 1; this division has no explicit zero guard.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        113,
+        115
+      ],
+      "window_sessions": 251,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 43,
+      "name": "volume_up_down_ratio_60d",
+      "business_definition": "Average up-observation volume divided by average down-observation volume",
+      "inputs": [
+        "close",
+        "volume"
+      ],
+      "formula": "daily_ret=groupby(ts_code).close.pct_change(fill_method=None); up=(daily_ret>0).astype(float); up_volume=rolling_sum(volume*up,60,min_periods=20); up_count=rolling_sum(up,60,min_periods=20); down_volume=rolling_sum(volume*(up==0),60,min_periods=20); down_count=rolling_sum(up==0,60,min_periods=20); (up_volume/up_count)/(down_volume/down_count.replace(0,NA)); all rolling grouped by ts_code.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        120,
+        124
+      ],
+      "window_sessions": 60,
+      "lag_sessions": 0,
+      "missing_policy": "Flat or missing daily returns enter down side. Only down_count explicitly replaces zero; other invalid divisions retain legacy pandas behavior.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 44,
+      "name": "above_avg_volume_ratio_60d",
+      "business_definition": "Fraction of observations with volume above their trailing mean",
+      "inputs": [
+        "volume"
+      ],
+      "formula": "mean60=groupby(ts_code).volume.rolling(60,min_periods=20).mean(); above=(volume>mean60).astype(float); groupby(ts_code).above.rolling(60,min_periods=20).mean(); two inclusive windows require 118 prior rows for full closure.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        126,
+        131
+      ],
+      "window_sessions": 118,
+      "lag_sessions": 0,
+      "missing_policy": "Missing volume or rolling mean compares false and becomes 0 before outer rolling mean.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 45,
+      "name": "amount_ratio_20d",
+      "business_definition": "Current amount divided by trailing average amount",
+      "inputs": [
+        "amount"
+      ],
+      "formula": "amount / groupby(ts_code).amount.rolling(20,min_periods=10).mean().replace(0,NA)",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        133,
+        139
+      ],
+      "window_sessions": 19,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 46,
+      "name": "amount_ratio_60d",
+      "business_definition": "Current amount divided by trailing average amount",
+      "inputs": [
+        "amount"
+      ],
+      "formula": "amount / groupby(ts_code).amount.rolling(60,min_periods=20).mean().replace(0,NA)",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        133,
+        139
+      ],
+      "window_sessions": 59,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 47,
+      "name": "volume_spike_20d",
+      "business_definition": "Time-series volume zscore",
+      "inputs": [
+        "volume"
+      ],
+      "formula": "(volume - groupby(ts_code).volume.rolling(20,min_periods=10).mean()) / groupby(ts_code).volume.rolling(20,min_periods=10).std(ddof=1).replace(0,NaN)",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        141,
+        144
+      ],
+      "window_sessions": 19,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 48,
+      "name": "volume_stability_60d",
+      "business_definition": "Inverse coefficient of variation of volume",
+      "inputs": [
+        "volume"
+      ],
+      "formula": "mean=groupby(ts_code).volume.rolling(60,min_periods=20).mean().replace(0,NaN); std=groupby(ts_code).volume.rolling(60,min_periods=20).std(ddof=1).replace(0,NaN); 1/(std/mean)",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        146,
+        149
+      ],
+      "window_sessions": 59,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 49,
+      "name": "revenue_yoy_accel",
+      "business_definition": "Change in daily-panel growth from 252 observations earlier",
+      "inputs": [
+        "revenue_yoy"
+      ],
+      "formula": "revenue_yoy - groupby(ts_code)[revenue_yoy].shift(252); upstream revenue_yoy itself depends on a 252-row shift.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        131,
+        135
+      ],
+      "window_sessions": 504,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 50,
+      "name": "profit_yoy_accel",
+      "business_definition": "Change in daily-panel growth from 252 observations earlier",
+      "inputs": [
+        "profit_yoy"
+      ],
+      "formula": "profit_yoy - groupby(ts_code)[profit_yoy].shift(252); upstream profit_yoy itself depends on a 252-row shift.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        131,
+        135
+      ],
+      "window_sessions": 504,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 51,
+      "name": "roe_delta_756d",
+      "business_definition": "Change from 756 prior security-panel observations",
+      "inputs": [
+        "roe"
+      ],
+      "formula": "roe - groupby(ts_code)[roe].shift(756)",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        137,
+        141
+      ],
+      "window_sessions": 756,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 52,
+      "name": "net_margin_delta_756d",
+      "business_definition": "Change from 756 prior security-panel observations",
+      "inputs": [
+        "net_margin"
+      ],
+      "formula": "net_margin - groupby(ts_code)[net_margin].shift(756)",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        137,
+        141
+      ],
+      "window_sessions": 756,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 53,
+      "name": "ocf_margin",
+      "business_definition": "Operating cash flow divided by revenue",
+      "inputs": [
+        "op_cashflow",
+        "revenue"
+      ],
+      "formula": "op_cashflow / revenue.replace(0,NaN)",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        143,
+        145
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 54,
+      "name": "ret_20d",
+      "business_definition": "Close-price return over prior observations",
+      "inputs": [
+        "close"
+      ],
+      "formula": "groupby(ts_code).close.pct_change(20); legacy pandas default fill_method semantics, no explicit fill_method in this call.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        48,
+        50
+      ],
+      "window_sessions": 20,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve the frozen pandas pct_change default behavior; this call differs from explicit fill_method=None daily-return intermediates.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 55,
+      "name": "ret_60d",
+      "business_definition": "Close-price return over prior observations",
+      "inputs": [
+        "close"
+      ],
+      "formula": "groupby(ts_code).close.pct_change(60); legacy pandas default fill_method semantics, no explicit fill_method in this call.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        48,
+        50
+      ],
+      "window_sessions": 60,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve the frozen pandas pct_change default behavior; this call differs from explicit fill_method=None daily-return intermediates.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 56,
+      "name": "ret_120d",
+      "business_definition": "Close-price return over prior observations",
+      "inputs": [
+        "close"
+      ],
+      "formula": "groupby(ts_code).close.pct_change(120); legacy pandas default fill_method semantics, no explicit fill_method in this call.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        48,
+        50
+      ],
+      "window_sessions": 120,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve the frozen pandas pct_change default behavior; this call differs from explicit fill_method=None daily-return intermediates.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 57,
+      "name": "volume_ratio_20d",
+      "business_definition": "Current volume relative to complete-window mean",
+      "inputs": [
+        "volume"
+      ],
+      "formula": "volume / groupby(ts_code).volume.rolling(20).mean().replace(0,NA); min_periods defaults to 20.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        52,
+        53
+      ],
+      "window_sessions": 19,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 58,
+      "name": "volume_ratio_60d",
+      "business_definition": "Current volume relative to complete-window mean",
+      "inputs": [
+        "volume"
+      ],
+      "formula": "volume / groupby(ts_code).volume.rolling(60).mean().replace(0,NA); min_periods defaults to 60.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        52,
+        53
+      ],
+      "window_sessions": 59,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 59,
+      "name": "distance_to_120d_high",
+      "business_definition": "Price relative to trailing high",
+      "inputs": [
+        "close"
+      ],
+      "formula": "close / groupby(ts_code).close.rolling(120).max() - 1; min_periods defaults to 120; no explicit zero guard.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        55,
+        56
+      ],
+      "window_sessions": 119,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 60,
+      "name": "distance_to_250d_high",
+      "business_definition": "Price relative to trailing high",
+      "inputs": [
+        "close"
+      ],
+      "formula": "close / groupby(ts_code).close.rolling(250).max() - 1; min_periods defaults to 250; no explicit zero guard.",
+      "source_file": "qsys/feature/groups/relative_strength.py",
+      "source_lines": [
+        55,
+        56
+      ],
+      "window_sessions": 249,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 61,
+      "name": "continuation_candidate_score",
+      "business_definition": "Composite continuation setup score",
+      "inputs": [
+        "trend_smoothness_60d",
+        "rps_120d",
+        "rps_20d",
+        "price_percentile_252d",
+        "_pit_member"
+      ],
+      "formula": "(CS_rank(fillna(trend_smoothness_60d,0).clip(-1,1)) + fillna(rps_120d,0) + 0.5*fillna(price_percentile_252d,0) + 0.3*(1-fillna(rps_20d,0))) / 2.8; CS_rank uses trade_date and percentile rank.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        153,
+        170
+      ],
+      "window_sessions": 251,
+      "lag_sessions": 0,
+      "missing_policy": "All four dependency columns must exist; fill values are in formula.",
+      "outlier_policy": "Smoothness is clipped to [-1,1] before its cross-sectional rank.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks."
+    },
+    {
+      "ordinal": 62,
+      "name": "repair_candidate_score",
+      "business_definition": "Composite low-valuation and near-low setup score",
+      "inputs": [
+        "pe_percentile_756d",
+        "distance_to_252d_low",
+        "price_percentile_252d",
+        "rps_120d"
+      ],
+      "formula": "((1-fillna(pe_percentile_756d,0.5)) + 0.5*(1-fillna(distance_to_252d_low,0).clip(0,1)) + 0.3*fillna(rps_120d,0)) / 1.8; first three columns required to enter branch; rps_120d contributes scalar 0 if absent. price_percentile_252d is branch prerequisite but unused in arithmetic.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        172,
+        184
+      ],
+      "window_sessions": 755,
+      "lag_sessions": 0,
+      "missing_policy": "Explicit fill values and absent-column fallback in formula.",
+      "outlier_policy": "Distance-to-low component clipped to [0,1].",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks. Inherited through rps_120d."
+    },
+    {
+      "ordinal": 63,
+      "name": "overheat_risk_score",
+      "business_definition": "Composite high-price and strong-return heat score",
+      "inputs": [
+        "price_percentile_252d",
+        "rps_120d",
+        "volume_spike_20d"
+      ],
+      "formula": "0.4*fillna(price_percentile_252d,0)+0.4*fillna(rps_120d,0)+0.2*fillna(volume_spike_20d,0).clip(0,3)/3; first two columns required; volume component contributes scalar 0 if column absent.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        186,
+        192
+      ],
+      "window_sessions": 251,
+      "lag_sessions": 0,
+      "missing_policy": "Explicit fill values and absent-column fallback in formula.",
+      "outlier_policy": "Volume spike component clipped to [0,3].",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks. Inherited through rps_120d."
+    },
+    {
+      "ordinal": 64,
+      "name": "value_trap_risk_score",
+      "business_definition": "Composite low-valuation weak-price and worsening-financial score",
+      "inputs": [
+        "pe_percentile_756d",
+        "price_percentile_252d",
+        "roe_delta_756d",
+        "net_margin_delta_756d"
+      ],
+      "formula": "0.3*(1-fillna(pe_percentile_756d,0.5))+0.3*(1-fillna(price_percentile_252d,0.5))+0.2*I(fillna(roe_delta_756d,0)<-0.01)+0.2*I(fillna(net_margin_delta_756d,0)<-0.01); each delta term omitted if its column absent; first two columns required.",
+      "source_file": "qsys/feature/groups/fundamental_context.py",
+      "source_lines": [
+        194,
+        205
+      ],
+      "window_sessions": 756,
+      "lag_sessions": 0,
+      "missing_policy": "Explicit fill values and absent-column fallback in formula.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 65,
+      "name": "margin_eligible",
+      "business_definition": "Availability flag for margin balance",
+      "inputs": [
+        "margin_balance"
+      ],
+      "formula": "margin_balance.notna().astype(float); data absence is treated as non-eligibility by legacy implementation.",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        75,
+        77
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Missing margin balance becomes 0, present balance becomes 1.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 66,
+      "name": "margin_balance_to_float_mv",
+      "business_definition": "Margin balance relative to float market value",
+      "inputs": [
+        "margin_balance",
+        "circ_mv",
+        "total_mv"
+      ],
+      "formula": "denominator is circ_mv if the column exists, otherwise total_mv if its column exists; replace_inf(margin_balance/denominator.replace(0,NaN),NaN). No row-wise circ_mv-to-total_mv coalesce.",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        79,
+        88
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 67,
+      "name": "margin_balance_chg_20d",
+      "business_definition": "Margin balance relative change over prior observations",
+      "inputs": [
+        "margin_balance"
+      ],
+      "formula": "replace_inf(margin_balance/groupby(ts_code).margin_balance.shift(20).replace(0,NaN)-1,NaN)",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        90,
+        97
+      ],
+      "window_sessions": 20,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 68,
+      "name": "margin_balance_chg_60d",
+      "business_definition": "Margin balance relative change over prior observations",
+      "inputs": [
+        "margin_balance"
+      ],
+      "formula": "replace_inf(margin_balance/groupby(ts_code).margin_balance.shift(60).replace(0,NaN)-1,NaN)",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        90,
+        97
+      ],
+      "window_sessions": 60,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 69,
+      "name": "margin_buy_intensity_20d",
+      "business_definition": "Rolling margin purchases divided by traded amount",
+      "inputs": [
+        "margin_buy_amount",
+        "amount"
+      ],
+      "formula": "replace_inf(groupby(ts_code).margin_buy_amount.rolling(20,min_periods=5).sum() / groupby(ts_code).amount.rolling(20,min_periods=5).sum().replace(0,NaN),NaN)",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        99,
+        107
+      ],
+      "window_sessions": 19,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 70,
+      "name": "margin_repay_to_buy_20d",
+      "business_definition": "Rolling margin repayments divided by purchases",
+      "inputs": [
+        "margin_repay_amount",
+        "margin_buy_amount"
+      ],
+      "formula": "replace_inf(groupby(ts_code).margin_repay_amount.rolling(20,min_periods=5).sum() / groupby(ts_code).margin_buy_amount.rolling(20,min_periods=5).sum().replace(0,NaN),NaN)",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        109,
+        117
+      ],
+      "window_sessions": 19,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula."
+    },
+    {
+      "ordinal": 71,
+      "name": "margin_crowding_score",
+      "business_definition": "Composite margin balance level and growth crowding",
+      "inputs": [
+        "margin_balance_to_float_mv",
+        "margin_balance_chg_60d",
+        "_pit_member"
+      ],
+      "formula": "Z0(margin_balance_to_float_mv)+Z0(margin_balance_chg_60d). Z0(x)=same-date cross-sectional zscore of x.fillna(0), ddof=0; NaN std or std<1e-12 returns all zeros.",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        119,
+        124
+      ],
+      "window_sessions": 60,
+      "lag_sessions": 0,
+      "missing_policy": "Z0(x)=same-date cross-sectional zscore of x.fillna(0), ddof=0; NaN std or std<1e-12 returns all zeros.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks."
+    },
+    {
+      "ordinal": 72,
+      "name": "margin_trend_confirm_score",
+      "business_definition": "Positive price trend confirmed by margin growth",
+      "inputs": [
+        "margin_balance_chg_60d",
+        "ret_60d",
+        "_pit_member"
+      ],
+      "formula": "Z0(margin_balance_chg_60d)*Z0(ret_60d).clip(lower=0). Z0(x)=same-date cross-sectional zscore of x.fillna(0), ddof=0; NaN std or std<1e-12 returns all zeros.",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        126,
+        130
+      ],
+      "window_sessions": 60,
+      "lag_sessions": 0,
+      "missing_policy": "Z0(x)=same-date cross-sectional zscore of x.fillna(0), ddof=0; NaN std or std<1e-12 returns all zeros.",
+      "outlier_policy": "Price zscore lower-clipped to 0.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks."
+    },
+    {
+      "ordinal": 73,
+      "name": "margin_overheat_risk_score",
+      "business_definition": "Margin crowding interacting with positive long return",
+      "inputs": [
+        "margin_crowding_score",
+        "ret_120d",
+        "_pit_member"
+      ],
+      "formula": "Z0(margin_crowding_score)*Z0(ret_120d).clip(lower=0). Z0(x)=same-date cross-sectional zscore of x.fillna(0), ddof=0; NaN std or std<1e-12 returns all zeros.",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        132,
+        136
+      ],
+      "window_sessions": 120,
+      "lag_sessions": 0,
+      "missing_policy": "Z0(x)=same-date cross-sectional zscore of x.fillna(0), ddof=0; NaN std or std<1e-12 returns all zeros.",
+      "outlier_policy": "Price zscore lower-clipped to 0.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks."
+    },
+    {
+      "ordinal": 74,
+      "name": "holder_num_chg_qoq",
+      "business_definition": "Holder-count relative change from previous announcement",
+      "inputs": [
+        "holder_num",
+        "holder_num_prev_ann"
+      ],
+      "formula": "replace_inf(holder_num/holder_num_prev_ann.replace(0,NaN)-1,NaN)",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        273,
+        277
+      ],
+      "window_sessions": null,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Legacy shareholder loader computes previous values on each security's ann_date-ordered announcement rows, then backward as-of merges with exact-date matches allowed. No fixed trading-session lag. Duplicate/revision identity requires source artifacts.",
+      "window_note": "Announcement-event lag, not a fixed number of trading sessions."
+    },
+    {
+      "ordinal": 75,
+      "name": "holder_num_chg_2q",
+      "business_definition": "Holder-count relative change from second previous announcement",
+      "inputs": [
+        "holder_num",
+        "holder_num_prev2_ann"
+      ],
+      "formula": "replace_inf(holder_num/holder_num_prev2_ann.replace(0,NaN)-1,NaN)",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        278,
+        281
+      ],
+      "window_sessions": null,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Legacy shareholder loader computes previous values on each security's ann_date-ordered announcement rows, then backward as-of merges with exact-date matches allowed. No fixed trading-session lag. Duplicate/revision identity requires source artifacts.",
+      "window_note": "Announcement-event lag, not a fixed number of trading sessions."
+    },
+    {
+      "ordinal": 76,
+      "name": "avg_shares_per_holder_chg_qoq",
+      "business_definition": "Inverse holder-count change, historical share-count cancellation",
+      "inputs": [
+        "holder_num_prev_ann",
+        "holder_num"
+      ],
+      "formula": "replace_inf(holder_num_prev_ann/holder_num.replace(0,NaN)-1,NaN); current total_share canceled algebraically in the historical formula.",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        283,
+        295
+      ],
+      "window_sessions": null,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Legacy shareholder loader computes previous values on each security's ann_date-ordered announcement rows, then backward as-of merges with exact-date matches allowed. No fixed trading-session lag. Duplicate/revision identity requires source artifacts.",
+      "window_note": "Announcement-event lag, not a fixed number of trading sessions."
+    },
+    {
+      "ordinal": 77,
+      "name": "top10_holder_ratio_chg_qoq",
+      "business_definition": "Top-ten holder-ratio relative change from previous announcement",
+      "inputs": [
+        "top10_holder_ratio",
+        "top10_holder_ratio_prev_ann"
+      ],
+      "formula": "replace_inf(top10_holder_ratio/top10_holder_ratio_prev_ann.replace(0,NaN)-1,NaN)",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        297,
+        301
+      ],
+      "window_sessions": null,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Legacy shareholder loader computes previous values on each security's ann_date-ordered announcement rows, then backward as-of merges with exact-date matches allowed. No fixed trading-session lag. Duplicate/revision identity requires source artifacts.",
+      "window_note": "Announcement-event lag, not a fixed number of trading sessions."
+    },
+    {
+      "ordinal": 78,
+      "name": "holder_concentration_score",
+      "business_definition": "Average standardized shareholder concentration changes",
+      "inputs": [
+        "holder_num_chg_qoq",
+        "avg_shares_per_holder_chg_qoq",
+        "top10_holder_ratio_chg_qoq",
+        "_pit_member"
+      ],
+      "formula": "Mean of existing-column components [-Z0(holder_num_chg_qoq), Z0(avg_shares_per_holder_chg_qoq), Z0(top10_holder_ratio_chg_qoq)]; only emit if at least 2 component columns exist. Z0(x)=same-date cross-sectional zscore of x.fillna(0), ddof=0; NaN std or std<1e-12 returns all zeros.",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        313,
+        322
+      ],
+      "window_sessions": null,
+      "lag_sessions": 0,
+      "missing_policy": "Z0(x)=same-date cross-sectional zscore of x.fillna(0), ddof=0; NaN std or std<1e-12 returns all zeros. Component inclusion depends on column existence, not per-row validity.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks.",
+      "source_publication_policy": "Legacy shareholder loader computes previous values on each security's ann_date-ordered announcement rows, then backward as-of merges with exact-date matches allowed. No fixed trading-session lag. Duplicate/revision identity requires source artifacts."
+    },
+    {
+      "ordinal": 79,
+      "name": "holder_squeeze_score",
+      "business_definition": "Concentrating holder count interacting with positive return",
+      "inputs": [
+        "holder_num_chg_qoq",
+        "ret_60d",
+        "_pit_member"
+      ],
+      "formula": "-Z0(holder_num_chg_qoq)*Z0(ret_60d).clip(lower=0). Z0(x)=same-date cross-sectional zscore of x.fillna(0), ddof=0; NaN std or std<1e-12 returns all zeros.",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        324,
+        329
+      ],
+      "window_sessions": null,
+      "lag_sessions": 0,
+      "missing_policy": "Z0(x)=same-date cross-sectional zscore of x.fillna(0), ddof=0; NaN std or std<1e-12 returns all zeros.",
+      "outlier_policy": "Price zscore lower-clipped to 0.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks.",
+      "source_publication_policy": "Legacy shareholder loader computes previous values on each security's ann_date-ordered announcement rows, then backward as-of merges with exact-date matches allowed. No fixed trading-session lag. Duplicate/revision identity requires source artifacts.",
+      "window_note": "Return branch needs 60 prior rows; shareholder event history has no fixed session bound."
+    },
+    {
+      "ordinal": 80,
+      "name": "holder_price_confirm_score",
+      "business_definition": "Concentration score interacting with positive long return",
+      "inputs": [
+        "holder_concentration_score",
+        "ret_120d",
+        "_pit_member"
+      ],
+      "formula": "Z0(holder_concentration_score)*Z0(ret_120d).clip(lower=0). Z0(x)=same-date cross-sectional zscore of x.fillna(0), ddof=0; NaN std or std<1e-12 returns all zeros.",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        331,
+        336
+      ],
+      "window_sessions": null,
+      "lag_sessions": 0,
+      "missing_policy": "Z0(x)=same-date cross-sectional zscore of x.fillna(0), ddof=0; NaN std or std<1e-12 returns all zeros.",
+      "outlier_policy": "Price zscore lower-clipped to 0.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks.",
+      "source_publication_policy": "Legacy shareholder loader computes previous values on each security's ann_date-ordered announcement rows, then backward as-of merges with exact-date matches allowed. No fixed trading-session lag. Duplicate/revision identity requires source artifacts.",
+      "window_note": "Return branch needs 120 prior rows; shareholder event history has no fixed session bound."
+    },
+    {
+      "ordinal": 81,
+      "name": "holder_num_stale_days",
+      "business_definition": "Calendar days since holder-count announcement",
+      "inputs": [
+        "trade_date",
+        "holder_real_ann_date"
+      ],
+      "formula": "(to_datetime(trade_date)-to_datetime(holder_real_ann_date,errors='coerce')).dt.days.clip(lower=0)",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        303,
+        307
+      ],
+      "window_sessions": null,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Legacy shareholder loader computes previous values on each security's ann_date-ordered announcement rows, then backward as-of merges with exact-date matches allowed. No fixed trading-session lag. Duplicate/revision identity requires source artifacts.",
+      "window_note": "Depends on prior announcement event; elapsed age is calendar days."
+    },
+    {
+      "ordinal": 82,
+      "name": "top10_holder_stale_days",
+      "business_definition": "Calendar days since top-ten-holder announcement",
+      "inputs": [
+        "trade_date",
+        "top10_real_ann_date"
+      ],
+      "formula": "(to_datetime(trade_date)-to_datetime(top10_real_ann_date,errors='coerce')).dt.days.clip(lower=0)",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        308,
+        311
+      ],
+      "window_sessions": null,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Legacy shareholder loader computes previous values on each security's ann_date-ordered announcement rows, then backward as-of merges with exact-date matches allowed. No fixed trading-session lag. Duplicate/revision identity requires source artifacts.",
+      "window_note": "Depends on prior announcement event; elapsed age is calendar days."
+    },
+    {
+      "ordinal": 83,
+      "name": "top10_holder_ratio",
+      "business_definition": "Latest as-of top-ten holder ratio",
+      "inputs": [
+        "top10_ratio",
+        "ann_date"
+      ],
+      "formula": "Backward merge_asof on security and ann_date; output top10_ratio as top10_holder_ratio; allow exact-date matches.",
+      "source_file": "qsys/feature/groups/value_growth_v3a.py",
+      "source_lines": [
+        231,
+        253
+      ],
+      "window_sessions": null,
+      "lag_sessions": 0,
+      "missing_policy": "Missing events or any loader exception produce NaN.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Legacy shareholder loader computes previous values on each security's ann_date-ordered announcement rows, then backward as-of merges with exact-date matches allowed. No fixed trading-session lag. Duplicate/revision identity requires source artifacts.",
+      "window_note": "Requires latest prior event, not fixed session history."
+    },
+    {
+      "ordinal": 84,
+      "name": "amount_log",
+      "business_definition": "Logarithm of nonnegative traded amount",
+      "inputs": [
+        "amount"
+      ],
+      "formula": "BASE: log1p(amount.clip(lower=0)); FINAL selected column: same-date winsorize(BASE, q=.01,.99).",
+      "source_file": "qsys/feature/groups/liquidity.py",
+      "source_lines": [
+        16,
+        16
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "After base calculation, builder overwrites this selected column with eligible same-date 1%/99% quantile winsorization; numeric coercion to float64 and linear quantile defaults. No replacement by its separately generated _z or _rank companions.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks. Used only for final in-place winsorization of this otherwise per-security base feature.",
+      "additional_sources": [
+        {
+          "source_file": "qsys/feature/builder.py",
+          "source_lines": [
+            121,
+            142
+          ]
+        },
+        {
+          "source_file": "qsys/feature/transforms.py",
+          "source_lines": [
+            57,
+            99
+          ]
+        }
+      ]
+    },
+    {
+      "ordinal": 85,
+      "name": "amount_zscore_20",
+      "business_definition": "Population-std time-series amount zscore",
+      "inputs": [
+        "amount"
+      ],
+      "formula": "BASE: (amount-groupby(ts_code).amount.rolling(20,min_periods=20).mean())/groupby(ts_code).amount.rolling(20,min_periods=20).std(ddof=0).replace(0,NaN); FINAL: same-date winsorize(BASE,q=.01,.99).",
+      "source_file": "qsys/feature/groups/liquidity.py",
+      "source_lines": [
+        17,
+        17
+      ],
+      "window_sessions": 19,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "After base calculation, builder overwrites this selected column with eligible same-date 1%/99% quantile winsorization; numeric coercion to float64 and linear quantile defaults. No replacement by its separately generated _z or _rank companions.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks. Used only for final in-place winsorization of this otherwise per-security base feature.",
+      "additional_sources": [
+        {
+          "source_file": "qsys/feature/builder.py",
+          "source_lines": [
+            121,
+            142
+          ]
+        },
+        {
+          "source_file": "qsys/feature/transforms.py",
+          "source_lines": [
+            57,
+            99
+          ]
+        },
+        {
+          "source_file": "qsys/feature/transforms.py",
+          "source_lines": [
+            102,
+            106
+          ]
+        }
+      ]
+    },
+    {
+      "ordinal": 86,
+      "name": "turnover_rate",
+      "business_definition": "Native turnover rate",
+      "inputs": [
+        "$turnover_rate"
+      ],
+      "formula": "Pass through native $turnover_rate under semantic column turnover_rate; not included in builder's standardization list.",
+      "source_file": "qsys/feature/groups/liquidity.py",
+      "source_lines": [
+        14,
+        14
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "additional_sources": [
+        {
+          "source_file": "qsys/data/adapter.py",
+          "source_lines": [
+            393,
+            402
+          ]
+        }
+      ]
+    },
+    {
+      "ordinal": 87,
+      "name": "turnover_acceleration",
+      "business_definition": "Turnover-rate change over three prior observations",
+      "inputs": [
+        "turnover_rate"
+      ],
+      "formula": "BASE: turnover_rate-groupby(ts_code).turnover_rate.shift(3); absent turnover column produces NaN. FINAL: same-date winsorize(BASE,q=.01,.99).",
+      "source_file": "qsys/feature/groups/liquidity.py",
+      "source_lines": [
+        20,
+        23
+      ],
+      "window_sessions": 3,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "After base calculation, builder overwrites this selected column with eligible same-date 1%/99% quantile winsorization; numeric coercion to float64 and linear quantile defaults. No replacement by its separately generated _z or _rank companions.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks. Used only for final in-place winsorization of this otherwise per-security base feature.",
+      "additional_sources": [
+        {
+          "source_file": "qsys/feature/builder.py",
+          "source_lines": [
+            121,
+            142
+          ]
+        },
+        {
+          "source_file": "qsys/feature/transforms.py",
+          "source_lines": [
+            57,
+            99
+          ]
+        }
+      ]
+    },
+    {
+      "ordinal": 88,
+      "name": "illiquidity",
+      "business_definition": "Absolute daily return per unit traded amount",
+      "inputs": [
+        "close",
+        "amount"
+      ],
+      "formula": "BASE: abs(groupby(ts_code).close.pct_change(fill_method=None))/amount.replace(0,NaN); FINAL: same-date winsorize(BASE,q=.01,.99).",
+      "source_file": "qsys/feature/groups/liquidity.py",
+      "source_lines": [
+        11,
+        24
+      ],
+      "window_sessions": 1,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "After base calculation, builder overwrites this selected column with eligible same-date 1%/99% quantile winsorization; numeric coercion to float64 and linear quantile defaults. No replacement by its separately generated _z or _rank companions.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks. Used only for final in-place winsorization of this otherwise per-security base feature.",
+      "additional_sources": [
+        {
+          "source_file": "qsys/feature/builder.py",
+          "source_lines": [
+            121,
+            142
+          ]
+        },
+        {
+          "source_file": "qsys/feature/transforms.py",
+          "source_lines": [
+            57,
+            99
+          ]
+        }
+      ]
+    },
+    {
+      "ordinal": 89,
+      "name": "volume_shock_3",
+      "business_definition": "Volume divided by short complete-window mean",
+      "inputs": [
+        "volume"
+      ],
+      "formula": "BASE: volume/groupby(ts_code).volume.rolling(3,min_periods=3).mean(); no explicit zero guard. FINAL: same-date winsorize(BASE,q=.01,.99).",
+      "source_file": "qsys/feature/groups/liquidity.py",
+      "source_lines": [
+        18,
+        19
+      ],
+      "window_sessions": 2,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "After base calculation, builder overwrites this selected column with eligible same-date 1%/99% quantile winsorization; numeric coercion to float64 and linear quantile defaults. No replacement by its separately generated _z or _rank companions.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks. Used only for final in-place winsorization of this otherwise per-security base feature.",
+      "additional_sources": [
+        {
+          "source_file": "qsys/feature/builder.py",
+          "source_lines": [
+            121,
+            142
+          ]
+        },
+        {
+          "source_file": "qsys/feature/transforms.py",
+          "source_lines": [
+            57,
+            99
+          ]
+        }
+      ]
+    },
+    {
+      "ordinal": 90,
+      "name": "volume_shock_5",
+      "business_definition": "Volume divided by short complete-window mean",
+      "inputs": [
+        "volume"
+      ],
+      "formula": "BASE: volume/groupby(ts_code).volume.rolling(5,min_periods=5).mean(); no explicit zero guard. FINAL: same-date winsorize(BASE,q=.01,.99).",
+      "source_file": "qsys/feature/groups/liquidity.py",
+      "source_lines": [
+        18,
+        19
+      ],
+      "window_sessions": 4,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "After base calculation, builder overwrites this selected column with eligible same-date 1%/99% quantile winsorization; numeric coercion to float64 and linear quantile defaults. No replacement by its separately generated _z or _rank companions.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks. Used only for final in-place winsorization of this otherwise per-security base feature.",
+      "additional_sources": [
+        {
+          "source_file": "qsys/feature/builder.py",
+          "source_lines": [
+            121,
+            142
+          ]
+        },
+        {
+          "source_file": "qsys/feature/transforms.py",
+          "source_lines": [
+            57,
+            99
+          ]
+        }
+      ]
+    },
+    {
+      "ordinal": 91,
+      "name": "amount_log_ind_zscore",
+      "business_definition": "Within-industry liquidity sample-std zscore",
+      "inputs": [
+        "amount_log_before_final_winsorization",
+        "trade_date",
+        "industry",
+        "_pit_member"
+      ],
+      "formula": "x=amount_log_before_final_winsorization; mean/std over eligible (trade_date,industry), std ddof=1; z=(x-mean)/std.replace(0,NaN); mask to 0 wherever (std.isna() OR std==0) AND x.notna(); this mask also affects rows excluded from statistics. No final winsorization of this selected column.",
+      "source_file": "qsys/feature/groups/liquidity.py",
+      "source_lines": [
+        30,
+        39
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Absent industry column -> NaN. Zero/missing group std plus nonmissing x -> 0, including legacy mask behavior for absent groups or ineligible rows; otherwise preserve NaN.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks. Group by date and industry. amount_log input is its raw log1p output before builder's later in-place winsorization."
+    },
+    {
+      "ordinal": 92,
+      "name": "turnover_rate_ind_zscore",
+      "business_definition": "Within-industry liquidity sample-std zscore",
+      "inputs": [
+        "turnover_rate",
+        "trade_date",
+        "industry",
+        "_pit_member"
+      ],
+      "formula": "x=turnover_rate; mean/std over eligible (trade_date,industry), std ddof=1; z=(x-mean)/std.replace(0,NaN); mask to 0 wherever (std.isna() OR std==0) AND x.notna(); this mask also affects rows excluded from statistics. No final winsorization of this selected column.",
+      "source_file": "qsys/feature/groups/liquidity.py",
+      "source_lines": [
+        41,
+        56
+      ],
+      "window_sessions": 0,
+      "lag_sessions": 0,
+      "missing_policy": "Absent industry column -> NaN. Zero/missing group std plus nonmissing x -> 0, including legacy mask behavior for absent groups or ineligible rows; otherwise preserve NaN.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Only rows selected by the explicit _pit_member mask influence same-date statistics; without the mask legacy code uses all input rows. Exact historical universe/membership artifact must be bound separately; average-tie percentile ranks. Group by date and industry. amount_log input is its raw log1p output before builder's later in-place winsorization."
+    },
+    {
+      "ordinal": 93,
+      "name": "ttm_revenue_yoy",
+      "business_definition": "Growth of trailing four single-quarter revenue observations",
+      "inputs": [
+        "income.revenue",
+        "income.end_date",
+        "income.availability_date",
+        "income.security"
+      ],
+      "formula": "For each cumulative field: Q1 single_q=cumulative; other quarters single_q=current cumulative-prev cumulative only if previous row is same fiscal year and end_date gap<=125 days; else NaN. TTM=groupby(security).revenue_single_q.rolling(4,min_periods=4).sum(); TTM/groupby(security).TTM.shift(4).replace(0,NaN)-1; shift(4) is quarterly-table row lag, not an independently checked fiscal-key join.",
+      "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+      "source_lines": [
+        326,
+        343
+      ],
+      "window_sessions": null,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Income quarterly facts ordered by security/end_date. Audited mode validates an explicit first-available sidecar and makes values visible strictly after maximum dependency availability; legacy mode selects last ann_date per report period and allows exact-date as-of matches. Emit only newer report-period innovations per availability stream.",
+      "additional_sources": [
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            271,
+            313
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            409,
+            431
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            503,
+            544
+          ]
+        }
+      ],
+      "window_note": "Eight quarterly single-quarter observations plus cumulative decomposition dependencies; no fixed trading-session bound."
+    },
+    {
+      "ordinal": 94,
+      "name": "single_q_revenue_yoy",
+      "business_definition": "Relative change from fourth previous single-quarter revenue row",
+      "inputs": [
+        "income.revenue",
+        "income.end_date",
+        "income.availability_date",
+        "income.security"
+      ],
+      "formula": "For each cumulative field: Q1 single_q=cumulative; other quarters single_q=current cumulative-prev cumulative only if previous row is same fiscal year and end_date gap<=125 days; else NaN. revenue_single_q/groupby(security).revenue_single_q.shift(4).replace(0,NaN)-1.",
+      "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+      "source_lines": [
+        315,
+        324
+      ],
+      "window_sessions": null,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Income quarterly facts ordered by security/end_date. Audited mode validates an explicit first-available sidecar and makes values visible strictly after maximum dependency availability; legacy mode selects last ann_date per report period and allows exact-date as-of matches. Emit only newer report-period innovations per availability stream.",
+      "additional_sources": [
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            271,
+            313
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            409,
+            431
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            503,
+            544
+          ]
+        }
+      ],
+      "window_note": "Current and fourth previous quarterly rows plus decomposition dependencies; no fixed trading-session bound."
+    },
+    {
+      "ordinal": 95,
+      "name": "is_profitable_ttm",
+      "business_definition": "Positive trailing-four-quarter net-income flag",
+      "inputs": [
+        "income.n_income",
+        "income.end_date",
+        "income.availability_date",
+        "income.security"
+      ],
+      "formula": "For each cumulative field: Q1 single_q=cumulative; other quarters single_q=current cumulative-prev cumulative only if previous row is same fiscal year and end_date gap<=125 days; else NaN. TTM_income=groupby(security).n_income_single_q.rolling(4,min_periods=4).sum(); (TTM_income>0).astype(float); missing TTM_income compares false and becomes 0.",
+      "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+      "source_lines": [
+        345,
+        357
+      ],
+      "window_sessions": null,
+      "lag_sessions": 0,
+      "missing_policy": "Legacy formula maps missing TTM net income to 0 before daily as-of merge. Missing daily event may still produce NaN; do not describe all 0 values as proven nonprofitable.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Income quarterly facts ordered by security/end_date. Audited mode validates an explicit first-available sidecar and makes values visible strictly after maximum dependency availability; legacy mode selects last ann_date per report period and allows exact-date as-of matches. Emit only newer report-period innovations per availability stream.",
+      "additional_sources": [
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            271,
+            313
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            409,
+            431
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            503,
+            544
+          ]
+        }
+      ],
+      "window_note": "Four quarterly observations plus cumulative decomposition dependencies; no fixed trading-session bound."
+    },
+    {
+      "ordinal": 96,
+      "name": "gross_margin_delta_yoy",
+      "business_definition": "Single-quarter gross-margin change from fourth previous row",
+      "inputs": [
+        "income.revenue",
+        "income.oper_cost",
+        "income.end_date",
+        "income.availability_date",
+        "income.security"
+      ],
+      "formula": "For each cumulative field: Q1 single_q=cumulative; other quarters single_q=current cumulative-prev cumulative only if previous row is same fiscal year and end_date gap<=125 days; else NaN. GM=(revenue_single_q-oper_cost_single_q)/revenue_single_q.replace(0,NaN); GM-groupby(security).GM.shift(4).",
+      "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+      "source_lines": [
+        359,
+        375
+      ],
+      "window_sessions": null,
+      "lag_sessions": 0,
+      "missing_policy": "Preserve missing values unless the formula explicitly replaces them; zero denominators explicitly replaced by NaN where stated. Adapter may emit NaN for absent derived columns; later model-input fillna(0.0) and float32 conversion are separate stages.",
+      "outlier_policy": "No additional outlier treatment in this formula.",
+      "reference_universe_policy": "Single-security time series; no cross-sectional reference universe enters this formula.",
+      "source_publication_policy": "Income quarterly facts ordered by security/end_date. Audited mode validates an explicit first-available sidecar and makes values visible strictly after maximum dependency availability; legacy mode selects last ann_date per report period and allows exact-date as-of matches. Emit only newer report-period innovations per availability stream.",
+      "additional_sources": [
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            271,
+            313
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            409,
+            431
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            503,
+            544
+          ]
+        }
+      ],
+      "window_note": "Current and fourth previous quarterly rows plus decomposition dependencies; no fixed trading-session bound."
+    }
+  ]
+}

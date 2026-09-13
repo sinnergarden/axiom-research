@@ -1,0 +1,571 @@
+{
+  "schema_version": "research_r0_core_capability_map_v1",
+  "scope": "Minimum Financial RC E0 capabilities inferred from frozen source and required by Patch A. This file is a requirements artifact, not an executor or completed test suite.",
+  "evidence_path_roots": {
+    "legacy": "/home/liuming/.openclaw/workspace/SysQ",
+    "design": "/home/liuming/workspace/axiom"
+  },
+  "source_revision": "c969c74a66b148fa66396c3896e48760004683d4",
+  "reference_fixture_policy": "Entries name required future fixtures; no fixtures have been implemented or executed in this read-only semantic-authoring subtask.",
+  "not_demonstrated_by_96_column_recipe": [
+    "EMA",
+    "generic neutralization",
+    "distributed DAG cache",
+    "portfolio/order execution",
+    "backtest runtime"
+  ],
+  "requirements": [
+    {
+      "name": "explicit_frames_and_key_time_schema_validation",
+      "required_by": [
+        "all 96 FeatureFrame columns",
+        "PredictionFrame",
+        "SignalFrame"
+      ],
+      "input_semantics": "FactBatch carries explicit security/session keys, calendar identity, knowledge cutoff, source availability, units, ordered schema and immutable Data/View refs. Input order must be deterministic before grouped row operations.",
+      "output_semantics": "Validated FeatureFrame, PredictionFrame and SignalFrame with stable keys, column order, stage and lineage; invalid or ambiguous contracts fail closed.",
+      "edge_cases": [
+        "Duplicate keys",
+        "Unsorted per-security rows",
+        "Missing sessions versus missing values",
+        "Mixed units or adjusted-price bases",
+        "Unknown source revision",
+        "Same name with changed formula/window/lag",
+        "Unknown universe/cutoff"
+      ],
+      "reference_fixture": "REQUIRED_NOT_CREATED: duplicate/unsorted keys, reordered 96 columns, unit/cutoff mismatch and clean valid frames.",
+      "status": "DECISION",
+      "evidence": [
+        {
+          "source_file": "design/07_重要补丁_A.md",
+          "source_lines": [
+            593,
+            615
+          ]
+        },
+        {
+          "source_file": "design/05_axiom_research.md",
+          "source_lines": [
+            49,
+            100
+          ]
+        },
+        {
+          "source_file": "qsys/feature/registry.py",
+          "source_lines": [
+            336,
+            377
+          ]
+        }
+      ]
+    },
+    {
+      "name": "grouped_shift_and_finite_rolling",
+      "required_by": [
+        "ret_20d/60d/120d",
+        "financial daily-panel deltas and yoy",
+        "valuation/price percentiles",
+        "trend/volume/margin rolling features"
+      ],
+      "input_semantics": "Per-security continuous historical rows. Each operator freezes observation domain, ordering, inclusive endpoint, window, min_periods, ddof and missing semantics. Source facts must prove whether row lag equals exchange-session lag.",
+      "output_semantics": "Stable shift/pct_change and rolling mean/sum/std/min/max/median/percentile-rank outputs aligned to input keys.",
+      "edge_cases": [
+        "756 prior observations plus current row",
+        "Nested120 windows require238 prior rows",
+        "Nested60 windows require118 prior rows",
+        "Daily return introduces one extra prior close",
+        "ddof0 vs ddof1",
+        "partial warmup",
+        "zero variance",
+        "average ties",
+        "legacy default pct_change fill versus explicit fill_method=None"
+      ],
+      "reference_fixture": "REQUIRED_NOT_CREATED: short two-security panel with missing rows, tied values, constant series, min_periods boundaries and composed-window boundaries.",
+      "status": "FACT",
+      "evidence": [
+        {
+          "source_file": "qsys/feature/groups/fundamental_context.py",
+          "source_lines": [
+            35,
+            145
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/relative_strength.py",
+          "source_lines": [
+            48,
+            149
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/liquidity.py",
+          "source_lines": [
+            11,
+            24
+          ]
+        },
+        {
+          "source_file": "qsys/data/adapter.py",
+          "source_lines": [
+            379,
+            384
+          ]
+        }
+      ]
+    },
+    {
+      "name": "safe_arithmetic_boolean_missing_primitives",
+      "required_by": [
+        "financial ratios",
+        "margin and holder ratios",
+        "path-classifier scores",
+        "amount_log",
+        "is_profitable_ttm"
+      ],
+      "input_semantics": "Numeric arrays with explicit NaN/inf semantics; each recipe owns zero-denominator policy, fill values, clipping bounds and predicate behavior.",
+      "output_semantics": "Elementwise arithmetic, safe divide, abs/log1p, comparison, conditional select, Boolean-to-float, fill and inf replacement without implicit changes to economic meaning.",
+      "edge_cases": [
+        "zero denominator",
+        "negative profit growth uses abs in PEG",
+        "missing comparison becomes false in legacy profitability/up-day flags",
+        "source absence versus legitimate zero",
+        "missing optional columns versus missing cells",
+        "unprotected legacy divisions"
+      ],
+      "reference_fixture": "REQUIRED_NOT_CREATED: 0/NaN/inf, negative revenue/growth and optional-column cases for frozen legacy expressions; separately identify any approved Axiom semantic changes.",
+      "status": "FACT",
+      "evidence": [
+        {
+          "source_file": "qsys/feature/groups/fundamental_context.py",
+          "source_lines": [
+            23,
+            28
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/fundamental_context.py",
+          "source_lines": [
+            118,
+            205
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/value_growth_v3a.py",
+          "source_lines": [
+            27,
+            48
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            345,
+            357
+          ]
+        }
+      ]
+    },
+    {
+      "name": "explicit_reference_universe_group_transform",
+      "required_by": [
+        "rps_20d/60d/120d",
+        "rps_industry_60d/120d",
+        "margin/holder composite scores",
+        "liquidity winsorization and industry zscores"
+      ],
+      "input_semantics": "Complete per-security histories plus an explicit same-date membership mask and industry classifications. Membership mask controls statistic contributors, not history availability.",
+      "output_semantics": "Cross-sectional group mean/std/rank/transforms aligned back to the full frame, excluding nonmembers from statistics while retaining continuous histories.",
+      "edge_cases": [
+        "member_as_of vs ever_member_as_of",
+        "exact span endpoints",
+        "all members false",
+        "missing industry",
+        "no mask legacy all-rows fallback must not become an implicit formal default",
+        "pool exits/reentries",
+        "out-of-pool held-security scoring requires its own policy"
+      ],
+      "reference_fixture": "REQUIRED_NOT_CREATED: entering/exiting security with pre-membership history and extreme nonmember values; verify rolling history survives and ranks use only current members.",
+      "status": "FACT",
+      "evidence": [
+        {
+          "source_file": "qsys/data/adapter.py",
+          "source_lines": [
+            437,
+            511
+          ]
+        },
+        {
+          "source_file": "qsys/feature/transforms.py",
+          "source_lines": [
+            7,
+            54
+          ]
+        },
+        {
+          "source_file": "qsys/research/generators/lightgbm_single_label.py",
+          "source_lines": [
+            965,
+            987
+          ]
+        }
+      ]
+    },
+    {
+      "name": "parameterized_zscore_semantics",
+      "required_by": [
+        "amount_zscore_20",
+        "amount_log_ind_zscore",
+        "turnover_rate_ind_zscore",
+        "margin/holder composite scores",
+        "daily signal normalization"
+      ],
+      "input_semantics": "Explicit grouping and reference set; each recipe declares ddof, prefill, zero/near-zero standard-deviation threshold and NaN behavior.",
+      "output_semantics": "Deterministic rolling or cross-sectional normalized values preserving declared branch behavior.",
+      "edge_cases": [
+        "rolling amount ddof0",
+        "industry liquidity ddof1",
+        "composite scores fill0 then ddof0 and threshold1e-12",
+        "one-member groups",
+        "all-missing groups",
+        "industry mask sets0 for missing std with nonmissing x, including some excluded rows"
+      ],
+      "reference_fixture": "REQUIRED_NOT_CREATED: one-member, all-equal, all-missing, mixed missing and near-zero-variance groups with asserted parameter-specific results.",
+      "status": "DECISION",
+      "evidence": [
+        {
+          "source_file": "qsys/feature/transforms.py",
+          "source_lines": [
+            72,
+            106
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/value_growth_v3a.py",
+          "source_lines": [
+            32,
+            44
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/liquidity.py",
+          "source_lines": [
+            30,
+            56
+          ]
+        },
+        {
+          "source_file": "design/07_重要补丁_A.md",
+          "source_lines": [
+            411,
+            451
+          ]
+        }
+      ]
+    },
+    {
+      "name": "cross_sectional_quantile_winsorization",
+      "required_by": [
+        "amount_log",
+        "amount_zscore_20",
+        "turnover_acceleration",
+        "illiquidity",
+        "volume_shock_3",
+        "volume_shock_5"
+      ],
+      "input_semantics": "Base values promoted/coerced to float64; 1% and99% quantiles computed within eligible same-date reference set, preserving quantile interpolation behavior.",
+      "output_semantics": "Selected original column overwritten by winsorized values; separately generated _z/_rank companions do not replace the six selected names.",
+      "edge_cases": [
+        "tiny illiquidity values",
+        "float32 downcast hazards",
+        "empty valid group",
+        "singleton",
+        "NaN",
+        "ineligible rows",
+        "quantile ties/interpolation"
+      ],
+      "reference_fixture": "REQUIRED_NOT_CREATED: tiny nonzero float values and extreme members/nonmembers proving neither integer collapse nor wrong-stage selection.",
+      "status": "FACT",
+      "evidence": [
+        {
+          "source_file": "qsys/feature/transforms.py",
+          "source_lines": [
+            57,
+            99
+          ]
+        },
+        {
+          "source_file": "qsys/feature/builder.py",
+          "source_lines": [
+            121,
+            142
+          ]
+        }
+      ]
+    },
+    {
+      "name": "event_availability_and_asof_alignment",
+      "required_by": [
+        "holder_num/top10 announcement features",
+        "four income financial features"
+      ],
+      "input_semantics": "Registered per-security event facts with explicit event order, report period, publication/availability times and immutable revision policy. Data may already provide stable derived facts. No Core private-file reads.",
+      "output_semantics": "Daily as-of features and dependency-availability propagation under a frozen equality/strict-later policy; no later event influences earlier output.",
+      "edge_cases": [
+        "same-day publication",
+        "strict audited publication<feature_date versus legacy<= behavior",
+        "duplicate ann_date",
+        "late older-period reports",
+        "same-period corrections",
+        "missing predecessor",
+        "no event before current row",
+        "calendar age versus session age"
+      ],
+      "reference_fixture": "REQUIRED_NOT_CREATED: delayed predecessor report, same-day publication and later correction with strict time checks; compare only under the declared source-version policy.",
+      "status": "DECISION",
+      "evidence": [
+        {
+          "source_file": "qsys/feature/groups/value_growth_v3a.py",
+          "source_lines": [
+            174,
+            253
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            250,
+            268
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            409,
+            431
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            534,
+            544
+          ]
+        }
+      ]
+    },
+    {
+      "name": "frozen_recipe_graph_or_pure_plugin_abi",
+      "required_by": [
+        "continuation/repair/overheat/trap scores",
+        "margin/holder composites",
+        "four income formulas if not supplied as stable Data derivations"
+      ],
+      "input_semantics": "Research-owned immutable recipe graph or pure business plugin with declared inputs/output schema, parameters and package identity. Composition preserves required intermediate stages and order.",
+      "output_semantics": "Core executes the sole shared feature path. Research resolves artifacts and persists FeatureBuild; a new business recipe normally does not change Core.",
+      "edge_cases": [
+        "relative-strength prerequisites before fundamental composites",
+        "raw amount_log before later winsorization for industry zscore",
+        "missing prerequisite columns",
+        "quarterly cumulative-to-single-quarter conversion",
+        "row-based lag4 versus exact fiscal-key alignment",
+        "plugin attempts I/O or hidden mutable dependencies"
+      ],
+      "reference_fixture": "REQUIRED_NOT_CREATED: same FactBatch and frozen plan produces identical columns via Research orchestration and direct Core invocation; frozen plugin cannot access undeclared inputs.",
+      "status": "DECISION",
+      "evidence": [
+        {
+          "source_file": "qsys/feature/builder.py",
+          "source_lines": [
+            52,
+            118
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/fundamental_context.py",
+          "source_lines": [
+            147,
+            205
+          ]
+        },
+        {
+          "source_file": "qsys/feature/groups/growth_confirmation_v0.py",
+          "source_lines": [
+            271,
+            375
+          ]
+        },
+        {
+          "source_file": "design/07_重要补丁_A.md",
+          "source_lines": [
+            280,
+            382
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ordered_schema_projection_and_frozen_preprocessing_apply",
+      "required_by": [
+        "Financial RC 96-column model input"
+      ],
+      "input_semantics": "FeatureFrame bound to exact ordered schema; model handle carries frozen fitted preprocessing state and missing/dtype policy with training provenance. No fitting in Core.",
+      "output_semantics": "Model-input matrix in exact frozen order, explicit fill/cast and application of frozen center/scale or other declared transform state.",
+      "edge_cases": [
+        "same columns wrong order",
+        "missing/extra column",
+        "all-missing source columns hidden by zero fill",
+        "NaN vs inf",
+        "float32 conversion",
+        "scaler keys incompatible with model features",
+        "fold-specific state used outside permitted interval"
+      ],
+      "reference_fixture": "REQUIRED_NOT_CREATED: reordered columns fail; correct columns plus frozen state match saved model-input fixture. Training-derived state must be supplied by Research evidence.",
+      "status": "DECISION",
+      "evidence": [
+        {
+          "source_file": "qsys/feature/registry.py",
+          "source_lines": [
+            336,
+            377
+          ]
+        },
+        {
+          "source_file": "qsys/research/generators/lightgbm_single_label.py",
+          "source_lines": [
+            1292,
+            1292
+          ]
+        },
+        {
+          "source_file": "qsys/research/generators/lightgbm_single_label.py",
+          "source_lines": [
+            1336,
+            1336
+          ]
+        },
+        {
+          "source_file": "design/07_重要补丁_A.md",
+          "source_lines": [
+            388,
+            417
+          ]
+        }
+      ]
+    },
+    {
+      "name": "saved_model_inference_abi",
+      "required_by": [
+        "60d ModelRelease OOS inference",
+        "180d ModelRelease OOS inference"
+      ],
+      "input_semantics": "Explicit ModelHandle/model bytes, implementation/package identity, ordered FeatureFrame and frozen preprocessing state; allowed prediction dates and fold provenance supplied by Research.",
+      "output_semantics": "PredictionFrame with keys, raw scores, model/fold refs, availability and validity. Research historical OOS and future runtime share this ABI.",
+      "edge_cases": [
+        "model/schema mismatch",
+        "missing model bytes",
+        "unsupported ABI",
+        "unknown model identity",
+        "future training cutoff",
+        "mutable latest resolution",
+        "stochastic inference without frozen settings"
+      ],
+      "reference_fixture": "REQUIRED_NOT_CREATED: saved-model golden input/output fixture independently validated when E0 exists; no training in this R0 task.",
+      "status": "DECISION",
+      "evidence": [
+        {
+          "source_file": "design/07_重要补丁_A.md",
+          "source_lines": [
+            388,
+            417
+          ]
+        },
+        {
+          "source_file": "design/07_重要补丁_A.md",
+          "source_lines": [
+            593,
+            615
+          ]
+        }
+      ]
+    },
+    {
+      "name": "signal_join_normalize_weighted_combine",
+      "required_by": [
+        "Financial RC 60d/180d score blend"
+      ],
+      "input_semantics": "Explicit keyed PredictionFrames and Research-owned SignalPlan declaring join keys, reference set, normalization, weights and missing/stale/validity policy.",
+      "output_semantics": "SignalFrame executing frozen normalization and weighted combination. Recipe example is final_score=0.5*z60+0.5*z180; exact run-specific normalization must be supplied from signal forensic evidence.",
+      "edge_cases": [
+        "one horizon missing",
+        "different date/security sets",
+        "duplicate keys",
+        "zero variance",
+        "stale model or prediction",
+        "cross-section before/after candidate filters",
+        "weights not sum1",
+        "silent union/intersection changes"
+      ],
+      "reference_fixture": "REQUIRED_NOT_CREATED: small keyed two-model fixture with one missing security and constant-score day; expectations fixed by final SignalPlan.",
+      "status": "DECISION",
+      "evidence": [
+        {
+          "source_file": "design/07_重要补丁_A.md",
+          "source_lines": [
+            421,
+            451
+          ]
+        },
+        {
+          "source_file": "design/07_重要补丁_A.md",
+          "source_lines": [
+            874,
+            923
+          ]
+        }
+      ]
+    },
+    {
+      "name": "deterministic_replay_and_semantic_identity",
+      "required_by": [
+        "FeatureBuild",
+        "Model inference output",
+        "SignalRun"
+      ],
+      "input_semantics": "Same explicit data/view refs, plan/package, scope/lookback, PIT/cutoff, reference universe, model/state and execution semantic versions.",
+      "output_semantics": "Same Feature/Prediction/Signal outputs and independently checkable artifact identity; Research decides reuse while Core owns calculation.",
+      "edge_cases": [
+        "changed source bytes behind same path",
+        "same recipe name different implementation",
+        "insufficient lookback",
+        "reusing source-only cache identity",
+        "same feature names different missing/ref-universe policy",
+        "numerical dependency-version change"
+      ],
+      "reference_fixture": "REQUIRED_NOT_CREATED: repeated same-input execution equality and one-identity-field-at-a-time mismatches; final artifact validator independently checks outputs.",
+      "status": "DECISION",
+      "evidence": [
+        {
+          "source_file": "design/07_重要补丁_A.md",
+          "source_lines": [
+            485,
+            528
+          ]
+        },
+        {
+          "source_file": "design/07_重要补丁_A.md",
+          "source_lines": [
+            593,
+            615
+          ]
+        },
+        {
+          "source_file": "design/05_axiom_research.md",
+          "source_lines": [
+            232,
+            241
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1420 @@
+{
+  "dirty_patch_digest": "sha256:ae077e90126141f3c859fd56dc751b6bbcf46227c8735dc555a7d8473a221e3e",
+  "model_anchors": [
+    {
+      "horizon": 60,
+      "metadata": {
+        "artifact_id": "e75f67aee783d789",
+        "artifact_identity_hash": "e75f67aee783d789e0e9d2b85c69e2657053eeca028ae6ef868914d4d3a3e726",
+        "artifact_sha256": {
+          "center.json": "880bb3213de7e3dea5609f7fce27f30bc7f4f76da29ce6bb84847f6faf83791f",
+          "model.txt": "cc6f4febcb7d2e2f67339322f5ac05eb1c70d03540a09aa8eba94e3ddc30313c",
+          "scale.json": "52736ed756909c514150673c2303dff30b070a7075508381b82c6a1e22fb6b83",
+          "training_snapshot.parquet": "e6dd219d9bfd9e3cf0d26cd127f09c878944500857ffbb9ab583a767985185e7"
+        },
+        "as_of_date": "2026-08-10",
+        "created_at": "2026-08-11T15:46:35.657317+00:00",
+        "feature_availability": {
+          "margin": {
+            "availability_rule": "same_session",
+            "lag_sessions": 0,
+            "source": "tushare.margin_detail"
+          }
+        },
+        "feature_list_hash": "6fe8589e02c5d02cb09cc520efe6d8b6f674f98ed1d990cb375151e8908f00b7",
+        "feature_list_id": "v3a_plus_liquidity_financial_rc",
+        "git": {
+          "commit": "b242fbe5533d409b58bea12ffebfcc549ed0f5b1",
+          "dirty": false
+        },
+        "horizon": 60,
+        "label_end": "2026-05-14",
+        "label_id": "fwd_ret_60d_raw",
+        "label_lineage": {
+          "label_file": "data/research/labels/fwd_ret_60d_raw/labels.parquet",
+          "label_sha256": "fd162c20e9c37843632c09941dbb879fc3c813a374ac9746e298be428f032a02",
+          "manifest_sha256": "f8d84947cc0cf7235b2728e6bee6554ace4c82ddea26a89d6a37ff7d4bcdba27",
+          "universe_coverage": {
+            "coverage": 1.0,
+            "covered_members": 800,
+            "min_coverage": 0.99,
+            "missing_members": [],
+            "universe_size": 800
+          }
+        },
+        "label_start": "2024-04-12",
+        "library_versions": {
+          "lightgbm": "4.6.0",
+          "numpy": "2.2.6",
+          "pandas": "2.3.3",
+          "pyarrow": "23.0.1",
+          "pyqlib": "0.9.7"
+        },
+        "maturity_sessions": 62,
+        "metrics": {
+          "evaluation_train_end": "2025-12-05",
+          "evaluation_training_rows": 304555,
+          "feature_coverage": 0.9842439303635113,
+          "final_training_rows": 384894,
+          "purge_sessions": 61,
+          "purged_rows": 48450,
+          "selected_iterations": 21,
+          "shareholder_rows_dropped": 13644,
+          "validation_daily_rank_ic_mean": 0.013021765938837295,
+          "validation_daily_rank_ic_positive_ratio": 0.525,
+          "validation_daily_rank_ic_std": 0.15795738106506657,
+          "validation_end": "2026-05-13",
+          "validation_mse": 0.12036155353859428,
+          "validation_pooled_rank_ic": 0.011451842497744492,
+          "validation_rows": 31889,
+          "validation_start": "2026-03-13"
+        },
+        "model_hash": "cc6f4febcb7d2e2f",
+        "model_sha256": "cc6f4febcb7d2e2f67339322f5ac05eb1c70d03540a09aa8eba94e3ddc30313c",
+        "n_estimators": 300,
+        "ordered_features": [
+          "$roe",
+          "$grossprofit_margin",
+          "$debt_to_assets",
+          "$op_cashflow",
+          "operating_cf_to_profit",
+          "net_margin",
+          "roa",
+          "roe_delta_252d",
+          "grossprofit_margin_delta_252d",
+          "debt_to_assets_delta_252d",
+          "op_cashflow_delta_252d",
+          "revenue_yoy",
+          "profit_yoy",
+          "$pe",
+          "$pb",
+          "pe_rank_252d",
+          "pb_rank_252d",
+          "pe_delta_120d",
+          "pb_delta_120d",
+          "pe_percentile_756d",
+          "pb_percentile_756d",
+          "pe_distance_from_756d_low",
+          "pb_distance_from_756d_low",
+          "pe_repair_room_to_median",
+          "pb_repair_room_to_median",
+          "earnings_yield_proxy",
+          "peg_proxy",
+          "up_day_ratio_60d",
+          "up_day_ratio_120d",
+          "trend_smoothness_60d",
+          "trend_smoothness_120d",
+          "max_pullback_120d",
+          "volatility_adjusted_return_60d",
+          "volatility_adjusted_return_120d",
+          "rps_60d",
+          "rps_120d",
+          "rps_20d",
+          "rps_20d_minus_rps_60d",
+          "rps_industry_60d",
+          "rps_industry_120d",
+          "price_percentile_252d",
+          "distance_to_252d_low",
+          "volume_up_down_ratio_60d",
+          "above_avg_volume_ratio_60d",
+          "amount_ratio_20d",
+          "amount_ratio_60d",
+          "volume_spike_20d",
+          "volume_stability_60d",
+          "revenue_yoy_accel",
+          "profit_yoy_accel",
+          "roe_delta_756d",
+          "net_margin_delta_756d",
+          "ocf_margin",
+          "ret_20d",
+          "ret_60d",
+          "ret_120d",
+          "volume_ratio_20d",
+          "volume_ratio_60d",
+          "distance_to_120d_high",
+          "distance_to_250d_high",
+          "continuation_candidate_score",
+          "repair_candidate_score",
+          "overheat_risk_score",
+          "value_trap_risk_score",
+          "margin_eligible",
+          "margin_balance_to_float_mv",
+          "margin_balance_chg_20d",
+          "margin_balance_chg_60d",
+          "margin_buy_intensity_20d",
+          "margin_repay_to_buy_20d",
+          "margin_crowding_score",
+          "margin_trend_confirm_score",
+          "margin_overheat_risk_score",
+          "holder_num_chg_qoq",
+          "holder_num_chg_2q",
+          "avg_shares_per_holder_chg_qoq",
+          "top10_holder_ratio_chg_qoq",
+          "holder_concentration_score",
+          "holder_squeeze_score",
+          "holder_price_confirm_score",
+          "holder_num_stale_days",
+          "top10_holder_stale_days",
+          "top10_holder_ratio",
+          "amount_log",
+          "amount_zscore_20",
+          "turnover_rate",
+          "turnover_acceleration",
+          "illiquidity",
+          "volume_shock_3",
+          "volume_shock_5",
+          "amount_log_ind_zscore",
+          "turnover_rate_ind_zscore",
+          "ttm_revenue_yoy",
+          "single_q_revenue_yoy",
+          "is_profitable_ttm",
+          "gross_margin_delta_yoy"
+        ],
+        "qlib_latest": "2026-08-11",
+        "research_limitations": [
+          "historical rows use the current CSI800 constituent snapshot; not PIT",
+          "validation is a horizon-purged trailing holdout, not a full rolling OOS backtest"
+        ],
+        "schema_version": 3,
+        "shareholder_feature_freshness": {
+          "availability_rule": "announcement_date_asof",
+          "features": {
+            "holder_num_stale_days": {
+              "coverage": 0.969258,
+              "max_daily_median_days": 151.0,
+              "max_days": 378.0,
+              "max_median_days": 200,
+              "max_row_days": 365,
+              "median_days": 42.0,
+              "p95_days": 146.0
+            },
+            "top10_holder_stale_days": {
+              "coverage": 0.96642,
+              "max_daily_median_days": 174.0,
+              "max_days": 910.0,
+              "max_median_days": 250,
+              "max_row_days": 365,
+              "median_days": 59.0,
+              "p95_days": 211.0
+            }
+          },
+          "min_coverage": 0.95,
+          "source": "tushare.stk_holdernumber+tushare.top10_holders",
+          "status": "pass",
+          "violations": []
+        },
+        "shareholder_freshness_contract": {
+          "availability_rule": "announcement_date_asof",
+          "features": {
+            "holder_num_stale_days": {
+              "max_median_days": 200,
+              "max_row_days": 365
+            },
+            "top10_holder_stale_days": {
+              "max_median_days": 250,
+              "max_row_days": 365
+            }
+          },
+          "min_coverage": 0.95,
+          "source": "tushare.stk_holdernumber+tushare.top10_holders"
+        },
+        "shareholder_source_lineage": {
+          "as_of_date": "2026-05-13",
+          "availability_rule": "announcement_date_asof",
+          "snapshot_hash": "c1b2dfb9011cbb3e2391700b2d2c7a932bb612aa81e0c872cd77631700af406d",
+          "source": "tushare.stk_holdernumber+tushare.top10_holders",
+          "sources": {
+            "holder_num": {
+              "asof_snapshot_hash": "7f9607e386126b52ec7f4256128d7abc10d003dd3f5c9c47cb6457890d4d437c",
+              "coverage": 1.0,
+              "covered_symbols": 800,
+              "file_sha256": "3bf0be95b3e01ecc7ded315fa87b7918bdfb0ef65df4598ee3dc32a796d412c2",
+              "latest_ann_date": "2026-08-10",
+              "max_median_stale_days": 200,
+              "max_row_stale_days": 365,
+              "max_stale_days": 378.0,
+              "median_stale_days": 18.0,
+              "min_coverage": 0.95,
+              "missing_symbol_count": 0,
+              "missing_symbols_sample": [],
+              "p95_stale_days": 50.0,
+              "path": "data/canonical/holder_num.parquet",
+              "row_count": 82210,
+              "stale_symbol_count": 1,
+              "stale_symbols_sample": [
+                "689009.SH"
+              ],
+              "value_column": "holder_num",
+              "violations": []
+            },
+            "top10_holder_ratio": {
+              "asof_snapshot_hash": "80448aa50b941af79485158745e34e2b0789c4bb906618495dd9931f08b3d292",
+              "coverage": 1.0,
+              "covered_symbols": 800,
+              "file_sha256": "306f3ada289ab8c3440e0e4ee16b63de31063bd13f4176648bc3cae3cb7c5d6f",
+              "latest_ann_date": "2026-08-05",
+              "max_median_stale_days": 250,
+              "max_row_stale_days": 365,
+              "max_stale_days": 47.0,
+              "median_stale_days": 15.0,
+              "min_coverage": 0.95,
+              "missing_symbol_count": 0,
+              "missing_symbols_sample": [],
+              "p95_stale_days": 22.0,
+              "path": "data/canonical/top10_holder_ratio.parquet",
+              "row_count": 33163,
+              "stale_symbol_count": 0,
+              "stale_symbols_sample": [],
+              "value_column": "top10_ratio",
+              "violations": []
+            }
+          },
+          "stale_symbols": {
+            "holder_num": [
+              "689009.SH"
+            ],
+            "top10_holder_ratio": []
+          },
+          "status": "pass",
+          "universe_symbol_count": 800,
+          "violations": []
+        },
+        "strategy_id": "financial_rc",
+        "tag": "60d",
+        "train_end": "2026-05-13",
+        "train_start": "2024-04-11",
+        "training_config_hash": "30fdef8b1070726f5284642726e46d805025a4134e9b9534e99af706c7c376d1",
+        "universe": "csi800",
+        "universe_hash": "9fa4190c84ab67359db73455b25f6549317078c2571ed8c086bd3d44233ef830",
+        "universe_snapshot_semantics": "current_constituents_snapshot",
+        "window_sessions": 504
+      },
+      "metadata_ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "f5cc5eb6f79586307ca6883d292aaac24eca656478af7b8fc32f29922a4b1def",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:f5cc5eb6f79586307ca6883d292aaac24eca656478af7b8fc32f29922a4b1def",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://f5cc5eb6f79586307ca6883d292aaac24eca656478af7b8fc32f29922a4b1def/data/research/models/60d_v3a_growth_financial/e75f67aee783d789/meta.json"
+      }
+    },
+    {
+      "horizon": 180,
+      "metadata": {
+        "artifact_id": "b918966fd9fab47b",
+        "artifact_identity_hash": "b918966fd9fab47bb0b4a2f6e2cd3d4273ab41af0ad4076eabc0edea19700f24",
+        "artifact_sha256": {
+          "center.json": "3286d57b53ce71e483ad534379ac689145d6c215e18965734325dbeb13d28e3a",
+          "model.txt": "7e0450168ecd7d908dd75ffd54bfec971be9d24dc0969b80a7acdf0fb2d66fef",
+          "scale.json": "2c55ff2bbd9a1f7b4a75d0ae524311d9d2f53555e485c8167409265694ed1f2b",
+          "training_snapshot.parquet": "f273266edf1bb6fb0e6e881dab961f5f166f3a04354c9e4f0a6d5d860d1f9287"
+        },
+        "as_of_date": "2026-08-10",
+        "created_at": "2026-08-11T15:46:35.657317+00:00",
+        "feature_availability": {
+          "margin": {
+            "availability_rule": "same_session",
+            "lag_sessions": 0,
+            "source": "tushare.margin_detail"
+          }
+        },
+        "feature_list_hash": "6fe8589e02c5d02cb09cc520efe6d8b6f674f98ed1d990cb375151e8908f00b7",
+        "feature_list_id": "v3a_plus_liquidity_financial_rc",
+        "git": {
+          "commit": "b242fbe5533d409b58bea12ffebfcc549ed0f5b1",
+          "dirty": false
+        },
+        "horizon": 180,
+        "label_end": "2025-11-11",
+        "label_id": "fwd_ret_180d_raw",
+        "label_lineage": {
+          "label_file": "data/research/labels/fwd_ret_180d_raw/labels.parquet",
+          "label_sha256": "498e041fdc566cd6eb0f0b2f4bc98d2b5cc6518640c8daff8af5e6ad5c4d9d3c",
+          "manifest_sha256": "1d5de1f71c4205d92128c82d7b89b5b860ad83b516b80372d40d04f9b746cf70",
+          "universe_coverage": {
+            "coverage": 0.9975,
+            "covered_members": 798,
+            "min_coverage": 0.99,
+            "missing_members": [
+              "001280.SZ",
+              "601112.SH"
+            ],
+            "universe_size": 800
+          }
+        },
+        "label_start": "2023-10-16",
+        "library_versions": {
+          "lightgbm": "4.6.0",
+          "numpy": "2.2.6",
+          "pandas": "2.3.3",
+          "pyarrow": "23.0.1",
+          "pyqlib": "0.9.7"
+        },
+        "maturity_sessions": 182,
+        "metrics": {
+          "evaluation_train_end": "2024-12-10",
+          "evaluation_training_rows": 210763,
+          "feature_coverage": 0.9838391807846193,
+          "final_training_rows": 378655,
+          "purge_sessions": 181,
+          "purged_rows": 136113,
+          "selected_iterations": 91,
+          "shareholder_rows_dropped": 17841,
+          "validation_daily_rank_ic_mean": 0.07011270139506062,
+          "validation_daily_rank_ic_positive_ratio": 0.825,
+          "validation_daily_rank_ic_std": 0.05518466165807638,
+          "validation_end": "2025-11-10",
+          "validation_mse": 0.43196648346723115,
+          "validation_pooled_rank_ic": 0.07402108355226715,
+          "validation_rows": 31779,
+          "validation_start": "2025-09-08"
+        },
+        "model_hash": "7e0450168ecd7d90",
+        "model_sha256": "7e0450168ecd7d908dd75ffd54bfec971be9d24dc0969b80a7acdf0fb2d66fef",
+        "n_estimators": 300,
+        "ordered_features": [
+          "$roe",
+          "$grossprofit_margin",
+          "$debt_to_assets",
+          "$op_cashflow",
+          "operating_cf_to_profit",
+          "net_margin",
+          "roa",
+          "roe_delta_252d",
+          "grossprofit_margin_delta_252d",
+          "debt_to_assets_delta_252d",
+          "op_cashflow_delta_252d",
+          "revenue_yoy",
+          "profit_yoy",
+          "$pe",
+          "$pb",
+          "pe_rank_252d",
+          "pb_rank_252d",
+          "pe_delta_120d",
+          "pb_delta_120d",
+          "pe_percentile_756d",
+          "pb_percentile_756d",
+          "pe_distance_from_756d_low",
+          "pb_distance_from_756d_low",
+          "pe_repair_room_to_median",
+          "pb_repair_room_to_median",
+          "earnings_yield_proxy",
+          "peg_proxy",
+          "up_day_ratio_60d",
+          "up_day_ratio_120d",
+          "trend_smoothness_60d",
+          "trend_smoothness_120d",
+          "max_pullback_120d",
+          "volatility_adjusted_return_60d",
+          "volatility_adjusted_return_120d",
+          "rps_60d",
+          "rps_120d",
+          "rps_20d",
+          "rps_20d_minus_rps_60d",
+          "rps_industry_60d",
+          "rps_industry_120d",
+          "price_percentile_252d",
+          "distance_to_252d_low",
+          "volume_up_down_ratio_60d",
+          "above_avg_volume_ratio_60d",
+          "amount_ratio_20d",
+          "amount_ratio_60d",
+          "volume_spike_20d",
+          "volume_stability_60d",
+          "revenue_yoy_accel",
+          "profit_yoy_accel",
+          "roe_delta_756d",
+          "net_margin_delta_756d",
+          "ocf_margin",
+          "ret_20d",
+          "ret_60d",
+          "ret_120d",
+          "volume_ratio_20d",
+          "volume_ratio_60d",
+          "distance_to_120d_high",
+          "distance_to_250d_high",
+          "continuation_candidate_score",
+          "repair_candidate_score",
+          "overheat_risk_score",
+          "value_trap_risk_score",
+          "margin_eligible",
+          "margin_balance_to_float_mv",
+          "margin_balance_chg_20d",
+          "margin_balance_chg_60d",
+          "margin_buy_intensity_20d",
+          "margin_repay_to_buy_20d",
+          "margin_crowding_score",
+          "margin_trend_confirm_score",
+          "margin_overheat_risk_score",
+          "holder_num_chg_qoq",
+          "holder_num_chg_2q",
+          "avg_shares_per_holder_chg_qoq",
+          "top10_holder_ratio_chg_qoq",
+          "holder_concentration_score",
+          "holder_squeeze_score",
+          "holder_price_confirm_score",
+          "holder_num_stale_days",
+          "top10_holder_stale_days",
+          "top10_holder_ratio",
+          "amount_log",
+          "amount_zscore_20",
+          "turnover_rate",
+          "turnover_acceleration",
+          "illiquidity",
+          "volume_shock_3",
+          "volume_shock_5",
+          "amount_log_ind_zscore",
+          "turnover_rate_ind_zscore",
+          "ttm_revenue_yoy",
+          "single_q_revenue_yoy",
+          "is_profitable_ttm",
+          "gross_margin_delta_yoy"
+        ],
+        "qlib_latest": "2026-08-11",
+        "research_limitations": [
+          "historical rows use the current CSI800 constituent snapshot; not PIT",
+          "validation is a horizon-purged trailing holdout, not a full rolling OOS backtest"
+        ],
+        "schema_version": 3,
+        "shareholder_feature_freshness": {
+          "availability_rule": "announcement_date_asof",
+          "features": {
+            "holder_num_stale_days": {
+              "coverage": 0.958063,
+              "max_daily_median_days": 151.0,
+              "max_days": 194.0,
+              "max_median_days": 200,
+              "max_row_days": 365,
+              "median_days": 44.0,
+              "p95_days": 143.0
+            },
+            "top10_holder_stale_days": {
+              "coverage": 0.955646,
+              "max_daily_median_days": 174.0,
+              "max_days": 910.0,
+              "max_median_days": 250,
+              "max_row_days": 365,
+              "median_days": 63.0,
+              "p95_days": 222.0
+            }
+          },
+          "min_coverage": 0.95,
+          "source": "tushare.stk_holdernumber+tushare.top10_holders",
+          "status": "pass",
+          "violations": []
+        },
+        "shareholder_freshness_contract": {
+          "availability_rule": "announcement_date_asof",
+          "features": {
+            "holder_num_stale_days": {
+              "max_median_days": 200,
+              "max_row_days": 365
+            },
+            "top10_holder_stale_days": {
+              "max_median_days": 250,
+              "max_row_days": 365
+            }
+          },
+          "min_coverage": 0.95,
+          "source": "tushare.stk_holdernumber+tushare.top10_holders"
+        },
+        "shareholder_source_lineage": {
+          "as_of_date": "2025-11-10",
+          "availability_rule": "announcement_date_asof",
+          "snapshot_hash": "c678837845737025187efae8c7139c36f9d9511a415941fd7d226c0c54304e21",
+          "source": "tushare.stk_holdernumber+tushare.top10_holders",
+          "sources": {
+            "holder_num": {
+              "asof_snapshot_hash": "630e9d16b56f97dddea3f02065a7f34b5317388b724360e7c021d8edbfa4710b",
+              "coverage": 1.0,
+              "covered_symbols": 798,
+              "file_sha256": "3bf0be95b3e01ecc7ded315fa87b7918bdfb0ef65df4598ee3dc32a796d412c2",
+              "latest_ann_date": "2026-08-10",
+              "max_median_stale_days": 200,
+              "max_row_stale_days": 365,
+              "max_stale_days": 194.0,
+              "median_stale_days": 11.0,
+              "min_coverage": 0.95,
+              "missing_symbol_count": 0,
+              "missing_symbols_sample": [],
+              "p95_stale_days": 18.149999999999977,
+              "path": "data/canonical/holder_num.parquet",
+              "row_count": 82210,
+              "stale_symbol_count": 0,
+              "stale_symbols_sample": [],
+              "value_column": "holder_num",
+              "violations": []
+            },
+            "top10_holder_ratio": {
+              "asof_snapshot_hash": "b454bcc1812bf544b845a576f3d88530c131a3f659b281a49f464292d7d33756",
+              "coverage": 0.997494,
+              "covered_symbols": 796,
+              "file_sha256": "306f3ada289ab8c3440e0e4ee16b63de31063bd13f4176648bc3cae3cb7c5d6f",
+              "latest_ann_date": "2026-08-05",
+              "max_median_stale_days": 250,
+              "max_row_stale_days": 365,
+              "max_stale_days": 80.0,
+              "median_stale_days": 11.0,
+              "min_coverage": 0.95,
+              "missing_symbol_count": 2,
+              "missing_symbols_sample": [
+                "603092.SH",
+                "603175.SH"
+              ],
+              "p95_stale_days": 19.0,
+              "path": "data/canonical/top10_holder_ratio.parquet",
+              "row_count": 33163,
+              "stale_symbol_count": 0,
+              "stale_symbols_sample": [],
+              "value_column": "top10_ratio",
+              "violations": []
+            }
+          },
+          "stale_symbols": {
+            "holder_num": [],
+            "top10_holder_ratio": [
+              "603092.SH",
+              "603175.SH"
+            ]
+          },
+          "status": "pass",
+          "universe_symbol_count": 798,
+          "violations": []
+        },
+        "strategy_id": "financial_rc",
+        "tag": "180d",
+        "train_end": "2025-11-10",
+        "train_start": "2023-10-13",
+        "training_config_hash": "30fdef8b1070726f5284642726e46d805025a4134e9b9534e99af706c7c376d1",
+        "universe": "csi800",
+        "universe_hash": "9fa4190c84ab67359db73455b25f6549317078c2571ed8c086bd3d44233ef830",
+        "universe_snapshot_semantics": "current_constituents_snapshot",
+        "window_sessions": 504
+      },
+      "metadata_ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "3854e970744e2e9750aa462194cb2eb3dc69be136ab050714cc23e51cc50fe7b",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:3854e970744e2e9750aa462194cb2eb3dc69be136ab050714cc23e51cc50fe7b",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://3854e970744e2e9750aa462194cb2eb3dc69be136ab050714cc23e51cc50fe7b/data/research/models/180d_v3a_growth_financial/b918966fd9fab47b/meta.json"
+      }
+    }
+  ],
+  "recipe_semantic_identity": "sha256:a74df99ae7644a4ff9f46a73fabbad5b25c6e320d1f2f18cdf69e031f5f41cbe",
+  "run_identity": "research-r0-20260913",
+  "source_head": "c969c74a66b148fa66396c3896e48760004683d4",
+  "source_state_digest": "sha256:f0ca05392bdbec8df9d6a2c21637b5fed41902c5a26e1dc276df791ae2553858",
+  "source_state_ref": "/home/liuming/workspace/axiom/data/forensic/sysq-c969c74-20260904/source_state/git_state.json",
+  "sources": {
+    "configs/features/v3a_plus_liquidity_financial_rc.yaml": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/configs/features/v3a_plus_liquidity_financial_rc.yaml",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "740786fd59167cd913fefbabe3ee1db7650109664653f0ad82533d5bb7387fb9",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:740786fd59167cd913fefbabe3ee1db7650109664653f0ad82533d5bb7387fb9",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://740786fd59167cd913fefbabe3ee1db7650109664653f0ad82533d5bb7387fb9/configs/features/v3a_plus_liquidity_financial_rc.yaml"
+      }
+    },
+    "configs/labels/fwd_ret_180d_raw.yaml": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/configs/labels/fwd_ret_180d_raw.yaml",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "2ec5aec7acb4279ac631a809b679bde25b418a16886ef6d061c4290055133185",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:2ec5aec7acb4279ac631a809b679bde25b418a16886ef6d061c4290055133185",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://2ec5aec7acb4279ac631a809b679bde25b418a16886ef6d061c4290055133185/configs/labels/fwd_ret_180d_raw.yaml"
+      }
+    },
+    "configs/labels/fwd_ret_60d_raw.yaml": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/configs/labels/fwd_ret_60d_raw.yaml",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "eda76785640456357d578c526070bbf2d3cb057c31d7967268bd883a4038e599",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:eda76785640456357d578c526070bbf2d3cb057c31d7967268bd883a4038e599",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://eda76785640456357d578c526070bbf2d3cb057c31d7967268bd883a4038e599/configs/labels/fwd_ret_60d_raw.yaml"
+      }
+    },
+    "configs/research/60d/financial_rc_180d_rolling_5y_to_202607_v3.yaml": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/configs/research/60d/financial_rc_180d_rolling_5y_to_202607_v3.yaml",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "72de4414cb50fd5c8f46a4d1a6f5bf9c75791a99f26faaed2a97bc24d83b3f63",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:72de4414cb50fd5c8f46a4d1a6f5bf9c75791a99f26faaed2a97bc24d83b3f63",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://72de4414cb50fd5c8f46a4d1a6f5bf9c75791a99f26faaed2a97bc24d83b3f63/configs/research/60d/financial_rc_180d_rolling_5y_to_202607_v3.yaml"
+      }
+    },
+    "configs/research/60d/financial_rc_180d_rolling_5y_to_202607_v3_pit.yaml": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/configs/research/60d/financial_rc_180d_rolling_5y_to_202607_v3_pit.yaml",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "043c6e1ea9d1a88d141170287db4b08f0da1f2b2620a8c002ca411e2eb3b3344",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:043c6e1ea9d1a88d141170287db4b08f0da1f2b2620a8c002ca411e2eb3b3344",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://043c6e1ea9d1a88d141170287db4b08f0da1f2b2620a8c002ca411e2eb3b3344/configs/research/60d/financial_rc_180d_rolling_5y_to_202607_v3_pit.yaml"
+      }
+    },
+    "configs/research/60d/financial_rc_180d_rolling_5y_to_202607_v3_pit_csi1800_terminal_r3.yaml": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/configs/research/60d/financial_rc_180d_rolling_5y_to_202607_v3_pit_csi1800_terminal_r3.yaml",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "87c2b8a14076cd81492bf725d4ca48afc079082328aed6aa37920fa78b5cda31",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:87c2b8a14076cd81492bf725d4ca48afc079082328aed6aa37920fa78b5cda31",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://87c2b8a14076cd81492bf725d4ca48afc079082328aed6aa37920fa78b5cda31/configs/research/60d/financial_rc_180d_rolling_5y_to_202607_v3_pit_csi1800_terminal_r3.yaml"
+      }
+    },
+    "configs/research/60d/financial_rc_60d_rolling_5y_to_202607_v3.yaml": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/configs/research/60d/financial_rc_60d_rolling_5y_to_202607_v3.yaml",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "a2eefc97f68038ba53915c05c7cfcaff2122cb35f92c3ae8d82f58d4ecc0bcd3",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:a2eefc97f68038ba53915c05c7cfcaff2122cb35f92c3ae8d82f58d4ecc0bcd3",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://a2eefc97f68038ba53915c05c7cfcaff2122cb35f92c3ae8d82f58d4ecc0bcd3/configs/research/60d/financial_rc_60d_rolling_5y_to_202607_v3.yaml"
+      }
+    },
+    "configs/research/60d/financial_rc_60d_rolling_5y_to_202607_v3_pit.yaml": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/configs/research/60d/financial_rc_60d_rolling_5y_to_202607_v3_pit.yaml",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "a495156637c3738e937ef2ce2f4db7b391c6d32bddd9414bc66e1f28f0430f0b",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:a495156637c3738e937ef2ce2f4db7b391c6d32bddd9414bc66e1f28f0430f0b",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://a495156637c3738e937ef2ce2f4db7b391c6d32bddd9414bc66e1f28f0430f0b/configs/research/60d/financial_rc_60d_rolling_5y_to_202607_v3_pit.yaml"
+      }
+    },
+    "configs/strategies/financial_rc.yaml": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/configs/strategies/financial_rc.yaml",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "f5d989d193ddd578c0e9306ffc1042098ccf9cb7c1d21813e76d63a3517a87ec",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:f5d989d193ddd578c0e9306ffc1042098ccf9cb7c1d21813e76d63a3517a87ec",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://f5d989d193ddd578c0e9306ffc1042098ccf9cb7c1d21813e76d63a3517a87ec/configs/strategies/financial_rc.yaml"
+      }
+    },
+    "data/research/experiments/financial_rc_180d_rolling_5y_to_202607_v3/signal_research_manifest.json": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/data/research/experiments/financial_rc_180d_rolling_5y_to_202607_v3/signal_research_manifest.json",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "3b03aee12e3cec494bd8d10ac713f3c82ef5c68f4d0d7ca8f3a62977d84f22ae",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:3b03aee12e3cec494bd8d10ac713f3c82ef5c68f4d0d7ca8f3a62977d84f22ae",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://3b03aee12e3cec494bd8d10ac713f3c82ef5c68f4d0d7ca8f3a62977d84f22ae/data/research/experiments/financial_rc_180d_rolling_5y_to_202607_v3/signal_research_manifest.json"
+      }
+    },
+    "data/research/experiments/financial_rc_60d_rolling_5y_to_202607_v3/signal_research_manifest.json": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/data/research/experiments/financial_rc_60d_rolling_5y_to_202607_v3/signal_research_manifest.json",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "c5ef610d6556c80aed4dd22b28dbede78a6924edbb4376f6848ee87a753d7f01",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:c5ef610d6556c80aed4dd22b28dbede78a6924edbb4376f6848ee87a753d7f01",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://c5ef610d6556c80aed4dd22b28dbede78a6924edbb4376f6848ee87a753d7f01/data/research/experiments/financial_rc_60d_rolling_5y_to_202607_v3/signal_research_manifest.json"
+      }
+    },
+    "data/research/models/180d_v3a_growth_financial/b918966fd9fab47b/center.json": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/data/research/models/180d_v3a_growth_financial/b918966fd9fab47b/center.json",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "3286d57b53ce71e483ad534379ac689145d6c215e18965734325dbeb13d28e3a",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:3286d57b53ce71e483ad534379ac689145d6c215e18965734325dbeb13d28e3a",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://3286d57b53ce71e483ad534379ac689145d6c215e18965734325dbeb13d28e3a/data/research/models/180d_v3a_growth_financial/b918966fd9fab47b/center.json"
+      }
+    },
+    "data/research/models/180d_v3a_growth_financial/b918966fd9fab47b/meta.json": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/data/research/models/180d_v3a_growth_financial/b918966fd9fab47b/meta.json",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "3854e970744e2e9750aa462194cb2eb3dc69be136ab050714cc23e51cc50fe7b",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:3854e970744e2e9750aa462194cb2eb3dc69be136ab050714cc23e51cc50fe7b",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://3854e970744e2e9750aa462194cb2eb3dc69be136ab050714cc23e51cc50fe7b/data/research/models/180d_v3a_growth_financial/b918966fd9fab47b/meta.json"
+      }
+    },
+    "data/research/models/180d_v3a_growth_financial/b918966fd9fab47b/model.txt": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/data/research/models/180d_v3a_growth_financial/b918966fd9fab47b/model.txt",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "7e0450168ecd7d908dd75ffd54bfec971be9d24dc0969b80a7acdf0fb2d66fef",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:7e0450168ecd7d908dd75ffd54bfec971be9d24dc0969b80a7acdf0fb2d66fef",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://7e0450168ecd7d908dd75ffd54bfec971be9d24dc0969b80a7acdf0fb2d66fef/data/research/models/180d_v3a_growth_financial/b918966fd9fab47b/model.txt"
+      }
+    },
+    "data/research/models/180d_v3a_growth_financial/b918966fd9fab47b/scale.json": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/data/research/models/180d_v3a_growth_financial/b918966fd9fab47b/scale.json",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "2c55ff2bbd9a1f7b4a75d0ae524311d9d2f53555e485c8167409265694ed1f2b",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:2c55ff2bbd9a1f7b4a75d0ae524311d9d2f53555e485c8167409265694ed1f2b",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://2c55ff2bbd9a1f7b4a75d0ae524311d9d2f53555e485c8167409265694ed1f2b/data/research/models/180d_v3a_growth_financial/b918966fd9fab47b/scale.json"
+      }
+    },
+    "data/research/models/60d_v3a_growth_financial/e75f67aee783d789/center.json": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/data/research/models/60d_v3a_growth_financial/e75f67aee783d789/center.json",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "880bb3213de7e3dea5609f7fce27f30bc7f4f76da29ce6bb84847f6faf83791f",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:880bb3213de7e3dea5609f7fce27f30bc7f4f76da29ce6bb84847f6faf83791f",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://880bb3213de7e3dea5609f7fce27f30bc7f4f76da29ce6bb84847f6faf83791f/data/research/models/60d_v3a_growth_financial/e75f67aee783d789/center.json"
+      }
+    },
+    "data/research/models/60d_v3a_growth_financial/e75f67aee783d789/meta.json": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/data/research/models/60d_v3a_growth_financial/e75f67aee783d789/meta.json",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "f5cc5eb6f79586307ca6883d292aaac24eca656478af7b8fc32f29922a4b1def",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:f5cc5eb6f79586307ca6883d292aaac24eca656478af7b8fc32f29922a4b1def",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://f5cc5eb6f79586307ca6883d292aaac24eca656478af7b8fc32f29922a4b1def/data/research/models/60d_v3a_growth_financial/e75f67aee783d789/meta.json"
+      }
+    },
+    "data/research/models/60d_v3a_growth_financial/e75f67aee783d789/model.txt": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/data/research/models/60d_v3a_growth_financial/e75f67aee783d789/model.txt",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "cc6f4febcb7d2e2f67339322f5ac05eb1c70d03540a09aa8eba94e3ddc30313c",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:cc6f4febcb7d2e2f67339322f5ac05eb1c70d03540a09aa8eba94e3ddc30313c",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://cc6f4febcb7d2e2f67339322f5ac05eb1c70d03540a09aa8eba94e3ddc30313c/data/research/models/60d_v3a_growth_financial/e75f67aee783d789/model.txt"
+      }
+    },
+    "data/research/models/60d_v3a_growth_financial/e75f67aee783d789/scale.json": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/data/research/models/60d_v3a_growth_financial/e75f67aee783d789/scale.json",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "52736ed756909c514150673c2303dff30b070a7075508381b82c6a1e22fb6b83",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:52736ed756909c514150673c2303dff30b070a7075508381b82c6a1e22fb6b83",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://52736ed756909c514150673c2303dff30b070a7075508381b82c6a1e22fb6b83/data/research/models/60d_v3a_growth_financial/e75f67aee783d789/scale.json"
+      }
+    },
+    "data/research/signals/fwd_ret_180d_raw__daily_zscore/rolling__financial_rc_180d_rolling_5y_to_202607_v3__v3a_growth_financial_180d__fwd_ret_180d_raw__daily_zscore__2021-01-01_2026-07-31/manifest.json": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/data/research/signals/fwd_ret_180d_raw__daily_zscore/rolling__financial_rc_180d_rolling_5y_to_202607_v3__v3a_growth_financial_180d__fwd_ret_180d_raw__daily_zscore__2021-01-01_2026-07-31/manifest.json",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "e4edc4e0252af72037b19fc6d3ab1118e1289929f495cd744b35f303075c6be1",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:e4edc4e0252af72037b19fc6d3ab1118e1289929f495cd744b35f303075c6be1",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://e4edc4e0252af72037b19fc6d3ab1118e1289929f495cd744b35f303075c6be1/data/research/signals/fwd_ret_180d_raw__daily_zscore/rolling__financial_rc_180d_rolling_5y_to_202607_v3__v3a_growth_financial_180d__fwd_ret_180d_raw__daily_zscore__2021-01-01_2026-07-31/manifest.json"
+      }
+    },
+    "data/research/signals/fwd_ret_180d_raw_pit_csi1800__daily_zscore/rolling__financial_rc_180d_rolling_5y_to_202607_v3_pit_csi1800_terminal_r3__v3a_growth_financial_180d_pit_csi1800_terminal_r3__fwd_ret_180d_raw_pit_csi1800__daily_zscore__2021-01-01_2026-07-31/manifest.json": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/data/research/signals/fwd_ret_180d_raw_pit_csi1800__daily_zscore/rolling__financial_rc_180d_rolling_5y_to_202607_v3_pit_csi1800_terminal_r3__v3a_growth_financial_180d_pit_csi1800_terminal_r3__fwd_ret_180d_raw_pit_csi1800__daily_zscore__2021-01-01_2026-07-31/manifest.json",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "fbeddce0ce1f9ca35309803ed6d7c7c8da86572ed33ddc224e6591dcab9b86ef",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:fbeddce0ce1f9ca35309803ed6d7c7c8da86572ed33ddc224e6591dcab9b86ef",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://fbeddce0ce1f9ca35309803ed6d7c7c8da86572ed33ddc224e6591dcab9b86ef/data/research/signals/fwd_ret_180d_raw_pit_csi1800__daily_zscore/rolling__financial_rc_180d_rolling_5y_to_202607_v3_pit_csi1800_terminal_r3__v3a_growth_financial_180d_pit_csi1800_terminal_r3__fwd_ret_180d_raw_pit_csi1800__daily_zscore__2021-01-01_2026-07-31/manifest.json"
+      }
+    },
+    "data/research/signals/fwd_ret_60d_raw__daily_zscore/rolling__financial_rc_60d_rolling_5y_to_202607_v3__v3a_growth_financial_60d__fwd_ret_60d_raw__daily_zscore__2021-01-01_2026-07-31/manifest.json": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/data/research/signals/fwd_ret_60d_raw__daily_zscore/rolling__financial_rc_60d_rolling_5y_to_202607_v3__v3a_growth_financial_60d__fwd_ret_60d_raw__daily_zscore__2021-01-01_2026-07-31/manifest.json",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "a976c36534619cb82444f3f206bc7d5a3c92ac9fd945143daacf56b93cb45acb",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:a976c36534619cb82444f3f206bc7d5a3c92ac9fd945143daacf56b93cb45acb",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://a976c36534619cb82444f3f206bc7d5a3c92ac9fd945143daacf56b93cb45acb/data/research/signals/fwd_ret_60d_raw__daily_zscore/rolling__financial_rc_60d_rolling_5y_to_202607_v3__v3a_growth_financial_60d__fwd_ret_60d_raw__daily_zscore__2021-01-01_2026-07-31/manifest.json"
+      }
+    },
+    "design/05_axiom_research.md": {
+      "path": "/home/liuming/workspace/axiom/design/05_axiom_research.md",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "52f7ff2b87faf599ebd993148dae1a438e2c32691018a0ed4586b5f5a97d81ce",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:52f7ff2b87faf599ebd993148dae1a438e2c32691018a0ed4586b5f5a97d81ce",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://52f7ff2b87faf599ebd993148dae1a438e2c32691018a0ed4586b5f5a97d81ce/design/05_axiom_research.md"
+      }
+    },
+    "design/07_重要补丁_A.md": {
+      "path": "/home/liuming/workspace/axiom/design/07_重要补丁_A.md",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "5a175297c215bea6730f04aa3b1ddfeafd1258f0bae9cd65e943cbb51fd4f66c",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:5a175297c215bea6730f04aa3b1ddfeafd1258f0bae9cd65e943cbb51fd4f66c",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://5a175297c215bea6730f04aa3b1ddfeafd1258f0bae9cd65e943cbb51fd4f66c/design/07_重要补丁_A.md"
+      }
+    },
+    "qsys/data/adapter.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/data/adapter.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "da1e5f21b01c8cd36a97493f307960d3a8699786220578fb0a714af031c1843f",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:da1e5f21b01c8cd36a97493f307960d3a8699786220578fb0a714af031c1843f",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://da1e5f21b01c8cd36a97493f307960d3a8699786220578fb0a714af031c1843f/qsys/data/adapter.py"
+      }
+    },
+    "qsys/feature/builder.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/feature/builder.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "5a3e60acc17fb4826f98c5a3be2299bce2d6c6c0d0ac2de8d20ed98d76ad741c",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:5a3e60acc17fb4826f98c5a3be2299bce2d6c6c0d0ac2de8d20ed98d76ad741c",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://5a3e60acc17fb4826f98c5a3be2299bce2d6c6c0d0ac2de8d20ed98d76ad741c/qsys/feature/builder.py"
+      }
+    },
+    "qsys/feature/groups/fundamental_context.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/feature/groups/fundamental_context.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "68e1939c428f7fd86e7726cd440f5f0226bfd3f9a020d676e9ea20ef2f510c14",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:68e1939c428f7fd86e7726cd440f5f0226bfd3f9a020d676e9ea20ef2f510c14",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://68e1939c428f7fd86e7726cd440f5f0226bfd3f9a020d676e9ea20ef2f510c14/qsys/feature/groups/fundamental_context.py"
+      }
+    },
+    "qsys/feature/groups/growth_confirmation_v0.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/feature/groups/growth_confirmation_v0.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "55df63a0fc9f5a9bbfc1807d07eefc80995b3f9d8030feef7a13248335647d75",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:55df63a0fc9f5a9bbfc1807d07eefc80995b3f9d8030feef7a13248335647d75",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://55df63a0fc9f5a9bbfc1807d07eefc80995b3f9d8030feef7a13248335647d75/qsys/feature/groups/growth_confirmation_v0.py"
+      }
+    },
+    "qsys/feature/groups/liquidity.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/feature/groups/liquidity.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "547285d7984ef3d78d0de5bebdb578d20a5aedd9037fc02ec4a073e7b692a55f",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:547285d7984ef3d78d0de5bebdb578d20a5aedd9037fc02ec4a073e7b692a55f",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://547285d7984ef3d78d0de5bebdb578d20a5aedd9037fc02ec4a073e7b692a55f/qsys/feature/groups/liquidity.py"
+      }
+    },
+    "qsys/feature/groups/relative_strength.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/feature/groups/relative_strength.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "5f0bfb559a63e473698095e78bdb9c47e8bcac95b4c4c219d4a0aa7dc175b640",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:5f0bfb559a63e473698095e78bdb9c47e8bcac95b4c4c219d4a0aa7dc175b640",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://5f0bfb559a63e473698095e78bdb9c47e8bcac95b4c4c219d4a0aa7dc175b640/qsys/feature/groups/relative_strength.py"
+      }
+    },
+    "qsys/feature/groups/value_growth_v3a.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/feature/groups/value_growth_v3a.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "fb617d90c74de2f476ceeadc995f169d2675b642c7a1fcac5313073a2e0c2dbb",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:fb617d90c74de2f476ceeadc995f169d2675b642c7a1fcac5313073a2e0c2dbb",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://fb617d90c74de2f476ceeadc995f169d2675b642c7a1fcac5313073a2e0c2dbb/qsys/feature/groups/value_growth_v3a.py"
+      }
+    },
+    "qsys/feature/registry.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/feature/registry.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "d9b4758611cd69af1780ff061ec850bc4b941438484ace69ff0bf5c50cebb331",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:d9b4758611cd69af1780ff061ec850bc4b941438484ace69ff0bf5c50cebb331",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://d9b4758611cd69af1780ff061ec850bc4b941438484ace69ff0bf5c50cebb331/qsys/feature/registry.py"
+      }
+    },
+    "qsys/feature/transforms.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/feature/transforms.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "5632e17b29dcc844e2fedb7d6b050804147c4288913f4b3558b48ef9c62bbd86",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:5632e17b29dcc844e2fedb7d6b050804147c4288913f4b3558b48ef9c62bbd86",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://5632e17b29dcc844e2fedb7d6b050804147c4288913f4b3558b48ef9c62bbd86/qsys/feature/transforms.py"
+      }
+    },
+    "qsys/label/compute.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/label/compute.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "34f7933fd23ddd318723c0194b8dd9ab0db2760d55f18dfb7d291eee6a8ed373",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:34f7933fd23ddd318723c0194b8dd9ab0db2760d55f18dfb7d291eee6a8ed373",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://34f7933fd23ddd318723c0194b8dd9ab0db2760d55f18dfb7d291eee6a8ed373/qsys/label/compute.py"
+      }
+    },
+    "qsys/model/financial_rc_trainer.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/model/financial_rc_trainer.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "b481afb7959fac2fd69859b5f448fa0417a14ff619b27a000f6c7b58efd1bdbc",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:b481afb7959fac2fd69859b5f448fa0417a14ff619b27a000f6c7b58efd1bdbc",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://b481afb7959fac2fd69859b5f448fa0417a14ff619b27a000f6c7b58efd1bdbc/qsys/model/financial_rc_trainer.py"
+      }
+    },
+    "qsys/research/generators/lightgbm_single_label.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/research/generators/lightgbm_single_label.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "95d9242fadbabe51ff1e43eb9a8de915cd524a9eaa5dfb52eeed6d2c5f1b379d",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:95d9242fadbabe51ff1e43eb9a8de915cd524a9eaa5dfb52eeed6d2c5f1b379d",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://95d9242fadbabe51ff1e43eb9a8de915cd524a9eaa5dfb52eeed6d2c5f1b379d/qsys/research/generators/lightgbm_single_label.py"
+      }
+    },
+    "qsys/research/generators/utils.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/research/generators/utils.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "fe42b88cddd8c68b56b3677accfa38f1e1ad238b38e73b586c09d44fa3c05045",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:fe42b88cddd8c68b56b3677accfa38f1e1ad238b38e73b586c09d44fa3c05045",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://fe42b88cddd8c68b56b3677accfa38f1e1ad238b38e73b586c09d44fa3c05045/qsys/research/generators/utils.py"
+      }
+    },
+    "qsys/research/matrix_job.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/research/matrix_job.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "910865026c24671a8fc0a26c429dcf61d0e54d2e96292b75085d1e89a82aaae0",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:910865026c24671a8fc0a26c429dcf61d0e54d2e96292b75085d1e89a82aaae0",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://910865026c24671a8fc0a26c429dcf61d0e54d2e96292b75085d1e89a82aaae0/qsys/research/matrix_job.py"
+      }
+    },
+    "qsys/research/rolling_window.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/research/rolling_window.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "0b2c03d5f038bf22c6c1de307a6e71f99bb4c6244c2cf20fb6c5c5664d92e8ce",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:0b2c03d5f038bf22c6c1de307a6e71f99bb4c6244c2cf20fb6c5c5664d92e8ce",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://0b2c03d5f038bf22c6c1de307a6e71f99bb4c6244c2cf20fb6c5c5664d92e8ce/qsys/research/rolling_window.py"
+      }
+    },
+    "qsys/signal/alpha_v1/labels.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/signal/alpha_v1/labels.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "7ef420b5392f8b40ba348b04c2724da74ff4f1b4c165b128a9aaf4875f86f064",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:7ef420b5392f8b40ba348b04c2724da74ff4f1b4c165b128a9aaf4875f86f064",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://7ef420b5392f8b40ba348b04c2724da74ff4f1b4c165b128a9aaf4875f86f064/qsys/signal/alpha_v1/labels.py"
+      }
+    },
+    "qsys/signal/alpha_v1/training.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/signal/alpha_v1/training.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "a0d077679dd6a9bf2d22d20cb1e32a7c7941d77bb6743003a83dbffef37b43bc",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:a0d077679dd6a9bf2d22d20cb1e32a7c7941d77bb6743003a83dbffef37b43bc",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://a0d077679dd6a9bf2d22d20cb1e32a7c7941d77bb6743003a83dbffef37b43bc/qsys/signal/alpha_v1/training.py"
+      }
+    },
+    "qsys/signal/model_blend_inference.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/qsys/signal/model_blend_inference.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "e1fb2c4155ec3b55b2710e0f6bdd6e3bbffbc0df197dcb1dd550059a968a92cc",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:e1fb2c4155ec3b55b2710e0f6bdd6e3bbffbc0df197dcb1dd550059a968a92cc",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://e1fb2c4155ec3b55b2710e0f6bdd6e3bbffbc0df197dcb1dd550059a968a92cc/qsys/signal/model_blend_inference.py"
+      }
+    },
+    "reports/research/csi1800_s180_r3_certification_report_20260830.md": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/reports/research/csi1800_s180_r3_certification_report_20260830.md",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "28c81dce7442e76eb2eb928d4bdff48969f7bc6f7e8d3503b4b89bf7d45fba30",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:28c81dce7442e76eb2eb928d4bdff48969f7bc6f7e8d3503b4b89bf7d45fba30",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://28c81dce7442e76eb2eb928d4bdff48969f7bc6f7e8d3503b4b89bf7d45fba30/reports/research/csi1800_s180_r3_certification_report_20260830.md"
+      }
+    },
+    "tests/label/test_label_compute_pit_continuity.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/tests/label/test_label_compute_pit_continuity.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "968cede4f5ba5032cd29a8b851ab1898c49657535d569a8cda9fc11eb87b1e30",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:968cede4f5ba5032cd29a8b851ab1898c49657535d569a8cda9fc11eb87b1e30",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://968cede4f5ba5032cd29a8b851ab1898c49657535d569a8cda9fc11eb87b1e30/tests/label/test_label_compute_pit_continuity.py"
+      }
+    },
+    "tests/model/test_financial_rc_trainer.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/tests/model/test_financial_rc_trainer.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "6fa32818ead5802db570b5e0225cbfc53bdc0fe6f5aa16bf58a0632318fed242",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:6fa32818ead5802db570b5e0225cbfc53bdc0fe6f5aa16bf58a0632318fed242",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://6fa32818ead5802db570b5e0225cbfc53bdc0fe6f5aa16bf58a0632318fed242/tests/model/test_financial_rc_trainer.py"
+      }
+    },
+    "tests/research/test_lightgbm_single_label.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/tests/research/test_lightgbm_single_label.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "6187af719a69f5899f5ef21811eed3fb2f83376eff867a894f2389a3ca4e7933",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:6187af719a69f5899f5ef21811eed3fb2f83376eff867a894f2389a3ca4e7933",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://6187af719a69f5899f5ef21811eed3fb2f83376eff867a894f2389a3ca4e7933/tests/research/test_lightgbm_single_label.py"
+      }
+    },
+    "tests/signal/test_model_blend_inference.py": {
+      "path": "/home/liuming/.openclaw/workspace/SysQ/tests/signal/test_model_blend_inference.py",
+      "ref": {
+        "artifact_contract_version": "legacy-bytes-v1",
+        "artifact_id": "b2dade498bc8dcd37418d76a17e7e8098e9f60726fb535cacbf8c032a21561bf",
+        "artifact_type": "LegacyEvidence",
+        "content_digest": "sha256:b2dade498bc8dcd37418d76a17e7e8098e9f60726fb535cacbf8c032a21561bf",
+        "contract_type": "ArtifactRef",
+        "contract_version": "1",
+        "metadata": {},
+        "uri": "sysq-forensic://b2dade498bc8dcd37418d76a17e7e8098e9f60726fb535cacbf8c032a21561bf/tests/signal/test_model_blend_inference.py"
+      }
+    }
+  },
+  "unresolved": [
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Exact window_sessions not proven for holder_num_chg_qoq",
+      "required_evidence": "Validate source dependency closure and actual sample calendar",
+      "unknown_id": "FEATURE:holder_num_chg_qoq:window_sessions"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Exact window_sessions not proven for holder_num_chg_2q",
+      "required_evidence": "Validate source dependency closure and actual sample calendar",
+      "unknown_id": "FEATURE:holder_num_chg_2q:window_sessions"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Exact window_sessions not proven for avg_shares_per_holder_chg_qoq",
+      "required_evidence": "Validate source dependency closure and actual sample calendar",
+      "unknown_id": "FEATURE:avg_shares_per_holder_chg_qoq:window_sessions"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Exact window_sessions not proven for top10_holder_ratio_chg_qoq",
+      "required_evidence": "Validate source dependency closure and actual sample calendar",
+      "unknown_id": "FEATURE:top10_holder_ratio_chg_qoq:window_sessions"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Exact window_sessions not proven for holder_concentration_score",
+      "required_evidence": "Validate source dependency closure and actual sample calendar",
+      "unknown_id": "FEATURE:holder_concentration_score:window_sessions"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Exact window_sessions not proven for holder_squeeze_score",
+      "required_evidence": "Validate source dependency closure and actual sample calendar",
+      "unknown_id": "FEATURE:holder_squeeze_score:window_sessions"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Exact window_sessions not proven for holder_price_confirm_score",
+      "required_evidence": "Validate source dependency closure and actual sample calendar",
+      "unknown_id": "FEATURE:holder_price_confirm_score:window_sessions"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Exact window_sessions not proven for holder_num_stale_days",
+      "required_evidence": "Validate source dependency closure and actual sample calendar",
+      "unknown_id": "FEATURE:holder_num_stale_days:window_sessions"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Exact window_sessions not proven for top10_holder_stale_days",
+      "required_evidence": "Validate source dependency closure and actual sample calendar",
+      "unknown_id": "FEATURE:top10_holder_stale_days:window_sessions"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Exact window_sessions not proven for top10_holder_ratio",
+      "required_evidence": "Validate source dependency closure and actual sample calendar",
+      "unknown_id": "FEATURE:top10_holder_ratio:window_sessions"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Exact window_sessions not proven for ttm_revenue_yoy",
+      "required_evidence": "Validate source dependency closure and actual sample calendar",
+      "unknown_id": "FEATURE:ttm_revenue_yoy:window_sessions"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Exact window_sessions not proven for single_q_revenue_yoy",
+      "required_evidence": "Validate source dependency closure and actual sample calendar",
+      "unknown_id": "FEATURE:single_q_revenue_yoy:window_sessions"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Exact window_sessions not proven for is_profitable_ttm",
+      "required_evidence": "Validate source dependency closure and actual sample calendar",
+      "unknown_id": "FEATURE:is_profitable_ttm:window_sessions"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Exact window_sessions not proven for gross_margin_delta_yoy",
+      "required_evidence": "Validate source dependency closure and actual sample calendar",
+      "unknown_id": "FEATURE:gross_margin_delta_yoy:window_sessions"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Original consumed Data/View/units/history closure not established",
+      "required_evidence": "Fixed public Data/View refs covering actual fields, keys, lookback and label ends",
+      "unknown_id": "DATA_CLOSURE"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "E0 compatible frozen Feature/Inference/Signal package has not been implemented",
+      "required_evidence": "Independent E0 conformance and frozen package/ABI refs",
+      "unknown_id": "CORE_ABI"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Original label bytes and producer/price/calendar lineage need complete validation",
+      "required_evidence": "Original label producer, dense session mapping, price factor/action and delisting coverage",
+      "unknown_id": "LABEL_LINEAGE"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Metadata has evaluation_train_end=2025-12-05 but no evaluation_train_start",
+      "required_evidence": "Original purged evaluation sample-key manifest with exact bounds",
+      "unknown_id": "EVAL_TRAIN_60"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Pinned serving metadata has no allowed historical OOS interval",
+      "required_evidence": "Explicit model/fold/sample-key lineage and matured fit/validation/allowed dates",
+      "unknown_id": "OOS_LINEAGE"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Pinned serving config does not establish periodic20-session retrain schedule",
+      "required_evidence": "Explicit approved retrain schedule; do not import rolling experiment step",
+      "unknown_id": "SERVING_RETRAIN"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Metadata has evaluation_train_end=2024-12-10 but no evaluation_train_start",
+      "required_evidence": "Original purged evaluation sample-key manifest with exact bounds",
+      "unknown_id": "EVAL_TRAIN_180"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Original concurrency budget not recorded",
+      "required_evidence": "Explicit run resource plan",
+      "unknown_id": "CONCURRENCY"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Original memory budget not recorded",
+      "required_evidence": "Explicit run memory limit",
+      "unknown_id": "MEMORY_BUDGET"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Saved models used current_constituents_snapshot; no historical PIT qualification",
+      "required_evidence": "Revision-specific financial/holder evidence and historical membership/industry admission",
+      "unknown_id": "PIT_BASELINE"
+    }
+  ]
+}

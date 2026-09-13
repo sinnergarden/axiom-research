@@ -1,0 +1,28 @@
+Traceback (most recent call last):
+  File "/home/liuming/workspace/axiom/axiom-research/tools/freeze_financial_rc.py", line 280, in <module>
+    build()
+  File "/home/liuming/workspace/axiom/axiom-research/tools/freeze_financial_rc.py", line 254, in build
+    r.validate(recipe)
+  File "/home/liuming/workspace/axiom/axiom-research/src/axiom_research/api.py", line 313, in validate
+    contract = _decode(_encode(contract), type(contract))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/liuming/workspace/axiom/axiom-research/src/axiom_research/api.py", line 90, in _decode
+    return expected(**{k: _decode(value[k], hints[k]) for k in names})
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/liuming/workspace/axiom/axiom-research/src/axiom_research/api.py", line 77, in _decode
+    return tuple(_decode(v, args[0]) for v in value)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/liuming/workspace/axiom/axiom-research/src/axiom_research/api.py", line 77, in <genexpr>
+    return tuple(_decode(v, args[0]) for v in value)
+                 ^^^^^^^^^^^^^^^^^^^
+  File "/home/liuming/workspace/axiom/axiom-research/src/axiom_research/api.py", line 90, in _decode
+    return expected(**{k: _decode(value[k], hints[k]) for k in names})
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/liuming/workspace/axiom/axiom-research/src/axiom_research/api.py", line 90, in _decode
+    return expected(**{k: _decode(value[k], hints[k]) for k in names})
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/liuming/workspace/axiom/axiom-research/src/axiom_research/api.py", line 94, in _decode
+    _require(type(value) is expected, f"Expected {expected}, got {type(value)}")
+  File "/home/liuming/workspace/axiom/axiom-research/src/axiom_research/api.py", line 31, in _require
+    raise ContractError(message)
+axiom_research.api.ContractError: Expected typing.Union[typing.Literal['train_only'], axiom_research.contracts.Unknown], got <class 'str'>
