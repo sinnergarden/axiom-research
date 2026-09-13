@@ -1,0 +1,13 @@
+test_R0_01_all_public_types_roundtrip (test_r0.R0Contracts.test_R0_01_all_public_types_roundtrip) ... ok
+test_R0_02_invalid_contracts (test_r0.R0Contracts.test_R0_02_invalid_contracts) ... ok
+test_R0_03_identity_semantic_changes (test_r0.R0Contracts.test_R0_03_identity_semantic_changes) ... ok
+test_R0_04_frozen_financial_rc (test_r0.R0Contracts.test_R0_04_frozen_financial_rc) ... ok
+test_R0_05_unknown_preservation_and_admission (test_r0.R0Contracts.test_R0_05_unknown_preservation_and_admission) ... ok
+test_R0_06_unknown_cannot_be_laundered_through_parameters (test_r0.R0Contracts.test_R0_06_unknown_cannot_be_laundered_through_parameters) ... ok
+test_R0_07_label_has_one_authority (test_r0.R0Contracts.test_R0_07_label_has_one_authority) ... ok
+test_R0_08_feature_pit_is_semantic_and_required (test_r0.R0Contracts.test_R0_08_feature_pit_is_semantic_and_required) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 3.266s
+
+OK

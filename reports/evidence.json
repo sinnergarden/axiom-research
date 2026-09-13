@@ -605,7 +605,7 @@
       }
     }
   ],
-  "recipe_semantic_identity": "sha256:a74df99ae7644a4ff9f46a73fabbad5b25c6e320d1f2f18cdf69e031f5f41cbe",
+  "recipe_semantic_identity": "sha256:e7bee37026fdd935c2e154481ae524b425c769cbd01ee623ac901b17246e9d24",
   "run_identity": "research-r0-20260913",
   "source_head": "c969c74a66b148fa66396c3896e48760004683d4",
   "source_state_digest": "sha256:f0ca05392bdbec8df9d6a2c21637b5fed41902c5a26e1dc276df791ae2553858",
@@ -1228,6 +1228,22 @@
       "contract_type": "Unknown",
       "contract_version": "1",
       "metadata": {},
+      "reason": "Original consumed Data/View/units/history closure not established",
+      "required_evidence": "Fixed public Data/View refs covering actual fields, keys, lookback and label ends",
+      "unknown_id": "DATA_CLOSURE"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
+      "reason": "Saved models used current_constituents_snapshot; no historical PIT qualification",
+      "required_evidence": "Revision-specific financial/holder evidence and historical membership/industry admission",
+      "unknown_id": "PIT_BASELINE"
+    },
+    {
+      "contract_type": "Unknown",
+      "contract_version": "1",
+      "metadata": {},
       "reason": "Exact window_sessions not proven for holder_num_chg_qoq",
       "required_evidence": "Validate source dependency closure and actual sample calendar",
       "unknown_id": "FEATURE:holder_num_chg_qoq:window_sessions"
@@ -1340,14 +1356,6 @@
       "contract_type": "Unknown",
       "contract_version": "1",
       "metadata": {},
-      "reason": "Original consumed Data/View/units/history closure not established",
-      "required_evidence": "Fixed public Data/View refs covering actual fields, keys, lookback and label ends",
-      "unknown_id": "DATA_CLOSURE"
-    },
-    {
-      "contract_type": "Unknown",
-      "contract_version": "1",
-      "metadata": {},
       "reason": "E0 compatible frozen Feature/Inference/Signal package has not been implemented",
       "required_evidence": "Independent E0 conformance and frozen package/ABI refs",
       "unknown_id": "CORE_ABI"
@@ -1407,14 +1415,6 @@
       "reason": "Original memory budget not recorded",
       "required_evidence": "Explicit run memory limit",
       "unknown_id": "MEMORY_BUDGET"
-    },
-    {
-      "contract_type": "Unknown",
-      "contract_version": "1",
-      "metadata": {},
-      "reason": "Saved models used current_constituents_snapshot; no historical PIT qualification",
-      "required_evidence": "Revision-specific financial/holder evidence and historical membership/industry admission",
-      "unknown_id": "PIT_BASELINE"
     }
   ]
 }

@@ -50,15 +50,26 @@ def _encode(value: Any, semantic: bool = False) -> Any:
             for f in fields(value)
             if not (semantic and (f.name == "metadata" or
                                    isinstance(value, c.ArtifactRef) and f.name == "uri"))}}
-    if isinstance(value, tuple):
+    if isinstance(value, (tuple, list)):
         return [_encode(v, semantic) for v in value]
     if isinstance(value, dict):
+        if "contract_type" in value:
+            return _encode(_decode(value, Any), semantic)
         return {k: _encode(v, semantic) for k, v in value.items()}
     return _json_value(value)
 
 
 def _decode(value: Any, expected: Any) -> Any:
     if expected is Any:
+        if type(value) is dict:
+            _require(all(type(k) is str for k in value), "Expected string object keys")
+            if "contract_type" in value:
+                tag = value["contract_type"]
+                _require(type(tag) is str and tag in TYPES, "Unknown contract type")
+                return _decode(value, TYPES[tag])
+            return {k: _decode(v, Any) for k, v in value.items()}
+        if type(value) is list:
+            return [_decode(v, Any) for v in value]
         return _json_value(value)
     origin, args = get_origin(expected), get_args(expected)
     if origin in (types.UnionType, Union):
@@ -98,6 +109,8 @@ def _decode(value: Any, expected: Any) -> Any:
 
 
 def _walk(value: Any):
+    if type(value) is dict and "contract_type" in value:
+        value = _decode(value, Any)
     yield value
     if is_dataclass(value):
         for f in fields(value):
@@ -111,7 +124,7 @@ def _walk(value: Any):
             yield from _walk(v)
 
 
-def unresolved(contract: c.Contract) -> tuple[c.Unknown, ...]:
+def unresolved(contract: c.Contract | dict | list) -> tuple[c.Unknown, ...]:
     """Return preserved blockers, deduplicated by ID; never manufacture values."""
     found = {}
     for v in _walk(contract):
@@ -169,17 +182,18 @@ def _semantics(obj: c.Contract) -> None:
     if isinstance(obj, (c.DataRequirements, c.CoreCapabilityRequirements)):
         names = [r.name for r in obj.requirements]
         _require(bool(names) and len(names) == len(set(names)), "Duplicate/empty requirements")
+    if isinstance(obj, c.PITPolicy) and obj.exact_date_matching == "source_mode_dependent":
+        _require(isinstance(obj.original_materialization, c.Unknown),
+                 "Source-mode-dependent date matching requires unresolved original materialization")
     if isinstance(obj, c.FeaturePlanSpec):
         names = tuple(f.name for f in obj.features)
         _require(names == _schema_names(obj.ordered_output_schema), "Feature order/schema mismatch")
         _require(all(f.inputs for f in obj.features), "Feature inputs required")
     if isinstance(obj, c.LabelSpec):
-        start, end = obj.return_start_offset_sessions, obj.return_end_offset_sessions
-        if type(start) is int and type(end) is int:
-            _require(start >= 0 and end - start == obj.horizon_sessions,
-                     "Label offsets/horizon mismatch")
-            if isinstance(obj.maturity, c.MaturitySpec):
-                _require(obj.maturity.lag_sessions >= end, "Label matures before return end")
+        if not isinstance(obj.price_basis, c.Unknown) and not isinstance(obj.corporate_action_semantics, c.Unknown):
+            expected_action = {"close": "none", "close_times_factor": "supplier_cumulative_factor"}
+            _require(obj.corporate_action_semantics == expected_action[obj.price_basis],
+                     "Label price basis/corporate action mismatch")
     if isinstance(obj, c.SplitSpec):
         bounds = [obj.train, obj.validation, obj.oos]
         for i, left in enumerate(bounds):

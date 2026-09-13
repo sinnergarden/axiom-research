@@ -54,6 +54,25 @@ def write_checked(path, text):
         stream.write(payload)
 
 
+def feature_pit_policy(feature):
+    """Preserve inspected per-source rules without selecting an original source mode."""
+    policy = feature.get("source_publication_policy", BLOCKERS["DATA_CLOSURE"])
+    dependency = update = exact = BLOCKERS["DATA_CLOSURE"]
+    if isinstance(policy, str) and policy.startswith("Income quarterly facts"):
+        dependency = "Per-feature maximum availability of current and all cumulative-decomposition, rolling-quarter and year-over-year dependencies; reject values without dependency availability"
+        update = "Order events by security, dependency availability and report end; at equal availability retain latest report end; emit only strictly newer report periods per feature availability stream"
+        exact = "source_mode_dependent"
+    elif isinstance(policy, str) and policy.startswith("Legacy shareholder loader"):
+        dependency = "Legacy announcement date on each security's announcement-ordered rows; previous-row dependencies follow that order; revision-specific visibility requires source artifacts"
+        update = "Previous values computed in announcement order, then backward as-of joined; duplicate/revision identity requires source artifacts"
+        exact = "allow_on_source_date"
+    return r.PITPolicy(source_publication_policy=policy,
+                       availability_dependency=dependency,
+                       report_period_update_semantics=update,
+                       exact_date_matching=exact,
+                       original_materialization=BLOCKERS["PIT_BASELINE"])
+
+
 def build():
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=LEGACY, check=True,
                           capture_output=True, text=True).stdout.strip()
@@ -146,6 +165,7 @@ def build():
                     window_sessions=value("window_sessions"), lag_sessions=value("lag_sessions"),
                     missing_policy=value("missing_policy"), outlier_policy=value("outlier_policy"),
                     reference_universe_policy=value("reference_universe_policy"),
+                    pit_policy=feature_pit_policy(f),
                     metadata={"source_lines": f["source_lines"], "classification": "FACT: inspected code definition"}))
         policy = f["reference_universe_policy"]
         if policy.startswith("Single-security time series;"):
@@ -179,19 +199,15 @@ def build():
         source(f"configs/labels/fwd_ret_{h}d_raw.yaml")
         label = r.LabelSpec(name=f"financial_rc_{h}d_next_session_close.c969c74.definition",
                  key=("security_id", "session"), horizon_sessions=h, feature_session="f (Axiom session key); legacy LabelStore addressed at next_session(f)",
-                 formula=f"A[f+{h+1}]/A[f+1]-1; A=close*factor; LabelStore itself stores A[t+{h}]/A[t]-1",
-                 return_start_rule="close at next actual session after feature f",
-                 return_end_rule=f"close at actual session H={h} after return start",
-                 return_start_offset_sessions=1, return_end_offset_sessions=h+1,
-                 price_basis="legacy Qlib close * cumulative factor; original snapshot/action vintage unresolved",
-                 benchmark_semantics="absolute adjusted return; no benchmark subtraction",
-                 corporate_action_semantics="implicit in supplier cumulative factor; no separate cashflow; original action/exit coverage unresolved",
+                 return_start_rule="next_session_close", return_end_rule="horizon_after_start",
+                 price_basis="close_times_factor", benchmark_semantics="absolute_return",
+                 corporate_action_semantics="supplier_cumulative_factor",
                  normalization_policy="none; raw denotes no label normalization; stored float32",
-                 maturity=r.MaturitySpec(lag_sessions=h+1,
-                     rule="target_end=f+H+1; fit/predict cutoff must be at least f+H+2; all outcomes available strictly before cutoff",
+                 maturity=r.MaturitySpec(rule="outcomes_available_strictly_before_cutoff",
                      calendar_policy="actual immutable exchange session calendar required; original fallback usage unresolved",
                      availability_rule=BLOCKERS["LABEL_LINEAGE"]),
-                 missing_delisting_policy="legacy drops NaN label values after shift; no explicit delisting payoff; original missing/exit coverage unresolved")
+                 missing_delisting_policy="legacy drops NaN label values after shift; no explicit delisting payoff; original missing/exit coverage unresolved",
+                 metadata={"legacy_formula_evidence": f"A[f+{h+1}]/A[f+1]-1; A=close*factor; LabelStore itself stores A[t+{h}]/A[t]-1"})
         split = r.SplitSpec(train=u(f"EVAL_TRAIN_{h}", "Metadata has evaluation_train_end=" + metrics["evaluation_train_end"] + " but no evaluation_train_start",
                                   "Original purged evaluation sample-key manifest with exact bounds"),
                  validation=r.SessionRange(start=metrics["validation_start"], end=metrics["validation_end"]),

@@ -1,0 +1,1 @@
+{"fixture": "/home/liuming/workspace/axiom/axiom-research/src/axiom_research/fixtures/financial_rc.json", "columns": 96, "unknowns": 24, "structural_validation": "PASS", "execution_readiness": "BLOCKED", "identity": "sha256:e7bee37026fdd935c2e154481ae524b425c769cbd01ee623ac901b17246e9d24"}

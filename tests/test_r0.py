@@ -38,7 +38,12 @@ def examples():
     fd = r.FeatureDefinition(name="ratio", business_definition="Synthetic feature",
                              inputs=("a", "b"), formula="a / b", implementation_ref=ref("FeaturePlugin"),
                              window_sessions=2, lag_sessions=0, missing_policy="reject",
-                             outlier_policy="none", reference_universe_policy="daily_fixture_members")
+                             outlier_policy="none", reference_universe_policy="daily_fixture_members",
+                             pit_policy=r.PITPolicy(source_publication_policy="synthetic close",
+                                availability_dependency="both inputs at close",
+                                report_period_update_semantics="daily observations",
+                                exact_date_matching="allow_on_source_date",
+                                original_materialization=ref("FactView")))
     plan = r.FeaturePlanSpec(key=("security_id", "session"), features=(fd,),
                              ordered_output_schema=(col,), data_requirements=dr,
                              history_policy="continuous", pit_policy="fixture_safe_v1",
@@ -53,12 +58,11 @@ def examples():
     fold = r.FoldSpec(fold_id="f0", split=split, allowed_prediction_interval=split.oos)
     for h in (60, 180):
         label = r.LabelSpec(name=f"synthetic_{h}", key=("security_id", "session"), horizon_sessions=h,
-                             feature_session="f", formula=f"A[f+{h+1}]/A[f+1]-1",
-                             return_start_rule="next_session_close", return_end_rule=f"start+{h}_sessions",
-                             return_start_offset_sessions=1, return_end_offset_sessions=h+1,
-                             price_basis="adjusted_close", benchmark_semantics="absolute",
-                             corporate_action_semantics="fixture_adjustment", normalization_policy="none",
-                             maturity=r.MaturitySpec(lag_sessions=h+1, rule="target_end_available_before_fit",
+                             feature_session="f",
+                             return_start_rule="next_session_close", return_end_rule="horizon_after_start",
+                             price_basis="close_times_factor", benchmark_semantics="absolute_return",
+                             corporate_action_semantics="supplier_cumulative_factor", normalization_policy="none",
+                             maturity=r.MaturitySpec(rule="outcomes_available_strictly_before_cutoff",
                                                      calendar_policy="explicit_calendar", availability_rule="close_final"),
                              missing_delisting_policy="invalidate_and_report")
         ds = r.DatasetSpec(name=f"ds{h}", key=("security_id", "session"), feature_release=feature,
@@ -99,8 +103,8 @@ def examples():
                                  pit_policy=plan.pit_policy, cutoff_policy=plan.cutoff_policy,
                                  reference_universe=ref("Universe"), implementation_package=ref("CorePackage"))
     lb = r.LabelBuildIdentity(data_refs=(ref("DataSnapshot"),), label=labels[0], scope=dr.scope,
-                               calendar_ref=ref("Calendar"), benchmark_semantics="absolute",
-                               corporate_action_semantics="fixture_adjustment")
+                               calendar_ref=ref("Calendar"), benchmark_semantics="absolute_return",
+                               corporate_action_semantics="supplier_cumulative_factor")
     di = r.DatasetIdentity(feature_build=ref("FeatureBuild"), label_build=ref("LabelBuild"),
                              dataset_spec=datasets[0], fit_protocol="train_only")
     models = []
@@ -159,7 +163,7 @@ class R0Contracts(unittest.TestCase):
         bad = [replace(fp, ordered_output_schema=fp.ordered_output_schema*2),
                replace(fp, key=()), replace(ds.label, horizon_sessions=0),
                replace(ds.label, horizon_sessions=True), replace(ds.label, maturity=None),
-               replace(ds.label, return_end_offset_sessions=5),
+               replace(ds.label, return_end_rule="start+5_sessions"),
                replace(ds.split, validation=ds.split.train),
                replace(ds.split, oos=interval("2019-01-01", "2019-02-01")),
                replace(ds, rolling_folds=[]),
@@ -197,8 +201,7 @@ class R0Contracts(unittest.TestCase):
         changed = [(self.fb, feature_changed(formula="a / (b + 1)")),
                    (replace(self.fb, lookback_sessions=3),
                     replace(feature_changed(lag_sessions=1), lookback_sessions=3)),
-                   (self.lb, replace(self.lb, label=replace(self.lb.label, horizon_sessions=59,
-                                                          return_end_offset_sessions=60))),
+                   (self.lb, replace(self.lb, label=replace(self.lb.label, horizon_sessions=59))),
                    (self.fb, replace(self.fb, pit_policy="different_safe_v2", feature_release=
                        replace(self.fb.feature_release, plan=replace(fp, pit_policy="different_safe_v2")))),
                    (self.di, replace(self.di, dataset_spec=replace(self.di.dataset_spec,
@@ -255,6 +258,109 @@ class R0Contracts(unittest.TestCase):
         self.assertTrue({"DATA_CLOSURE", "PIT_BASELINE", "LABEL_LINEAGE", "OOS_LINEAGE", "CORE_ABI"} <= ids)
         with self.assertRaises(r.ContractError): r.validate(recipe, require_resolved=True)
         with self.assertRaises(r.ContractError): r.validate(replace(recipe, correctness_blockers=()), require_resolved=True)
+
+    def test_R0_06_unknown_cannot_be_laundered_through_parameters(self):
+        model = self.run.identity.bindings[0].model.identity
+        # Exercise Any, lists and embedded contracts, not just typed Unknown unions.
+        for nested in (self.unknown, {"inner": self.unknown}, {"metadata": {"nested": self.unknown}},
+                       [{"inner": [self.unknown]}],
+                       {"spec": replace(self.recipe.training[1],
+                                        parameters={"nested": [self.unknown]})}):
+            with self.subTest(nested=type(nested).__name__):
+                draft = replace(self.recipe.training[0], parameters={"custom": nested})
+                restored = r.loads(r.dumps(draft))
+                self.assertEqual(restored, draft)
+                self.assertEqual(r.unresolved(restored), (self.unknown,))
+                self.assertEqual(r.unresolved(r.to_dict(restored)), (self.unknown,))
+                with self.assertRaises(r.ContractError):
+                    r.validate(restored, require_resolved=True)
+                blocked = replace(model, training_spec=restored)
+                with self.assertRaises(r.ContractError): r.validate(blocked)
+                with self.assertRaises(r.ContractError): r.semantic_identity(blocked)
+                raw = r.to_dict(model)
+                raw["training_spec"] = r.to_dict(restored)
+                with self.assertRaises(r.ContractError): r.from_dict(raw)
+        # YAML parsers return ordinary dictionaries/lists, the same wire boundary.
+        try:
+            import yaml
+        except ImportError:
+            self.fail("Run this counterexample with PyYAML installed")
+        draft = replace(self.recipe.training[0], parameters={"nested": [self.unknown]})
+        tagged = replace(self.recipe.training[0], parameters={"nested": [r.to_dict(self.unknown)]})
+        self.assertEqual(r.semantic_identity(draft), r.semantic_identity(tagged))
+        restored = r.from_dict(yaml.safe_load(yaml.safe_dump(r.to_dict(draft))))
+        self.assertEqual(r.unresolved(restored), (self.unknown,))
+        self.reject(replace(model, training_spec=restored))
+        malformed = r.to_dict(draft)
+        del malformed["parameters"]["nested"][0]["reason"]
+        with self.assertRaises(r.ContractError): r.from_dict(malformed)
+        malformed = r.to_dict(draft)
+        malformed["parameters"]["nested"][0]["contract_type"] = "UnregisteredUnknown"
+        with self.assertRaises(r.ContractError): r.from_dict(malformed)
+
+    def test_R0_07_label_has_one_authority(self):
+        label = self.lb.label
+        shorter = replace(label, horizon_sessions=59)
+        r.validate(shorter)
+        self.assertEqual((label.return_start_offset_sessions, label.return_end_offset_sessions), (1, 61))
+        self.assertEqual((shorter.return_start_offset_sessions, shorter.return_end_offset_sessions), (1, 60))
+        self.assertNotEqual(label.formula, shorter.formula)
+        self.assertNotEqual(label.target_interval, shorter.target_interval)
+        self.assertEqual(label.maturity_lag_sessions, 61)
+        self.assertEqual(shorter.maturity_lag_sessions, 60)
+        self.assertNotEqual(r.semantic_identity(label), r.semantic_identity(shorter))
+        # Old independent executable authorities cannot enter the new wire contract.
+        for field, value in (("formula", "A[f+61]/A[f+1]-1"),
+                             ("return_end_offset_sessions", 60),
+                             ("return_start_offset_sessions", 1)):
+            raw = r.to_dict(shorter)
+            raw[field] = value
+            with self.subTest(field=field), self.assertRaises(r.ContractError): r.from_dict(raw)
+        for field, value in (("return_end_rule", "start+60_sessions"),
+                             ("return_start_rule", "f+2"),
+                             ("price_basis", "unspecified"),
+                             ("benchmark_semantics", "undocumented_excess_return"),
+                             ("corporate_action_semantics", "undocumented_action"),
+                             ("corporate_action_semantics", "none")):
+            self.reject(replace(shorter, **{field: value}))
+        raw = r.to_dict(shorter)
+        raw["maturity"]["lag_sessions"] = 61
+        with self.assertRaises(r.ContractError): r.from_dict(raw)
+        evidence = replace(shorter, metadata={"legacy_formula": label.formula})
+        self.assertEqual(evidence.formula, shorter.formula)
+        self.assertEqual(r.semantic_identity(evidence), r.semantic_identity(shorter))
+        self.assertEqual(r.loads(r.dumps(shorter)), shorter)
+
+    def test_R0_08_feature_pit_is_semantic_and_required(self):
+        feature = self.fb.feature_release.plan.features[0]
+        policy = feature.pit_policy
+        for field, value in (("availability_dependency", "maximum input availability plus one session"),
+                             ("report_period_update_semantics", "only newer period innovations"),
+                             ("exact_date_matching", "strictly_after_dependency_date")):
+            changed = replace(feature, pit_policy=replace(policy, **{field: value}))
+            with self.subTest(field=field):
+                self.assertEqual(changed, r.loads(r.dumps(changed)))
+                self.assertNotEqual(r.semantic_identity(feature), r.semantic_identity(changed))
+        for field in ("availability_dependency", "report_period_update_semantics", "exact_date_matching"):
+            raw = r.to_dict(feature)
+            del raw["pit_policy"][field]
+            with self.assertRaises(r.ContractError): r.from_dict(raw)
+        self.reject(replace(policy, exact_date_matching="arbitrary"))
+        self.reject(replace(policy, contract_version="unsupported"))
+        self.reject(replace(policy, exact_date_matching="source_mode_dependent"))
+        self.reject(replace(policy, availability_dependency=" "))
+        self.reject(replace(policy, report_period_update_semantics=""))
+        unresolved_feature = replace(feature, pit_policy=replace(policy, availability_dependency=self.unknown))
+        with self.assertRaises(r.ContractError): r.validate(unresolved_feature, require_resolved=True)
+        self.reject(replace(self.fb, feature_release=replace(self.fb.feature_release,
+                    plan=replace(self.fb.feature_release.plan, features=(unresolved_feature,)))))
+        recipe = r.load(Path(r.__file__).parent/"fixtures"/"financial_rc.json")
+        self.assertEqual(len(r.unresolved(recipe)), 24)
+        income = next(f for f in recipe.feature_release.plan.features if f.name == "ttm_revenue_yoy")
+        self.assertIsInstance(income.pit_policy.availability_dependency, str)
+        self.assertIsInstance(income.pit_policy.report_period_update_semantics, str)
+        self.assertEqual(income.pit_policy.exact_date_matching, "source_mode_dependent")
+        self.assertTrue(r.unresolved(income.pit_policy))
 
 
 if __name__ == "__main__":

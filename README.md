@@ -21,7 +21,7 @@ Build-request identity contracts: `FeatureBuildIdentity`, `LabelBuildIdentity`,
 requirements; constructing one is not evidence that a build ran or bytes exist.
 
 Supporting types: `ArtifactRef`, `Unknown`, `Column`, `SessionRange`,
-`FeatureDefinition`, `Requirement`, `MaturitySpec`, `SplitSpec`, `FoldSpec`,
+`FeatureDefinition`, `PITPolicy`, `Requirement`, `MaturitySpec`, `SplitSpec`, `FoldSpec`,
 `ResourceSpec`, `SignalInput`, `SignalNode`, `SignalBinding`, `Contract`.
 
 Functions: `validate`, `unresolved`, `to_dict`, `from_dict`, `dumps`, `loads`,
@@ -68,8 +68,14 @@ TrainingSpec/ModelRelease. Model schema must match that ordered input boundary.
 - `reports/evidence.json`:source digests, actual pinned model metadata and blockers.
 - `docs/IDENTITY.md`:identity, reuse and unresolved-data rules.
 - `reports/tests.log`, `reports/REVIEW.md`:executed test and independent review evidence.
+- `reports/tests-correctness.log`, `reports/freeze-correctness.log`,
+  `reports/REVIEW_CORRECTNESS.md`: contract correctness follow-up acceptance.
 
 From this directory:
+
+The YAML transport counterexample additionally requires PyYAML in the test
+environment; the package itself remains standard-library-only. YAML callers use
+`from_dict(yaml.safe_load(...))` and `yaml.safe_dump(to_dict(...))`.
 
 ```sh
 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -78,7 +84,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 Tests contain explicitly synthetic manifest closures; none are model/signal
 research outputs. R0-01 exercises every public contract type; R0-02 invalid
 contracts; R0-03 semantic identity mutations; R0-04 Financial RC recipe validation;
-R0-05 preservation/admission of UNKNOWN values.
+R0-05 preservation/admission of UNKNOWN values; R0-06 nested JSON/YAML UNKNOWN
+laundering rejection; R0-07 label authority contradictions; R0-08 feature PIT
+validation, serialization and identity.
 
 The reviewed forensic tool `tools/freeze_financial_rc.py` reads the exact local
 legacy source and frozen archive. It verifies HEAD/dirty patch and pinned payload

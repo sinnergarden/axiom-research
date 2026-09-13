@@ -116,3 +116,19 @@ and full matured serving refit. b242 alpha training has the same regression
 defaults and median/MAD scaler. Comparing b242 to c969 shows added PIT masks for
 cross-sectional formulas and audited income availability propagation, so source
 formula similarity does not establish equivalent original feature materialization.
+
+## Version 2 definition migration
+
+DECISION: the packaged LabelSpec now stores enum start/end, price, benchmark and
+action rules. Its formula, offsets and target-end maturity lag derive from horizon;
+legacy formula text is retained only as evidence metadata. Maturity availability
+and original label lineage remain explicit proof obligations.
+
+FACT: the feature map records source publication rules for native provider fields,
+shareholder announcements and income features. Inspected income code propagates
+the maximum availability of each feature's dependencies, emits only newer report
+periods per availability stream, and allows exact-date matches only in legacy mode.
+The required per-feature PITPolicy preserves these scoped facts and both income
+source modes. Fields absent from the feature map retain DATA_CLOSURE; original
+materialization retains PIT_BASELINE. This migration does not establish which mode
+produced the pinned models and does not resolve any of the existing 24 Unknown IDs.

@@ -1,5 +1,32 @@
 # Research R0 — run research-r0-20260913
 
+## Contract correctness follow-up — baseline 2699fbc
+
+Objective: fix recursive UNKNOWN preservation, establish one structured label
+authority, and freeze feature availability/report-period/exact-date semantics.
+No Engine/Core implementation or executors; NO_BULK_BUILD; no merge.
+
+Definition of Done: JSON and YAML-compatible mapping roundtrips preserve nested
+blockers and reject ModelIdentity admission; contradictory label configuration
+is rejected and horizon changes derived interval/maturity identity; feature PIT
+policy is validated, serialized and hashed; original and new tests pass under
+Luna; independent Astra review accepts code and artifacts; new commit is pushed
+on a repair branch and remote tip independently verified.
+
+1. Root cause and focused implementation — complete; three packaged fixtures
+   migrated with the reviewed versioned contract changes.
+2. Independent code review and original/new counterexample tests — complete.
+   R0-01–08 pass; canonical freeze reproduces the fixture/evidence bytes, with
+   96 columns and the original 24 distinct UNKNOWN obligations still blocking
+   execution. See reports/REVIEW_CORRECTNESS.md and tests-correctness.log.
+3. Delivery gate: commit reviewed artifacts to fix/r0-contract-correctness,
+   push that branch, and independently verify clean status and equality of local
+   HEAD and remote branch tip. The verified immutable commit is reported at
+   handoff rather than embedded in its own tracked content. No merge.
+
+The following records the historical R0 delivery; this follow-up supersedes its
+contract correctness acceptance and recipe identity once validated.
+
 Objective: freeze Financial RC 60/180 evidence and research definitions, implement
 small versioned contracts and identity rules, deliver requirements for Data and
 Engine/Core E0. Source evidence is read-only. No data build or research execution.

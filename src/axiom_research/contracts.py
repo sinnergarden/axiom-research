@@ -47,7 +47,18 @@ class SessionRange(Contract):
 
 
 @dataclass(frozen=True, kw_only=True)
+class PITPolicy(Contract):
+    source_publication_policy: str | Unknown
+    availability_dependency: str | Unknown
+    report_period_update_semantics: str | Unknown
+    exact_date_matching: Literal["allow_on_source_date", "strictly_after_dependency_date",
+                                 "source_mode_dependent", "not_applicable"] | Unknown
+    original_materialization: ArtifactRef | Unknown
+
+
+@dataclass(frozen=True, kw_only=True)
 class FeatureDefinition(Contract):
+    contract_version: Literal["2"] = "2"
     name: str
     business_definition: str
     inputs: tuple[str, ...]
@@ -58,6 +69,7 @@ class FeatureDefinition(Contract):
     missing_policy: str | Unknown
     outlier_policy: str | Unknown
     reference_universe_policy: str | Unknown
+    pit_policy: PITPolicy
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -110,29 +122,60 @@ class FeatureRelease(Contract):
 
 @dataclass(frozen=True, kw_only=True)
 class MaturitySpec(Contract):
-    lag_sessions: int
-    rule: str
+    contract_version: Literal["2"] = "2"
+    rule: Literal["outcomes_available_strictly_before_cutoff"] | Unknown
     calendar_policy: str
     availability_rule: str | Unknown
 
 
 @dataclass(frozen=True, kw_only=True)
 class LabelSpec(Contract):
+    contract_version: Literal["2"] = "2"
     name: str
     key: tuple[str, ...]
-    horizon_sessions: int
+    horizon_sessions: int | Unknown
     feature_session: str | Unknown
-    formula: str | Unknown
-    return_start_rule: str | Unknown
-    return_end_rule: str | Unknown
-    return_start_offset_sessions: int | Unknown
-    return_end_offset_sessions: int | Unknown
-    price_basis: str | Unknown
-    benchmark_semantics: str | Unknown
-    corporate_action_semantics: str | Unknown
+    return_start_rule: Literal["feature_session_close", "next_session_close"] | Unknown
+    return_end_rule: Literal["horizon_after_start"] | Unknown
+    price_basis: Literal["close", "close_times_factor"] | Unknown
+    benchmark_semantics: Literal["absolute_return"] | Unknown
+    corporate_action_semantics: Literal["none", "supplier_cumulative_factor"] | Unknown
     normalization_policy: str | Unknown
     maturity: MaturitySpec | Unknown
     missing_delisting_policy: str | Unknown
+
+    @property
+    def return_start_offset_sessions(self) -> int | Unknown:
+        if isinstance(self.return_start_rule, Unknown):
+            return self.return_start_rule
+        return {"feature_session_close": 0, "next_session_close": 1}[self.return_start_rule]
+
+    @property
+    def return_end_offset_sessions(self) -> int | Unknown:
+        for value in (self.return_end_rule, self.horizon_sessions,
+                      self.return_start_offset_sessions):
+            if isinstance(value, Unknown):
+                return value
+        return self.return_start_offset_sessions + self.horizon_sessions
+
+    @property
+    def target_interval(self) -> tuple[int | Unknown, int | Unknown]:
+        return self.return_start_offset_sessions, self.return_end_offset_sessions
+
+    @property
+    def maturity_lag_sessions(self) -> int | Unknown:
+        """Target-end offset; actual availability must still satisfy MaturitySpec."""
+        return self.return_end_offset_sessions
+
+    @property
+    def formula(self) -> str | Unknown:
+        start, end = self.target_interval
+        for value in (start, end, self.price_basis, self.benchmark_semantics,
+                      self.corporate_action_semantics):
+            if isinstance(value, Unknown):
+                return value
+        price = {"close": "close", "close_times_factor": "close*factor"}[self.price_basis]
+        return f"A[f+{end}]/A[f+{start}]-1; A={price}"
 
 
 @dataclass(frozen=True, kw_only=True)

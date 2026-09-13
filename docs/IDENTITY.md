@@ -4,12 +4,32 @@
 version and every semantic field. Dictionary keys are sorted; list/column/node
 order is preserved. Typed tuple and numeric fields are normalized before hashing.
 Parameter dictionaries retain their exact JSON semantics, including any key named
-`metadata`; only actual Contract.metadata is excluded.
+`metadata`; only actual Contract.metadata is excluded. `contract_type` is a reserved
+tag in every nested dictionary/list: recognized tags reconstruct validated typed
+contracts, including Unknown; malformed or unrecognized tags are rejected.
 
 Contract metadata is exclusively presentation/provenance annotation. Correctness
 state belongs in required semantic fields and structured Unknown/Requirement
 status, never metadata. Clearing a recipe's summary blocker list does not clear
 the unresolved values embedded in its Feature/Label/Dataset definitions.
+The same rule applies to arbitrary TrainingSpec/SignalNode parameter dictionaries,
+lists and embedded specs after JSON or YAML parsing. `unresolved` also recognizes
+serialized tagged contracts directly; roundtripping cannot clear their blockers.
+
+FeatureDefinition and LabelSpec use contract version 2, as does MaturitySpec.
+Their old wire shapes are rejected rather than silently translated. Each Feature
+requires a versioned PITPolicy carrying publication policy, availability dependencies,
+report-period update semantics, exact-date matching and original materialization
+evidence. These fields are semantic identity inputs; the plan-wide PIT description
+does not replace them. Missing source proof remains an explicit Unknown.
+
+LabelSpec's sole target authority is horizon plus enum start/end, price, benchmark
+and corporate-action rules. Offsets, target interval, displayed formula and target-end
+maturity lag are derived properties and are absent from serialized inputs. Changing
+horizon changes all derived endpoints and the Label identity together. MaturitySpec
+adds the strict-before-cutoff rule, calendar and availability qualification, without
+an independent lag. Actual availability may be later than the derived target end.
+Legacy formula text may be retained in metadata only and has no execution authority.
 
 ArtifactRef identity includes artifact type, immutable ID, referenced contract
 version and content digest. URI only locates the bytes and is excluded from

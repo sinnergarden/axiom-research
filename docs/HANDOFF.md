@@ -44,8 +44,10 @@ fixed public Data/View + calendar/units/PIT requirements (bindings unresolved)
 →pred_60/pred_180 → daily zscore(ddof0, no clip) →0.5*z60+0.5*z180
 ```
 
-Packaged financial_rc.json has definition identity:
-`sha256:a74df99ae7644a4ff9f46a73fabbad5b25c6e320d1f2f18cdf69e031f5f41cbe`.
+The packaged financial_rc.json definition identity is recorded in
+`reports/evidence.json` under `recipe_semantic_identity`. The contract correctness
+repair changes that identity by binding versioned feature PIT policies and the
+structured label authority; the original source evidence remains pinned.
 It passes draft contract validation and rejects execution admission while
 unresolved obligations remain. No actual ModelRelease or SignalRun is fabricated
 for these incomplete historical proofs; manifest roundtrip examples are synthetic.
@@ -79,6 +81,11 @@ and model/fold evidence before historical OOS admission. Code formula and file
 hash evidence cannot certify those claims. No other repo requires an R0 code edit.
 
 ## 7. Tests
+
+The table below records the original R0 acceptance. The correctness follow-up
+adds nested JSON/YAML blocker, label contradiction and feature PIT counterexamples
+in R0-06–08; its results and independent acceptance are recorded separately in
+`reports/tests-correctness.log` and `reports/REVIEW_CORRECTNESS.md`.
 
 | Acceptance | Result |
 |---|---|
