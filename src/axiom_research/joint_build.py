@@ -323,6 +323,9 @@ def build_joint_features(data: Any, *, snapshot: str, market_queries: Mapping[st
                     recipe_ref=recipe_ref,output_keys=outputs,lag_sessions=lag_sessions) for alias,batch in markets.items()}
         events={alias:data.events(snapshot=snapshot,query=replace(q,cutoff=template.cutoff_by_session[session]))
                 for alias,q in financial_queries.items()}
+        for alias,batch in events.items():
+            ctx=batch.to_json()['context']
+            contexts[alias+':'+ctx['domain']+':'+session]=ctx
         frame,sources=_execute(inputs,events,session,lag_sessions)
         _require([(x['name'],x['unit']) for x in frame['schema']]==
                  [(x.name,x.unit) for x in identity.feature_release.plan.ordered_output_schema], 'output schema differs from release')

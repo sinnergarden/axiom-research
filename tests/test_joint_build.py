@@ -107,6 +107,7 @@ class JointBuildTests(unittest.TestCase):
             values=result.read()['income__total_revenue']
             self.assertTrue(values.isna().iloc[0]);self.assertEqual(values.iloc[1],100)
             self.assertTrue(values.isna().iloc[2])
+            self.assertIn('income:financial_events:'+SESSIONS[0],result.evidence()['query_contexts'])
             frames=result.evidence()['frames']
             self.assertIn('NO_VISIBLE_EVENT',frames[0]['rows'][0]['reasons'][-1])
             self.assertIn('retracted',frames[-1]['rows'][0]['reasons'][-1])
