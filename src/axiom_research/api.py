@@ -144,10 +144,10 @@ def _semantics(obj: c.Contract) -> None:
         _require(obj.key == KEY, "Explicit key must be (security_id, session)")
     for f in fields(obj):
         value = getattr(obj, f.name)
-        if f.name in ("lag_sessions", "window_sessions", "lookback_sessions"):
+        if f.name in ("lag_sessions", "window_sessions", "lookback_sessions", "label_extension_sessions"):
             _require(isinstance(value, c.Unknown) or value >= 0, f"Invalid {f.name}")
         if f.name in ("horizon_sessions", "retrain_step_sessions", "train_window_sessions",
-                      "threads", "concurrent_folds", "memory_limit_mb", "label_extension_sessions"):
+                      "threads", "concurrent_folds", "memory_limit_mb"):
             _require(isinstance(value, c.Unknown) or value > 0, f"Invalid {f.name}")
     if isinstance(obj, c.ArtifactRef):
         _require(bool(re.fullmatch(r"sha256:[0-9a-f]{64}", obj.content_digest)), "Invalid digest")
