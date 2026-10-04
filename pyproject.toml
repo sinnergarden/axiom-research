@@ -4,16 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "axiom-research"
-version = "0.1.4"
+version = "0.2.0"
 description = "Axiom Research R0 definitions, manifests and identity contracts"
 requires-python = ">=3.11"
 dependencies = ["axiom-engine>=0.1.0"]
 
 [project.optional-dependencies]
 build = ["axiom-data>=0.3.4", "pyarrow>=14"]
+ml = ["axiom-data>=0.3.4", "pyqlib==0.9.7", "lightgbm==4.7.0", "pyarrow>=14"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-axiom_research = ["fixtures/*.json"]
+axiom_research = ["fixtures/*.json", "catalogs/*.json"]

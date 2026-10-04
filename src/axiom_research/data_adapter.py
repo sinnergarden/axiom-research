@@ -187,7 +187,8 @@ def adapt_fixed_universe_batch(batch: Any, *, universe: tuple[str, ...],
 
 def adapt_decision_batch(batch: Any, *, reference: Any, recipe_ref: str,
                          output_keys: tuple[tuple[str, str], ...] | None = None,
-                         lag_sessions: int = 1) -> AdaptedFacts:
+                         lag_sessions: int = 1,
+                         source_granularity: str = "cell") -> AdaptedFacts:
     """Map matching daily Data reads to a Core identity and return plan.
 
     `reference` must be a Data.members result for the same snapshot, sessions,
@@ -198,6 +199,7 @@ def adapt_decision_batch(batch: Any, *, reference: Any, recipe_ref: str,
     _require(isinstance(recipe_ref, str) and recipe_ref.startswith("sha256:") and
              len(recipe_ref) == 71, "recipe_ref must be an immutable digest")
     _require(type(lag_sessions) is int and lag_sessions >= 1, "positive lag required")
+    _require(source_granularity in ("cell", "batch_field"), "unknown source granularity")
     records, field_meta, ctx = _versioned(batch, "decision_facts")
     ref_records, ref_meta, ref_ctx = _versioned(reference, "decision_facts")
     q, rq = ctx["query"], ref_ctx["query"]
@@ -251,23 +253,33 @@ def adapt_decision_batch(batch: Any, *, reference: Any, recipe_ref: str,
                              "reader_version": ref_ctx["reader_version"]})
     calendar_ref = _digest({"sessions": sessions, "snapshot_id": ctx["snapshot_id"]})
     sources, evidence = {}, {}
+    batch_refs = {_ref: _digest(_batch.to_json()) for _ref, _batch in
+                  ((False, batch), (True, reference))} if source_granularity == "batch_field" else {}
 
     def bind(field: str, key: tuple[str, str], meta: dict, *, ref: bool = False) -> str:
-        source_id = _digest({"field": field, "key": key, "meta": meta, "reference": ref})
+        leaves = _leaves(meta)
+        basis = "+".join(sorted({str(m.get("availability_basis") or "missing") for m in leaves}))
+        qualification = ("synthetic" if "synthetic" in basis else
+                         "best_effort" if "assumption" in basis else
+                         "verified" if all(m.get("evidence_ref") for m in leaves) else
+                         "observed" if all(m.get("first_observed_at") for m in leaves) else
+                         "best_effort")
+        source_id = _digest({"field": field, "batch_ref": batch_refs[ref],
+                            "qualification": qualification, "basis": basis}) if batch_refs else _digest(
+                                {"field": field, "key": key, "meta": meta, "reference": ref})
         if source_id not in sources:
-            leaves = _leaves(meta)
-            basis = "+".join(sorted({str(m.get("availability_basis") or "missing") for m in leaves}))
-            qualification = ("synthetic" if "synthetic" in basis else
-                             "best_effort" if "assumption" in basis else
-                             "verified" if all(m.get("evidence_ref") for m in leaves) else
-                             "observed" if all(m.get("first_observed_at") for m in leaves) else
-                             "best_effort")
             sources[source_id] = dict(id=source_id, data_ref=data_ref if not ref else reference_ref,
                                       view_ref=view_ref if not ref else reference_ref,
                                       revision_policy=str(q["pit_policy"] if not ref else rq["pit_policy"]),
                                       qualification=qualification, availability_basis=basis)
-            evidence[source_id] = {"field": field, "security_id": key[0], "session": key[1],
+            evidence[source_id] = ({"field": field, "batch_ref": batch_refs[ref],
+                                   "query_context": ref_ctx if ref else ctx,
+                                   "provenance_by_key": []} if batch_refs else
+                                  {"field": field, "security_id": key[0], "session": key[1],
                                    "provenance": meta, "query_context": ref_ctx if ref else ctx}
+                                  )
+        if batch_refs:
+            evidence[source_id]["provenance_by_key"].append(meta)
         return source_id
 
     fact_rows, reference_rows, members = [], [], {session: {} for session in sessions}
