@@ -135,15 +135,30 @@ many-year feature build performance have not been accepted.
 
 ## Saved experiment records and readonly browsing
 
-Research 0.1.3 adds public `ExperimentStore` and `ExperimentReader`. The writer
+Research 0.1.4 retains public `ExperimentStore` and `ExperimentReader`. The writer
 registers immutable questions, versions and runs referencing existing artifacts;
-group/tag/favorite/shelved updates use an expected revision and preserve history.
+question group/tag organization and run favorite/shelved updates use an expected
+revision and preserve history. `update_run_organization(run_record_ref, ...)`
+resolves the registration to the saved account's stable `saved_run_ref` (bound to
+Engine `run_id`, `content_digest` and committed sequence). Replacing a saved
+evaluation does not create another backtest or lose that account's markers.
 `ExperimentReader(path).index(...)`, `.detail(question_id)` and
 `.compare_versions(left_ref, right_ref)` only read and validate the small JSON
 index. They do not create files, scan artifact directories or compute metrics.
 Missing indexes raise FileNotFoundError; missing values remain explicit nulls.
 The public Reader import is independent of the optional Data/Core build runtime.
 Existing build/loader exports keep their import paths and load on demand.
+
+Default `runs` contains one group per saved account with complete immutable
+`registration_history`; its latest matching registration is navigation metadata.
+`saved_backtest_count` and `registration_count` distinguish executions from
+registrations. Records without an account remain `REGISTRATION_ONLY` items and
+do not count as backtests. Version/status filters retain the matching associations
+and the complete history. Use `run_favorite` / `run_shelved` for run filters;
+the original `favorite` / `shelved` arguments keep their question-level meaning.
+Older indexes get false run markers in memory without a disk migration.
+Recent questions use `last_activity_at`, the latest saved question/version/run
+timestamp, with stable ID ties. Filesystem times and marker edits do not change it.
 
 Engine associations preserve `run_id`, `content_digest` and committed sequence.
 An optional saved evaluation must refer to that same account result. Signal

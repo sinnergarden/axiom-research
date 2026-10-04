@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import subprocess
@@ -87,7 +88,10 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(len(self.reader.index(group="ETF", tags=["fixed"], favorite=True,
                                              status="FAILED")["questions"]), 1)
         self.assertEqual(self.reader.index(tags=["missing"])["questions"], [])
-        self.assertEqual(self.reader.index(status="FAILED")["questions"][0]["runs"], [failed])
+        self.assertEqual(self.reader.index(status="FAILED")["questions"][0]["runs"],
+                         [{**failed, "saved_run_ref": failed["run_record_ref"],
+                           "run_kind": "REGISTRATION_ONLY", "registration_history": [failed],
+                           "organization": {"revision": 0, "favorite": False, "shelved": False}}])
         self.assertEqual(self.reader.index(shelved=True)["questions"], [])
         self.store.update_organization("momentum", expected_revision=1,
             groups=["ETF"], tags=["baseline"], favorite=False, shelved=True)
@@ -111,6 +115,142 @@ class ExperimentTests(unittest.TestCase):
             outcomes = list(workers.map(update, ["first", "second"]))
         self.assertCountEqual(outcomes, ["saved", "conflict"])
         self.assertEqual(self.reader.detail("momentum")["questions"][0]["organization"]["revision"], 1)
+
+    def test_independent_run_markers_filters_and_cas_preserve_records_and_question_tags(self):
+        kept = self.run_record(outcome="Explicit synthetic retained result")
+        shelved = self.run_record(status="BLOCKED", output_refs=[], backtest_ref=None,
+                                 evaluation_ref=None, reason="Synthetic missing dependency")
+        question_org = self.store.update_organization("momentum", expected_revision=0,
+            groups=["ETF"], tags=["fixed"], favorite=False, shelved=False)
+        self.store.update_run_organization(kept["run_record_ref"], expected_revision=0,
+                                           favorite=True, shelved=False)
+        self.store.update_run_organization(shelved["run_record_ref"], expected_revision=0,
+                                           favorite=False, shelved=True)
+        retained = self.reader.index(group="ETF", tags=["fixed"], run_favorite=True,
+                                     run_shelved=False)["questions"][0]
+        self.assertEqual(retained["organization"], question_org)
+        self.assertEqual([r["run_record_ref"] for r in retained["runs"]], [kept["run_record_ref"]])
+        blocked = self.reader.index(status="BLOCKED", run_shelved=True)["questions"][0]["runs"]
+        self.assertEqual(blocked, [{**shelved, "organization":
+                                   {"revision": 1, "favorite": False, "shelved": True},
+                                   "saved_run_ref": shelved["run_record_ref"],
+                                   "run_kind": "REGISTRATION_ONLY", "registration_history": [shelved]}])
+        self.assertEqual(self.reader.index(run_favorite=True, run_shelved=True)["questions"], [])
+        self.assertEqual(self.reader.index(favorite=True)["questions"], [])
+        before = self.path.read_bytes(), self.path.stat().st_mtime_ns
+        for action in (
+            lambda: self.store.update_run_organization(kept["run_record_ref"],
+                expected_revision=0, favorite=False, shelved=True),
+            lambda: self.store.update_run_organization(digest("9"),
+                expected_revision=0, favorite=False, shelved=False),
+            lambda: self.reader.index(run_favorite=1),
+        ):
+            with self.assertRaises(ExperimentRecordError):
+                action()
+            self.assertEqual(before, (self.path.read_bytes(), self.path.stat().st_mtime_ns))
+        self.assertEqual(kept, self.run_record(outcome="Explicit synthetic retained result"))
+        self.assertEqual(before, (self.path.read_bytes(), self.path.stat().st_mtime_ns))
+        state = json.loads(self.path.read_text())
+        self.assertEqual(state["runs"][kept["run_record_ref"]], kept)
+        self.assertEqual([row["revision"] for row in state["run_organizations"][retained["runs"][0]["saved_run_ref"]]], [0, 1])
+
+    def test_legacy_index_defaults_are_readonly_and_explicit_write_adds_run_history(self):
+        kept = self.run_record()
+        self.store.update_organization("momentum", expected_revision=0,
+            groups=["ETF"], tags=[], favorite=True, shelved=True)
+        from axiom_research.experiments import _digest
+        state = json.loads(self.path.read_text())
+        state.pop("run_organizations")
+        state["content_digest"] = _digest({k: v for k, v in state.items() if k != "content_digest"})
+        self.path.write_text(json.dumps(state))
+        before = self.path.read_bytes(), self.path.stat().st_mtime_ns
+        entry = self.reader.index()["questions"][0]
+        self.assertEqual(entry["runs"][0]["organization"],
+                         {"revision": 0, "favorite": False, "shelved": False})
+        self.assertEqual(self.reader.index(run_favorite=True)["questions"], [])
+        self.assertEqual(kept, self.run_record())
+        self.assertEqual(before, (self.path.read_bytes(), self.path.stat().st_mtime_ns))
+        self.store.update_run_organization(kept["run_record_ref"], expected_revision=0,
+                                           favorite=True, shelved=False)
+        written = json.loads(self.path.read_text())
+        self.assertEqual(written["runs"], state["runs"])
+        self.assertEqual(written["organizations"], state["organizations"])
+        self.assertEqual(written["run_organizations"][entry["runs"][0]["saved_run_ref"]], [
+            {"revision": 0, "favorite": False, "shelved": False},
+            {"revision": 1, "favorite": True, "shelved": False}])
+
+    def test_recent_uses_saved_activity_with_stable_ties_and_never_mtime_or_markers(self):
+        with patch("axiom_research.experiments._now", return_value="2099-01-01T00:00:00Z"):
+            self.store.create_question(question_id="new", title="New", description="", hypothesis="")
+        self.assertEqual(self.reader.index()["questions"][0]["question"]["question_id"], "new")
+        with patch("axiom_research.experiments._now", return_value="2099-01-02T00:00:00+00:00"):
+            run = self.run_record()
+            self.store.create_question(question_id="z-tie", title="Tie", description="", hypothesis="")
+        os.utime(self.path, (1, 1))
+        projection = self.reader.index()
+        self.assertEqual([entry["question"]["question_id"] for entry in projection["questions"]],
+                         ["z-tie", "momentum", "new"])
+        self.assertEqual(projection["questions"][1]["last_activity_at"], run["created_at"])
+        self.store.update_run_organization(run["run_record_ref"], expected_revision=0,
+                                           favorite=True, shelved=False)
+        self.assertEqual([e["last_activity_at"] for e in projection["questions"]],
+                         [e["last_activity_at"] for e in self.reader.index()["questions"]])
+        with patch("axiom_research.experiments._now", return_value="2099-01-03T00:00:00Z"):
+            self.version_record(label="Unrun new version")
+        self.assertEqual(self.reader.index()["questions"][0]["question"]["question_id"], "momentum")
+
+    def test_evaluation_registration_changes_share_one_saved_run_and_keep_version_associations(self):
+        with patch("axiom_research.experiments._now", return_value="2099-01-01T00:00:00Z"):
+            original = self.run_record(evaluation_ref=None)
+        self.store.update_run_organization(original["run_record_ref"], expected_revision=0,
+                                           favorite=True, shelved=False)
+        first_group = self.reader.index()["questions"][0]["runs"][0]
+        with patch("axiom_research.experiments._now", return_value="2099-01-02T00:00:00Z"):
+            candidate = self.run_record()
+        other_version = self.version_record(label="Explicit reference of same saved account",
+            parent_version_ref=self.version["version_ref"])
+        with patch("axiom_research.experiments._now", return_value="2099-01-03T00:00:00Z"):
+            final = self.run_record(version_ref=other_version["version_ref"], outcome="Owner final evaluation")
+        entry = self.reader.index()["questions"][0]
+        self.assertEqual((entry["saved_backtest_count"], entry["registration_count"]), (1, 3))
+        self.assertEqual(len(entry["runs"]), 1)
+        group = entry["runs"][0]
+        self.assertEqual(group["saved_run_ref"], first_group["saved_run_ref"])
+        self.assertEqual(group["organization"], first_group["organization"])
+        self.assertEqual(group["run_record_ref"], final["run_record_ref"])
+        self.assertEqual(group["registration_history"], [original, candidate, final])
+        selected = self.reader.index(version_ref=self.version["version_ref"], run_favorite=True)["questions"][0]
+        self.assertEqual([v["version_ref"] for v in selected["versions"]], [self.version["version_ref"]])
+        self.assertEqual(selected["runs"][0]["run_record_ref"], candidate["run_record_ref"])
+        self.assertEqual(selected["runs"][0]["registration_history"], [original, candidate, final])
+        self.store.update_run_organization(final["run_record_ref"], expected_revision=1,
+                                           favorite=False, shelved=True)
+        self.assertEqual(self.reader.index(run_favorite=True)["questions"], [])
+        self.assertEqual(self.reader.index(run_shelved=True)["questions"][0]["saved_backtest_count"], 1)
+        another_backtest = {**BACKTEST, "content_digest": digest("9")}
+        self.run_record(backtest_ref=another_backtest, evaluation_ref=None)
+        self.assertEqual(self.reader.index()["questions"][0]["saved_backtest_count"], 2)
+
+    def test_concurrent_run_cas_and_invalid_history_cannot_lose_or_hide_state(self):
+        run = self.run_record()
+        def update(favorite):
+            try:
+                ExperimentStore(self.path).update_run_organization(run["run_record_ref"],
+                    expected_revision=0, favorite=favorite, shelved=not favorite)
+                return "saved"
+            except RevisionConflict:
+                return "conflict"
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            self.assertCountEqual(list(workers.map(update, [True, False])), ["saved", "conflict"])
+        from axiom_research.experiments import _digest
+        original = json.loads(self.path.read_text())
+        for invalid in ({}, {run["run_record_ref"]: []},
+                        {run["run_record_ref"]: [{"revision": 1, "favorite": False, "shelved": False}]}):
+            state = {**original, "run_organizations": invalid}
+            state["content_digest"] = _digest({k: v for k, v in state.items() if k != "content_digest"})
+            self.path.write_text(json.dumps(state))
+            with self.assertRaises(ExperimentRecordError):
+                self.reader.index()
 
     def test_readonly_projection_does_not_scan_or_execute_and_leaves_hash_mtime(self):
         self.run_record()

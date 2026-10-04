@@ -115,6 +115,7 @@ def _timestamp(value):
         raise ExperimentRecordError("Invalid created_at") from exc
     _require(parsed.tzinfo is not None and parsed.utcoffset().total_seconds() == 0,
              "created_at must be UTC")
+    return parsed
 
 
 def _organization(groups, tags, favorite, shelved, revision):
@@ -137,6 +138,32 @@ def _validate_organization(value):
                  f"organization.{key}: expected sorted unique labels")
     for key in ("favorite", "shelved"):
         _require(type(value[key]) is bool, f"organization.{key}: expected bool")
+
+
+def _run_organization(favorite=False, shelved=False, revision=0):
+    result = dict(revision=revision, favorite=favorite, shelved=shelved)
+    _validate_run_organization(result)
+    return result
+
+
+def _validate_run_organization(value):
+    _fields(value, ("revision", "favorite", "shelved"), "run organization")
+    _integer(value["revision"], "run organization.revision")
+    for key in ("favorite", "shelved"):
+        _require(type(value[key]) is bool, f"run organization.{key}: expected bool")
+
+
+def _saved_run_ref(record):
+    """Saved account identity excludes evaluation and registration revisions."""
+    backtest = record["backtest_ref"]
+    if backtest is None:
+        return record["run_record_ref"]
+    return _digest({"contract_version": "saved_backtest_ref_v1", "input_run_ref": {
+        key: backtest[key] for key in ("run_id", "content_digest", "committed_sequence")}})
+
+
+def _record_order(record):
+    return _timestamp(record["created_at"]), record["run_record_ref"]
 
 
 def _validate_backtest(value, output_refs):
@@ -217,7 +244,8 @@ def _validate_record(record, kind):
 
 def _empty():
     return {"contract_version": "experiment_index_v1", "store_revision": 0,
-            "questions": {}, "versions": {}, "runs": {}, "organizations": {}}
+            "questions": {}, "versions": {}, "runs": {}, "organizations": {},
+            "run_organizations": {}}
 
 
 def _new_record(value, kind):
@@ -228,7 +256,9 @@ def _new_record(value, kind):
 
 
 def _validate(state):
-    _fields(state, (*_empty(), "content_digest"), "experiment index")
+    expected = set(_empty()) | {"content_digest"}
+    _require(type(state) is dict and set(state) in
+             (expected, expected - {"run_organizations"}), "experiment index: wrong fields")
     _require(state["contract_version"] == "experiment_index_v1", "Unknown index contract")
     _integer(state["store_revision"], "store_revision")
     _hash(state["content_digest"], "index.content_digest")
@@ -250,6 +280,15 @@ def _validate(state):
         for revision, value in enumerate(history):
             _validate_organization(value)
             _require(value["revision"] == revision, "Organization revision gap")
+    if "run_organizations" in state:
+        _require(type(state["run_organizations"]) is dict and
+                 set(state["run_organizations"]) == {_saved_run_ref(r) for r in state["runs"].values()},
+                 "Run organization/run keys mismatch")
+        for history in state["run_organizations"].values():
+            _require(type(history) is list and bool(history), "Missing run organizational history")
+            for revision, value in enumerate(history):
+                _validate_run_organization(value)
+                _require(value["revision"] == revision, "Run organization revision gap")
     for version in state["versions"].values():
         parent = version["parent_version_ref"]
         if parent is not None:
@@ -299,6 +338,9 @@ class ExperimentStore:
             state = _read(self.path) if self.path.exists() else _empty()
             result, changed = operation(state)
             if changed:
+                histories = state.setdefault("run_organizations", {})
+                for run in state["runs"].values():
+                    histories.setdefault(_saved_run_ref(run), [_run_organization()])
                 state["store_revision"] += 1
                 state["content_digest"] = _digest({k: v for k, v in state.items()
                                                   if k != "content_digest"})
@@ -419,6 +461,21 @@ class ExperimentStore:
             return record, True
         return self._mutate(operation)
 
+    def update_run_organization(self, run_record_ref, *, expected_revision, favorite, shelved):
+        """Resolve a registration to its saved account and update that stable target."""
+        _hash(run_record_ref, "run_record_ref")
+        _integer(expected_revision, "expected_revision")
+        record = _run_organization(favorite, shelved, expected_revision + 1)
+        def operation(state):
+            _require(run_record_ref in state["runs"], "Unknown run")
+            history = state.setdefault("run_organizations", {}).setdefault(
+                _saved_run_ref(state["runs"][run_record_ref]), [_run_organization()])
+            if history[-1]["revision"] != expected_revision:
+                raise RevisionConflict("Stale run organization revision")
+            history.append(record)
+            return record, True
+        return self._mutate(operation)
+
 
 class ExperimentReader:
     """Only reads the index metadata; construction has no filesystem effects."""
@@ -427,7 +484,7 @@ class ExperimentReader:
         self.path = Path(path)
 
     def index(self, *, group=None, tags=(), status=None, favorite=None, shelved=None,
-              question_id=None, version_ref=None):
+              question_id=None, version_ref=None, run_favorite=None, run_shelved=None):
         for name, value in (("group", group), ("question_id", question_id)):
             if value is not None:
                 _text(value, name)
@@ -435,7 +492,8 @@ class ExperimentReader:
             _hash(version_ref, "version_ref")
         _require(status is None or status in ("COMPLETE", "FAILED", "BLOCKED"),
                  "Invalid status filter")
-        for name, value in (("favorite", favorite), ("shelved", shelved)):
+        for name, value in (("favorite", favorite), ("shelved", shelved),
+                            ("run_favorite", run_favorite), ("run_shelved", run_shelved)):
             _require(value is None or type(value) is bool, f"{name}: expected bool/null")
         tags = set(_texts(tags))
         state = _read(self.path)
@@ -449,19 +507,43 @@ class ExperimentReader:
                 favorite is not None and favorite != organization["favorite"] or
                 shelved is not None and shelved != organization["shelved"]):
                 continue
-            versions = [v for v in state["versions"].values() if v["question_id"] == qid and
+            all_versions = [v for v in state["versions"].values() if v["question_id"] == qid]
+            all_runs = [r for r in state["runs"].values() if r["question_id"] == qid]
+            last_activity = max([question, *all_versions, *all_runs],
+                                key=lambda r: _timestamp(r["created_at"]))["created_at"]
+            versions = [v for v in all_versions if
                         (version_ref is None or v["version_ref"] == version_ref)]
             if version_ref is not None and not versions:
                 continue
-            runs = [r for r in state["runs"].values() if r["question_id"] == qid and
+            groups = {}
+            for run in all_runs:
+                groups.setdefault(_saved_run_ref(run), []).append(run)
+            runs = []
+            for saved_ref, history in groups.items():
+                run_org = state.get("run_organizations", {}).get(
+                    saved_ref, [_run_organization()])[-1]
+                if (run_favorite is not None and run_org["favorite"] != run_favorite or
+                    run_shelved is not None and run_org["shelved"] != run_shelved):
+                    continue
+                matching = [r for r in history if
                     (version_ref is None or r["version_ref"] == version_ref) and
                     (status is None or r["status"] == status)]
-            if status is not None and not runs:
+                if not matching:
+                    continue
+                latest = max(matching, key=_record_order)
+                runs.append({**latest, "saved_run_ref": saved_ref,
+                    "run_kind": "SAVED_BACKTEST" if latest["backtest_ref"] else "REGISTRATION_ONLY",
+                    "registration_history": sorted(history, key=_record_order),
+                    "organization": deepcopy(run_org)})
+            if (status is not None or run_favorite is not None or run_shelved is not None) and not runs:
                 continue
             entries.append(dict(question=question, organization=organization,
-                versions=sorted(versions, key=lambda v: (v["created_at"], v["version_ref"])),
-                runs=sorted(runs, key=lambda r: (r["created_at"], r["run_record_ref"]))))
-        entries.sort(key=lambda e: (e["question"]["created_at"], e["question"]["question_id"]),
+                last_activity_at=last_activity,
+                saved_backtest_count=sum(r["run_kind"] == "SAVED_BACKTEST" for r in runs),
+                registration_count=sum(len(r["registration_history"]) for r in runs),
+                versions=sorted(versions, key=lambda v: (_timestamp(v["created_at"]), v["version_ref"])),
+                runs=sorted(runs, key=lambda r: (_timestamp(r["created_at"]), r["run_record_ref"]))))
+        entries.sort(key=lambda e: (_timestamp(e["last_activity_at"]), e["question"]["question_id"]),
                      reverse=True)
         return {"contract_version": "experiment_projection_v1",
                 "store_revision": state["store_revision"],
