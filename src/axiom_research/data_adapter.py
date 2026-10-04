@@ -143,6 +143,48 @@ class AdaptedFacts:
         return execute_feature_plan(self.plan, self.facts, self.context)
 
 
+def adapt_fixed_universe_batch(batch: Any, *, universe: tuple[str, ...],
+                               recipe_ref: str,
+                               output_keys: tuple[tuple[str, str], ...] | None = None,
+                               lag_sessions: int = 1) -> AdaptedFacts:
+    """Map a Research-declared fixed universe to the existing Core reference ABI.
+
+    This declaration is not Data membership or historical index evidence. Its
+    explicit origin and digest remain in source_evidence. Missing prices still
+    remain missing; membership never implies listing, tradeability or coverage.
+    """
+    _, _, ctx = _versioned(batch, "decision_facts")
+    q = ctx["query"]
+    _require(isinstance(universe, tuple) and universe and
+             len(set(universe)) == len(universe) and list(universe) == q["symbols"],
+             "fixed universe must exactly match query symbols/order")
+    declaration = {"schema_version": "research_fixed_universe_v1", "members": list(universe)}
+    declaration_ref = _digest(declaration)
+    records, metadata = [], []
+    for security in universe:
+        for session in q["sessions"]:
+            records.append(dict(security_id=security, session=session, is_member=True))
+            metadata.append(dict(security_id=security, session=session,
+                usable_from=q["cutoff_by_session"][session], missing_reason=None,
+                availability_basis="research_declared_fixed_universe",
+                declaration_ref=declaration_ref))
+    wire = dict(records=records,
+        field_meta={"is_member": {"dtype": "bool", "unit": None, "by_key": metadata}},
+        context={"contract_version": "data_batch_v1", "snapshot_id": ctx["snapshot_id"],
+            "domain": "universe_membership", "reader_version": "research_fixed_universe/1",
+            "origin": "Research declaration; not a Data.members read",
+            "declaration": declaration,
+            "query": {**q, "fields": ["is_member"], "price_basis": "unadjusted",
+                      "adjustment_anchor": None, "universe_id": declaration_ref}})
+
+    class Reference:
+        def to_json(self):
+            return wire
+
+    return adapt_decision_batch(batch, reference=Reference(), recipe_ref=recipe_ref,
+                               output_keys=output_keys, lag_sessions=lag_sessions)
+
+
 def adapt_decision_batch(batch: Any, *, reference: Any, recipe_ref: str,
                          output_keys: tuple[tuple[str, str], ...] | None = None,
                          lag_sessions: int = 1) -> AdaptedFacts:

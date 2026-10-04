@@ -1,0 +1,11 @@
+test_adjustment_independent_formula_and_cutoffs (test_rotation.RotationTests.test_adjustment_independent_formula_and_cutoffs) ... ok
+test_cache_reproduction_stage_reuse_and_relocation (test_rotation.RotationTests.test_cache_reproduction_stage_reuse_and_relocation) ... ok
+test_calendar_compression_warmup_and_replay_rejected (test_rotation.RotationTests.test_calendar_compression_warmup_and_replay_rejected) ... ok
+test_concurrent_same_identity_publication_reuses_complete_winner (test_rotation.RotationTests.test_concurrent_same_identity_publication_reuses_complete_winner) ... ok
+test_corruption_and_partial_write_preserve_old_artifacts (test_rotation.RotationTests.test_corruption_and_partial_write_preserve_old_artifacts) ... ok
+test_interior_gap_nonpositive_price_and_unavailable_factor_fail_closed (test_rotation.RotationTests.test_interior_gap_nonpositive_price_and_unavailable_factor_fail_closed) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 5.077s
+
+OK

@@ -4,5 +4,30 @@ from .api import (
     ContractError, content_digest, contract_schema, dumps, from_dict, load, loads,
     save, semantic_identity, to_dict, unresolved, validate,
 )
-from .view_ref import ViewRef
-from .joint_build import FeatureBuild, build_joint_features, load_feature_build
+from .experiments import (ExperimentStore, ExperimentReader,
+                          ExperimentRecordError, RevisionConflict)
+
+# Readonly metadata consumers do not import an optional Data/Core build runtime.
+# Existing runtime names retain their public import paths and load when requested.
+from importlib import import_module as _import_module
+
+_RUNTIME_EXPORTS = {
+    "ViewRef": ".view_ref",
+    "FeatureBuild": ".joint_build", "build_joint_features": ".joint_build",
+    "load_feature_build": ".joint_build",
+    "RotationExperiment": ".rotation", "build_rotation_features": ".rotation",
+    "build_rotation_experiment": ".rotation", "load_rotation_experiment": ".rotation",
+}
+__all__ = [name for name in globals() if not name.startswith("_")] + list(_RUNTIME_EXPORTS)
+
+
+def __getattr__(name):
+    if name not in _RUNTIME_EXPORTS:
+        raise AttributeError(name)
+    value = getattr(_import_module(_RUNTIME_EXPORTS[name], __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_RUNTIME_EXPORTS))
