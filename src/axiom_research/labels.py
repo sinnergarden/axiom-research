@@ -217,7 +217,7 @@ def build_forward_labels(batch: Any, *, calendar: tuple[str, ...] | list[str],
         "availability": "max_endpoint_price_factor_anchor_usable_from",
         "missing_policy": "invalid_null_preserve_grid"},
         source_ref=source_ref, calendar_ref=calendar_ref,
-        source_evidence={"context": ctx, "records_ref": _content_ref(records),
+        source_evidence={"context": deepcopy(ctx), "records_ref": _content_ref(records),
                          "field_meta_ref": _content_ref(field_meta),
                          "recovery": "fixed_snapshot_reader_queries_and_declared_Data_adjust_prices"},
         rows=rows)
