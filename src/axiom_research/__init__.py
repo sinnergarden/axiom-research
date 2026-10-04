@@ -6,6 +6,8 @@ from .api import (
 )
 from .experiments import (ExperimentStore, ExperimentReader,
                           ExperimentRecordError, RevisionConflict)
+from .stock_artifacts import (StockMLExperiment, load_stock_ml_experiment,
+                              load_stock_model)
 
 # Readonly metadata consumers do not import an optional Data/Core build runtime.
 # Existing runtime names retain their public import paths and load when requested.
@@ -17,6 +19,11 @@ _RUNTIME_EXPORTS = {
     "load_feature_build": ".joint_build",
     "RotationExperiment": ".rotation", "build_rotation_features": ".rotation",
     "build_rotation_experiment": ".rotation", "load_rotation_experiment": ".rotation",
+    "build_stock_ml_experiment": ".stock_ml", "predict_stock_model": ".stock_ml",
+    "build_stock_ml_from_saved_features": ".stock_ml",
+    "normalize_forward_labels": ".stock_label_normalization",
+    "load_feature_catalog": ".feature_catalog", "build_feature_plan": ".feature_catalog",
+    "build_forward_labels": ".labels", "mature_training_rows": ".labels",
 }
 __all__ = [name for name in globals() if not name.startswith("_")] + list(_RUNTIME_EXPORTS)
 

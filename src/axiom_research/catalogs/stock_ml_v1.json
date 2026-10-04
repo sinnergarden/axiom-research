@@ -1,0 +1,712 @@
+{
+  "schema_version": "stock_feature_catalog_v1",
+  "catalog_id": "stock_ml_v1",
+  "groups": [
+    {
+      "id": "MOM",
+      "name": "Momentum",
+      "numbering_policy": "sparse_reserved_never_renumber"
+    },
+    {
+      "id": "VOL",
+      "name": "Volatility",
+      "numbering_policy": "sparse_reserved_never_renumber"
+    },
+    {
+      "id": "PRC",
+      "name": "Price",
+      "numbering_policy": "sparse_reserved_never_renumber"
+    },
+    {
+      "id": "LIQ",
+      "name": "Liquidity",
+      "numbering_policy": "sparse_reserved_never_renumber"
+    }
+  ],
+  "input_contract": {
+    "price_basis": "common_anchor_adjusted_v1",
+    "adjustment_anchor": "feature_session_visible_at_cutoff",
+    "amount_unit": "CNY"
+  },
+  "shared_nodes": [
+    {
+      "name": "_zero_price",
+      "op": "constant",
+      "version": "1",
+      "inputs": [],
+      "params": {
+        "value": 0
+      },
+      "column": {
+        "name": "_zero_price",
+        "dtype": "float64",
+        "unit": "CNY/share",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_positive_close_flag",
+      "op": "gt",
+      "version": "1",
+      "inputs": [
+        "close",
+        "_zero_price"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_positive_close_flag",
+        "dtype": "bool",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_null_price",
+      "op": "constant",
+      "version": "1",
+      "inputs": [],
+      "params": {
+        "value": null
+      },
+      "column": {
+        "name": "_null_price",
+        "dtype": "float64",
+        "unit": "CNY/share",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_positive_close",
+      "op": "where",
+      "version": "1",
+      "inputs": [
+        "_positive_close_flag",
+        "close",
+        "_null_price"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_positive_close",
+        "dtype": "float64",
+        "unit": "CNY/share",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_null_feature",
+      "op": "constant",
+      "version": "1",
+      "inputs": [],
+      "params": {
+        "value": null
+      },
+      "column": {
+        "name": "_null_feature",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_one",
+      "op": "constant",
+      "version": "1",
+      "inputs": [],
+      "params": {
+        "value": 1
+      },
+      "column": {
+        "name": "_one",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    }
+  ],
+  "features": [
+    {
+      "group": "MOM",
+      "id": "MOM010",
+      "name": "ret1",
+      "formula": "adjusted_close[t] / adjusted_close[t-1] - 1; common anchor = feature session",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 2,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve; require complete finite positive close window; never fill zero",
+      "semantic_version": "1.0.0",
+      "core_nodes": [
+        {
+          "name": "mom010_window_min",
+          "op": "rolling",
+          "version": "1",
+          "inputs": [
+            "_positive_close"
+          ],
+          "params": {
+            "window": 2,
+            "min_periods": 2,
+            "inclusive_current": true,
+            "reduction": "min",
+            "missing": "propagate",
+            "ddof": 0,
+            "ties": "average"
+          },
+          "column": {
+            "name": "mom010_window_min",
+            "dtype": "float64",
+            "unit": "CNY/share",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "mom010_window_missing",
+          "op": "is_missing",
+          "version": "1",
+          "inputs": [
+            "mom010_window_min"
+          ],
+          "params": {},
+          "column": {
+            "name": "mom010_window_missing",
+            "dtype": "bool",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "mom010_window_valid",
+          "op": "not",
+          "version": "1",
+          "inputs": [
+            "mom010_window_missing"
+          ],
+          "params": {
+            "missing": "preserve"
+          },
+          "column": {
+            "name": "mom010_window_valid",
+            "dtype": "bool",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "mom010_endpoint",
+          "op": "pct_change",
+          "version": "1",
+          "inputs": [
+            "_positive_close"
+          ],
+          "params": {
+            "periods": 1,
+            "fill_method": "none",
+            "zero": "missing"
+          },
+          "column": {
+            "name": "mom010_endpoint",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "MOM010",
+          "op": "where",
+          "version": "1",
+          "inputs": [
+            "mom010_window_valid",
+            "mom010_endpoint",
+            "_null_feature"
+          ],
+          "params": {
+            "missing": "preserve"
+          },
+          "column": {
+            "name": "MOM010",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "MOM",
+      "id": "MOM020",
+      "name": "ret5",
+      "formula": "adjusted_close[t] / adjusted_close[t-5] - 1; common anchor = feature session",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 6,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve; require complete finite positive close window; never fill zero",
+      "semantic_version": "1.0.0",
+      "core_nodes": [
+        {
+          "name": "mom020_window_min",
+          "op": "rolling",
+          "version": "1",
+          "inputs": [
+            "_positive_close"
+          ],
+          "params": {
+            "window": 6,
+            "min_periods": 6,
+            "inclusive_current": true,
+            "reduction": "min",
+            "missing": "propagate",
+            "ddof": 0,
+            "ties": "average"
+          },
+          "column": {
+            "name": "mom020_window_min",
+            "dtype": "float64",
+            "unit": "CNY/share",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "mom020_window_missing",
+          "op": "is_missing",
+          "version": "1",
+          "inputs": [
+            "mom020_window_min"
+          ],
+          "params": {},
+          "column": {
+            "name": "mom020_window_missing",
+            "dtype": "bool",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "mom020_window_valid",
+          "op": "not",
+          "version": "1",
+          "inputs": [
+            "mom020_window_missing"
+          ],
+          "params": {
+            "missing": "preserve"
+          },
+          "column": {
+            "name": "mom020_window_valid",
+            "dtype": "bool",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "mom020_endpoint",
+          "op": "pct_change",
+          "version": "1",
+          "inputs": [
+            "_positive_close"
+          ],
+          "params": {
+            "periods": 5,
+            "fill_method": "none",
+            "zero": "missing"
+          },
+          "column": {
+            "name": "mom020_endpoint",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "MOM020",
+          "op": "where",
+          "version": "1",
+          "inputs": [
+            "mom020_window_valid",
+            "mom020_endpoint",
+            "_null_feature"
+          ],
+          "params": {
+            "missing": "preserve"
+          },
+          "column": {
+            "name": "MOM020",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "MOM",
+      "id": "MOM030",
+      "name": "ret20",
+      "formula": "adjusted_close[t] / adjusted_close[t-20] - 1; common anchor = feature session",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 21,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve; require complete finite positive close window; never fill zero",
+      "semantic_version": "1.0.0",
+      "core_nodes": [
+        {
+          "name": "mom030_window_min",
+          "op": "rolling",
+          "version": "1",
+          "inputs": [
+            "_positive_close"
+          ],
+          "params": {
+            "window": 21,
+            "min_periods": 21,
+            "inclusive_current": true,
+            "reduction": "min",
+            "missing": "propagate",
+            "ddof": 0,
+            "ties": "average"
+          },
+          "column": {
+            "name": "mom030_window_min",
+            "dtype": "float64",
+            "unit": "CNY/share",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "mom030_window_missing",
+          "op": "is_missing",
+          "version": "1",
+          "inputs": [
+            "mom030_window_min"
+          ],
+          "params": {},
+          "column": {
+            "name": "mom030_window_missing",
+            "dtype": "bool",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "mom030_window_valid",
+          "op": "not",
+          "version": "1",
+          "inputs": [
+            "mom030_window_missing"
+          ],
+          "params": {
+            "missing": "preserve"
+          },
+          "column": {
+            "name": "mom030_window_valid",
+            "dtype": "bool",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "mom030_endpoint",
+          "op": "pct_change",
+          "version": "1",
+          "inputs": [
+            "_positive_close"
+          ],
+          "params": {
+            "periods": 20,
+            "fill_method": "none",
+            "zero": "missing"
+          },
+          "column": {
+            "name": "mom030_endpoint",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "MOM030",
+          "op": "where",
+          "version": "1",
+          "inputs": [
+            "mom030_window_valid",
+            "mom030_endpoint",
+            "_null_feature"
+          ],
+          "params": {
+            "missing": "preserve"
+          },
+          "column": {
+            "name": "MOM030",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "VOL",
+      "id": "VOL010",
+      "name": "intraday_range",
+      "formula": "(high[t] - low[t]) / close[t]",
+      "dependencies": [
+        "market_daily.high",
+        "market_daily.low",
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve; zero denominator missing; never fill zero",
+      "semantic_version": "1.0.0",
+      "core_nodes": [
+        {
+          "name": "vol010_range",
+          "op": "sub",
+          "version": "1",
+          "inputs": [
+            "high",
+            "low"
+          ],
+          "params": {},
+          "column": {
+            "name": "vol010_range",
+            "dtype": "float64",
+            "unit": "CNY/share",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "VOL010",
+          "op": "divide",
+          "version": "1",
+          "inputs": [
+            "vol010_range",
+            "close"
+          ],
+          "params": {
+            "zero": "missing"
+          },
+          "column": {
+            "name": "VOL010",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "PRC",
+      "id": "PRC010",
+      "name": "close_to_open",
+      "formula": "close[t] / open[t] - 1",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.open",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve; zero denominator missing; never fill zero",
+      "semantic_version": "1.0.0",
+      "core_nodes": [
+        {
+          "name": "prc010_ratio",
+          "op": "divide",
+          "version": "1",
+          "inputs": [
+            "close",
+            "open"
+          ],
+          "params": {
+            "zero": "missing"
+          },
+          "column": {
+            "name": "prc010_ratio",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "PRC010",
+          "op": "sub",
+          "version": "1",
+          "inputs": [
+            "prc010_ratio",
+            "_one"
+          ],
+          "params": {},
+          "column": {
+            "name": "PRC010",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "LIQ",
+      "id": "LIQ010",
+      "name": "amount_relative_5",
+      "formula": "amount_cny[t] / rolling_mean(amount_cny, window=5, inclusive_current=true)",
+      "dependencies": [
+        "market_daily.amount_cny"
+      ],
+      "lookback": 5,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve; complete five-session window; zero denominator missing; never fill zero",
+      "semantic_version": "1.0.0",
+      "core_nodes": [
+        {
+          "name": "liq010_mean",
+          "op": "rolling",
+          "version": "1",
+          "inputs": [
+            "amount_cny"
+          ],
+          "params": {
+            "window": 5,
+            "min_periods": 5,
+            "inclusive_current": true,
+            "reduction": "mean",
+            "missing": "propagate",
+            "ddof": 0,
+            "ties": "average"
+          },
+          "column": {
+            "name": "liq010_mean",
+            "dtype": "float64",
+            "unit": "CNY",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        },
+        {
+          "name": "LIQ010",
+          "op": "divide",
+          "version": "1",
+          "inputs": [
+            "amount_cny",
+            "liq010_mean"
+          ],
+          "params": {
+            "zero": "missing"
+          },
+          "column": {
+            "name": "LIQ010",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    }
+  ]
+}
+
