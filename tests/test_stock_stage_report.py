@@ -23,9 +23,11 @@ def fixture(path, *, mutate=None):
                                             "feature_ref": values["features.json"]["feature_ref"]}}
     values["dataset.json"].update(training_keys=[["A", "2023-12-20"], ["A", "2023-12-21"], ["B", "2023-12-21"]],
                                   training_row_count=3, excluded={"IMMATURE": 2})
-    values["predictions.json"].update(rows=[{"security_id": "A", "session": "2023-12-29", "valid": True, "score": 0.1,
+    values["predictions.json"].update(score_semantics="normalized_prediction", rows=[{"security_id": "A", "session": "2023-12-29", "valid": True, "score": 0.1,
         "knowledge_cutoff": "2023-12-29T20:30:00+08:00", "available_at": "2023-12-29T20:00:00+08:00"},
-        {"security_id": "B", "session": "2023-12-29", "valid": False, "score": None}])
+        {"security_id": "B", "session": "2023-12-29", "valid": False, "score": None},
+        {"security_id": "A", "session": "2024-01-02", "valid": True, "score": 0.2},
+        {"security_id": "B", "session": "2024-01-02", "valid": True, "score": 0.3}])
     values["signal-evidence.json"].update(evaluation_cutoff="2024-01-10T20:30:00+08:00",
         score_semantics="normalized_prediction", label_semantics="raw_return", minimum_pairs=20, rank_ties="average",
         series=[{"session": "2023-12-29", "ic": 0.2, "rank_ic": None, "valid_pair_count": 1,
@@ -74,13 +76,16 @@ class StockStageReportTests(unittest.TestCase):
         self.assertEqual(summary["ic"], {"session_count": 2, "mean": 0.4})
         self.assertEqual(summary["rank_ic"], {"session_count": 1, "mean": 0.8})
         self.assertEqual((summary["prediction_row_count"], summary["prediction_valid_row_count"],
-                          summary["valid_pair_count"], summary["excluded_pair_count"]), (2, 1, 3, 1))
+                          summary["valid_pair_count"], summary["excluded_pair_count"]), (4, 3, 3, 1))
         self.assertTrue(all(r["status"] == "NOT_PROVIDED" and r["seconds"] is None for r in result["measurements"]))
 
     def test_empty_and_all_null_statistics(self):
         for series in ([], [{"session": "2023-12-29", "ic": None, "rank_ic": None,
                             "prediction_valid_count": 1, "valid_pair_count": 1, "excluded_pair_count": 1}]):
-            fixture(self.saved, mutate=lambda v: v["signal-evidence.json"].update(series=series))
+            def mutate(v):
+                v["signal-evidence.json"].update(series=series)
+                v["predictions.json"]["rows"] = v["predictions.json"]["rows"][:2] if series else []
+            fixture(self.saved, mutate=mutate)
             output = self.root / ("empty" + str(len(series)) + ".json")
             result = export_stock_stage_report(self.saved, destination=output)
             for name in ("ic", "rank_ic"): self.assertEqual(result["signal_summary"][name], {"session_count": 0, "mean": None})
@@ -110,6 +115,28 @@ class StockStageReportTests(unittest.TestCase):
         write_json(receipt, {"experiment": wrong, "metrics": {}})
         with self.assertRaisesRegex(ValueError, "current experiment"): self.export([receipt])
 
+    def test_flat_current_receipt_respects_current_input_reuse_mode(self):
+        receipt = self.root / "flat.json"
+        write_json(receipt, {"experiment_ref": self.experiment["experiment_ref"], "metrics": {"train_seconds": 0.05}})
+        result = self.export([receipt])
+        self.assertEqual(next(r for r in result["measurements"] if r["stage"] == "train")["mode"], "saved_input_build")
+        self.output.unlink()
+        self.experiment = fixture(self.saved, mutate=lambda v: v["experiment.json"]["definition"].update(input_reuse=None))
+        write_json(receipt, {"experiment_ref": self.experiment["experiment_ref"], "metrics": {"train_seconds": 0.05}})
+        result = self.export([receipt])
+        self.assertEqual(next(r for r in result["measurements"] if r["stage"] == "train")["mode"], "cold_build")
+
+    def test_evidence_session_counts_semantics_and_canonical_dates_are_required(self):
+        cases = [lambda v: v["signal-evidence.json"]["series"][0].update(prediction_valid_count=2),
+                 lambda v: v["signal-evidence.json"]["series"][0].update(valid_pair_count=2, excluded_pair_count=0),
+                 lambda v: v["signal-evidence.json"]["series"][0].update(excluded_pair_count=0),
+                 lambda v: v["signal-evidence.json"].update(series=v["signal-evidence.json"]["series"][:1]),
+                 lambda v: v["signal-evidence.json"].update(score_semantics="different"),
+                 lambda v: v["predictions.json"]["rows"][0].update(session="20231229")]
+        for mutate in cases:
+            fixture(self.saved, mutate=mutate)
+            with self.assertRaises(ValueError): self.export()
+
     def test_source_semantic_errors_are_rejected_even_after_resealing(self):
         cases = [lambda v: v["dataset.json"]["training_keys"].append(["A", "2023-12-20"]),
                  lambda v: v["dataset.json"]["excluded"].update(IMMATURE=-1),
@@ -124,8 +151,9 @@ class StockStageReportTests(unittest.TestCase):
     def test_nonfinite_ic_is_rejected(self):
         from axiom_research.stock_stage_report import _signal_summary
         with self.assertRaisesRegex(ValueError, "nonfinite"):
-            _signal_summary({"rows": []}, {"evaluation_cutoff": "2024-01-01T00:00:00Z", "series": [{"session": "x", "ic": float("inf"),
-                "rank_ic": None, "prediction_valid_count": 0, "valid_pair_count": 0, "excluded_pair_count": 0}],
+            _signal_summary({"score_semantics": "score", "rows": [{"security_id": "A", "session": "2023-12-29", "valid": False}]},
+                {"evaluation_cutoff": "2024-01-01T00:00:00Z", "series": [{"session": "2023-12-29", "ic": float("inf"),
+                "rank_ic": None, "prediction_valid_count": 0, "valid_pair_count": 0, "excluded_pair_count": 1}],
                 "score_semantics": "score", "label_semantics": "return", "minimum_pairs": 20, "rank_ties": "average"})
 
     def test_integrity_stored_old_implementation_and_reference_closure(self):
@@ -177,6 +205,54 @@ class StockStageReportTests(unittest.TestCase):
         fixture(self.saved, mutate=lambda v: v["dataset.json"]["excluded"].update(IMMATURE=3))
         with self.assertRaises(FileExistsError): self.export()
         self.assertEqual(report_before, (file_digest(self.output), self.output.stat().st_mtime_ns))
+
+    def test_atomic_publish_failure_and_complete_visibility(self):
+        with patch("axiom_research.stock_stage_report.os.fsync", side_effect=OSError("disk failure")):
+            with self.assertRaisesRegex(OSError, "disk failure"): self.export()
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.root.glob(".stage.json.*.tmp")), [])
+        original_link = os.link
+        def publish(source, destination):
+            self.assertFalse(Path(destination).exists())
+            complete = load_stock_stage_report(source)
+            self.assertEqual(complete["training"]["actual"]["training_row_count"], 3)
+            return original_link(source, destination)
+        with patch("axiom_research.stock_stage_report.os.link", publish):
+            result = self.export()
+        self.assertEqual(load_stock_stage_report(self.output), result)
+        self.assertEqual(list(self.root.glob(".stage.json.*.tmp")), [])
+
+    def test_loader_validates_stored_version_and_measurement_shape(self):
+        result = self.export()
+        for change in [lambda r: r.update(report_version="axiom.stock_stage_report/2"),
+                       lambda r: r["measurements"][0].update(seconds=-1),
+                       lambda r: r["measurements"][0].update(status="REUSED_NOT_EXECUTED", stage="train"),
+                       lambda r: r["measurements"][0].update(status="MEASURED")]:
+            wrong = deepcopy(result); change(wrong)
+            wrong["stage_report_ref"] = _identity(wrong)
+            wrong["content_digest"] = digest({k:v for k,v in wrong.items() if k != "content_digest"})
+            write_json(self.output, wrong)
+            with self.assertRaises(ValueError): load_stock_stage_report(self.output)
+
+    def test_publication_race_reuses_only_identical_complete_winner(self):
+        original_link = os.link
+        for same in (True, False):
+            winner_stat = []
+            def publish(source, destination):
+                winner = _read(source)
+                if not same:
+                    winner["training"]["excluded"]["IMMATURE"] += 1
+                    winner["content_digest"] = digest({k:v for k,v in winner.items() if k != "content_digest"})
+                write_json(destination, winner)
+                winner_stat.append((file_digest(destination), Path(destination).stat().st_mtime_ns))
+                return original_link(source, destination)
+            with patch("axiom_research.stock_stage_report.os.link", publish):
+                if same: self.export()
+                else:
+                    with self.assertRaises(FileExistsError): self.export()
+            self.assertEqual(winner_stat[0], (file_digest(self.output), self.output.stat().st_mtime_ns))
+            self.assertEqual(list(self.root.glob(".stage.json.*.tmp")), [])
+            self.output.unlink()
 
     def test_fresh_process_export_and_loader_block_upstream_and_training(self):
         code = '''import builtins,sys

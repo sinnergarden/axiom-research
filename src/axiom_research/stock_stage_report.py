@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import date, datetime
 import json
 import math
+import os
 from pathlib import Path
 import re
+import tempfile
 
 from .stock_artifacts import _read, digest, file_digest, load_stock_ml_experiment
 
@@ -76,17 +78,32 @@ def _signal_summary(predictions, evidence):
     rows = predictions["rows"]
     if len({(r["security_id"], r["session"]) for r in rows}) != len(rows):
         raise ValueError("duplicate saved prediction key")
+    groups = {}
     for row in rows:
+        if date.fromisoformat(row["session"]).isoformat() != row["session"]:
+            raise ValueError("noncanonical prediction session")
         if type(row["valid"]) is not bool:
             raise ValueError("invalid saved prediction validity")
+        groups.setdefault(row["session"], []).append(row)
         for field in ("knowledge_cutoff", "available_at"):
             if row.get(field) is not None:
                 _instant(row[field])
         score = row.get("score")
         if score is not None and (type(score) not in (int, float) or not math.isfinite(score)):
             raise ValueError("nonfinite saved prediction score")
+    if evidence["score_semantics"] != predictions["score_semantics"]:
+        raise ValueError("saved signal score semantics mismatch")
+    if {r["session"] for r in series} != set(groups):
+        raise ValueError("evidence and prediction session set mismatch")
     for row in series:
-        _count(row["prediction_valid_count"])
+        if date.fromisoformat(row["session"]).isoformat() != row["session"]:
+            raise ValueError("noncanonical evidence session")
+        actual_valid = sum(r["valid"] for r in groups[row["session"]])
+        valid = _count(row["valid_pair_count"])
+        excluded = _count(row["excluded_pair_count"])
+        if (_count(row["prediction_valid_count"]) != actual_valid or valid > actual_valid or
+                valid + excluded != len(groups[row["session"]])):
+            raise ValueError("saved signal per-session count mismatch")
     return {"evaluation_cutoff": evidence["evaluation_cutoff"], "score_semantics": evidence["score_semantics"],
             "label_semantics": evidence["label_semantics"], "minimum_pairs": _count(evidence["minimum_pairs"]),
             "rank_ties": evidence["rank_ties"], "weighting": "equal_valid_session",
@@ -120,7 +137,8 @@ def _measurements(paths, experiment):
                 raise ValueError("timing receipt input_reuse reference mismatch")
             if receipt.get("feature_ref", inputs["feature_ref"]) != inputs["feature_ref"]:
                 raise ValueError("timing receipt feature reference mismatch")
-            feature, mode = inputs["feature_ref"], "cold_build"
+            feature = inputs["feature_ref"]
+            mode = "saved_input_build" if reuse and not inherited else "cold_build"
         receipts.append({"file_digest": receipt_digest, "source_experiment_ref": source, "feature_ref": feature,
                          "binding": "declared_input_reuse" if inherited else "current_experiment"})
         metrics = receipt.get("metrics", {})
@@ -188,6 +206,23 @@ def _verify_closure(value):
         if receipt["binding"] == "current_experiment" and receipt["source_experiment_ref"] != refs["experiment_ref"]:
             raise ValueError("stage report current receipt mismatch")
     for row in value["measurements"]:
+        seconds = _seconds(row["seconds"])
+        _seconds(row["reported_seconds"])
+        if row["status"] not in ("MEASURED", "NOT_PROVIDED", "REUSED_NOT_EXECUTED"):
+            raise ValueError("invalid stage measurement status")
+        if row["mode"] not in (None, "cold_build", "saved_input_build", "cache_reuse", "readonly_load"):
+            raise ValueError("invalid stage measurement mode")
+        if row["status"] != "NOT_PROVIDED" and row["mode"] is None:
+            raise ValueError("executed/reused stage requires an execution mode")
+        if ((row["status"] == "MEASURED" and seconds is None) or
+                (row["status"] != "MEASURED" and seconds is not None)):
+            raise ValueError("stage measurement status/seconds mismatch")
+        if ((row["status"] == "MEASURED" and seconds != row["reported_seconds"]) or
+                (row["status"] == "NOT_PROVIDED" and row["reported_seconds"] is not None)):
+            raise ValueError("stage measurement reported seconds mismatch")
+        if row["status"] == "REUSED_NOT_EXECUTED" and (row["stage"] not in ("feature", "qlib") or
+                row["reported_seconds"] not in (None, 0)):
+            raise ValueError("invalid reused stage measurement")
         if row["feature_ref"] != refs["feature_ref"]:
             raise ValueError("stage report measurement feature mismatch")
         if row["receipt_file_digest"] is None:
@@ -234,16 +269,30 @@ def export_stock_stage_report(experiment_path, *, timing_receipts=(), destinatio
             raise FileExistsError("different stage report already exists")
         return result
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("x", encoding="utf-8") as f:
-        f.write(json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False) + "\n")
+    staged = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=destination.parent,
+                prefix="." + destination.name + ".", suffix=".tmp", delete=False) as f:
+            staged = Path(f.name)
+            f.write(json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.link(staged, destination)
+        except FileExistsError:
+            if load_stock_stage_report(destination) != result:
+                raise FileExistsError("different stage report already exists") from None
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
     return result
 
 
 def load_stock_stage_report(path):
     """Verify stored hashes/reference closure without following inputs or recomputing."""
     value = _read(path)
-    if value.get("contract_version") != "stock_stage_report_v1":
-        raise ValueError("unsupported stock stage report contract")
+    if (value.get("contract_version"), value.get("report_version")) != ("stock_stage_report_v1", "axiom.stock_stage_report/1"):
+        raise ValueError("unsupported stock stage report contract/version")
     if value.get("content_digest") != digest({k: v for k, v in value.items() if k != "content_digest"}):
         raise ValueError("stock stage report content digest mismatch")
     if value.get("stage_report_ref") != _identity(value):
