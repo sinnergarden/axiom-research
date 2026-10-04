@@ -8,6 +8,9 @@ from .experiments import (ExperimentStore, ExperimentReader,
                           ExperimentRecordError, RevisionConflict)
 from .stock_artifacts import (StockMLExperiment, load_stock_ml_experiment,
                               load_stock_model)
+from .stock_stage_report import export_stock_stage_report, load_stock_stage_report
+
+__version__ = "0.2.1"
 
 # Readonly metadata consumers do not import an optional Data/Core build runtime.
 # Existing runtime names retain their public import paths and load when requested.
