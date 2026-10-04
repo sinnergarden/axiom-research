@@ -1,6 +1,7 @@
 """Saved-only stock stage projections, independent of build runtimes."""
 from __future__ import annotations
 from datetime import date, datetime
+from hashlib import sha256
 import json
 import math
 import os
@@ -14,6 +15,8 @@ REPORT_VERSION = "axiom.stock_stage_report/1"
 _INPUT_KEYS = ("experiment_ref", "feature_ref", "dataset_ref", "model_ref", "signal_run_ref", "evidence_ref")
 _STAGES = {"feature": "feature_seconds", "qlib": "qlib_seconds", "label_dataset": "label_dataset_seconds",
            "train": "train_seconds", "predict": "predict_seconds", "build": "build_seconds", "total": "total_seconds"}
+_EXECUTION_COUNTS = {"feature": "feature_core_calls", "qlib": "qlib_calls",
+                     "train": "train_calls", "predict": "predict_calls"}
 
 
 def _instant(value):
@@ -115,13 +118,29 @@ def _signal_summary(predictions, evidence):
             "excluded_pair_count": sum(_count(r["excluded_pair_count"]) for r in series)}
 
 
+def _receipt_snapshot(path):
+    """Parse and hash exactly one byte snapshot, retaining strict JSON rules."""
+    data = Path(path).read_bytes()
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key: " + key)
+            result[key] = value
+        return result
+    receipt = json.loads(data.decode("utf-8"), object_pairs_hook=unique,
+                         parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)))
+    if type(receipt) is not dict:
+        raise ValueError("timing receipt requires a JSON object")
+    return receipt, "sha256:" + sha256(data).hexdigest()
+
+
 def _measurements(paths, experiment):
     inputs = {k: experiment[k] for k in _INPUT_KEYS}
     reuse = experiment["definition"].get("input_reuse") or {}
     measurements, receipts = [], []
     for path in paths:
-        receipt = _read(path)
-        receipt_digest = file_digest(path)
+        receipt, receipt_digest = _receipt_snapshot(path)
         if receipt.get("created_at") is not None:
             _instant(receipt["created_at"])
         nested = receipt.get("experiment")
@@ -144,6 +163,8 @@ def _measurements(paths, experiment):
         metrics = receipt.get("metrics", {})
         if type(metrics) is not dict:
             raise ValueError("invalid owner timing metrics")
+        if metrics.get("cache_hit") is True:
+            raise ValueError("cache-hit receipt cannot supply build measurements; use separate cache_reuse metrics")
         size = {k: _count(v) for k, v in metrics.items() if k.endswith("_rows") or k in (
             "training_rows", "valid_predictions", "artifact_bytes", "peak_rss_bytes")}
         peak = receipt.get("peak_rss_bytes")
@@ -157,6 +178,13 @@ def _measurements(paths, experiment):
             skipped = stage in ("feature", "qlib") and metrics.get("feature_cache_hit") is True
             if skipped and seconds not in (None, 0):
                 raise ValueError("reused stage has nonzero execution seconds")
+            count_field = _EXECUTION_COUNTS.get(stage)
+            if count_field in metrics:
+                calls = _count(metrics[count_field])
+                if skipped and calls:
+                    raise ValueError("reused stage contradicts execution count")
+                if not skipped and seconds == 0 and calls == 0:
+                    raise ValueError("ambiguous zero-duration unexecuted stage without cache flags")
             measurements.append({"stage": stage, "mode": mode,
                 "status": "REUSED_NOT_EXECUTED" if skipped else "NOT_PROVIDED" if seconds is None else "MEASURED",
                 "seconds": None if skipped else seconds, "reported_seconds": seconds, "metric_path": "metrics." + field,

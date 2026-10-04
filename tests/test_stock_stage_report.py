@@ -1,5 +1,6 @@
 """Saved projections: source windows, receipt attribution and isolated loading."""
 from copy import deepcopy
+from hashlib import sha256
 import os
 from pathlib import Path
 import subprocess
@@ -125,6 +126,70 @@ class StockStageReportTests(unittest.TestCase):
         write_json(receipt, {"experiment_ref": self.experiment["experiment_ref"], "metrics": {"train_seconds": 0.05}})
         result = self.export([receipt])
         self.assertEqual(next(r for r in result["measurements"] if r["stage"] == "train")["mode"], "cold_build")
+
+    def test_cache_hit_build_receipts_and_ambiguous_skips_are_rejected(self):
+        receipt = self.root / "cache.json"
+        sources = [self.experiment["experiment_ref"], self.experiment["definition"]["input_reuse"]["experiment_ref"]]
+        for source in sources:
+            write_json(receipt, {"experiment_ref": source, "metrics": {"cache_hit": True,
+                "feature_seconds": 0, "qlib_seconds": 0, "train_seconds": 0, "predict_seconds": 0,
+                "train_calls": 0, "predict_calls": 0}})
+            with self.assertRaisesRegex(ValueError, "cache-hit receipt"): self.export([receipt])
+        for metrics in [{"feature_cache_hit": True, "feature_seconds": 0, "feature_core_calls": 1},
+                        {"feature_seconds": 0, "feature_core_calls": 0}, {"train_seconds": 0, "train_calls": 0}]:
+            write_json(receipt, {"experiment": self.experiment, "metrics": metrics})
+            with self.assertRaises(ValueError): self.export([receipt])
+        self.experiment = fixture(self.saved, mutate=lambda v: v["experiment.json"]["definition"].update(input_reuse=None))
+        write_json(receipt, {"experiment_ref": self.experiment["experiment_ref"], "metrics": {"cache_hit": True,
+            "feature_seconds": 0, "qlib_seconds": 0, "train_seconds": 0, "predict_seconds": 0,
+            "train_calls": 0, "predict_calls": 0}})
+        with self.assertRaisesRegex(ValueError, "cache-hit receipt"): self.export([receipt])
+
+    def test_real_zero_with_execution_and_feature_only_reuse_remain_legal(self):
+        receipt = self.root / "zero.json"
+        write_json(receipt, {"experiment": self.experiment, "metrics": {"cache_hit": False,
+            "feature_cache_hit": True, "feature_core_calls": 0, "feature_seconds": 0, "qlib_seconds": 0,
+            "train_seconds": 0, "train_calls": 1, "predict_seconds": 0}, "cache_reuse": {"seconds": 3}})
+        result = self.export([receipt])
+        self.assertEqual(next(r for r in result["measurements"] if r["stage"] == "train")["status"], "MEASURED")
+        self.assertEqual(next(r for r in result["measurements"] if r["stage"] == "predict")["status"], "MEASURED")
+        self.assertEqual(next(r for r in result["measurements"] if r["stage"] == "feature")["status"], "REUSED_NOT_EXECUTED")
+        self.assertEqual(next(r for r in result["measurements"] if r["stage"] == "cache_load")["seconds"], 3)
+        self.output.unlink()
+        self.experiment = fixture(self.saved, mutate=lambda v: v["experiment.json"]["definition"].update(input_reuse=None))
+        write_json(receipt, {"experiment_ref": self.experiment["experiment_ref"], "metrics": {"cache_hit": False,
+            "feature_seconds": 0, "feature_core_calls": 1, "qlib_seconds": 0, "qlib_calls": 1,
+            "train_seconds": 0, "train_calls": 1}})
+        result = self.export([receipt])
+        for stage in ("feature", "qlib", "train"):
+            row = next(r for r in result["measurements"] if r["stage"] == stage)
+            self.assertEqual((row["mode"], row["status"], row["seconds"]), ("cold_build", "MEASURED", 0))
+
+    def test_receipt_parse_and_hash_share_one_byte_snapshot(self):
+        receipt = self.root / "changing.json"
+        value = {"experiment": self.experiment, "metrics": {"train_seconds": 1}}
+        write_json(receipt, value); original_bytes = receipt.read_bytes()
+        original_read = Path.read_bytes
+        reads = []
+        def changing_read(path):
+            result = original_read(path)
+            if path == receipt:
+                reads.append(path)
+                write_json(receipt, {"experiment": self.experiment, "metrics": {"train_seconds": 999}})
+            return result
+        with patch.object(Path, "read_bytes", changing_read):
+            result = self.export([receipt])
+        row = next(r for r in result["measurements"] if r["stage"] == "train")
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(row["seconds"], 1)
+        self.assertEqual(row["receipt_file_digest"], "sha256:" + sha256(original_bytes).hexdigest())
+        self.assertNotEqual(row["receipt_file_digest"], file_digest(receipt))
+
+    def test_receipt_snapshot_rejects_duplicate_keys_and_nonfinite_json(self):
+        receipt = self.root / "invalid.json"
+        for raw in ('{"metrics":{},"metrics":{}}', '{"metrics":{"train_seconds":NaN}}'):
+            receipt.write_text(raw)
+            with self.assertRaises(ValueError): self.export([receipt])
 
     def test_evidence_session_counts_semantics_and_canonical_dates_are_required(self):
         cases = [lambda v: v["signal-evidence.json"]["series"][0].update(prediction_valid_count=2),
