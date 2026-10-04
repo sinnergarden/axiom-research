@@ -30,22 +30,27 @@ def register(args):
         artifact_contract_version='implementation_sources_v1',content_digest=digest(definition['implementation_sources']),
         uri='inline:source_file_digests',metadata={'definition':definition['implementation_sources']})]
     writer=ExperimentStore(args.index)
+    existing=ExperimentReader(args.index).index(question_id=args.question_id) if args.index.exists() else None
+    training_definition={k:definition[k] for k in ('label_normalization','target_semantics','input_reuse')
+                         if k in definition}
     writer.register_saved_experiment(question=dict(question_id=args.question_id,title=args.title,
         description=args.description,hypothesis=args.hypothesis),version=dict(label=args.version_label,
-        explanation=args.explanation,parent_version_ref=None,parameters={**config,
+        explanation=args.explanation,parent_version_ref=args.parent_version_ref,parameters={**config,
             'model_parameters':definition['parameters'],'num_boost_round':definition['num_boost_round'],
-            'catalog_ref':definition['catalog_ref']},input_refs=inputs,explicit_changes=args.change),
+            'catalog_ref':definition['catalog_ref'],**training_definition},input_refs=inputs,explicit_changes=args.change),
         run=dict(status='COMPLETE',output_refs=outputs,reason=doc['account_reason'],
             outcome='Model/prediction/label evidence saved; account BLOCKED_PENDING_STOCK_RUNTIME_ADMISSION.',
             backtest_ref=None,evaluation_ref=None))
-    writer.update_organization(args.question_id,expected_revision=0,groups=['Stocks'],
-                               tags=['qlib','lightgbm','5-session','fixed-oos'],favorite=False,shelved=False)
+    if not existing or not existing['questions']:
+        writer.update_organization(args.question_id,expected_revision=0,groups=['Stocks'],
+                                   tags=['qlib','lightgbm','5-session','fixed-oos'],favorite=False,shelved=False)
     return ExperimentReader(args.index).detail(args.question_id)
 
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--index',required=True,type=Path);p.add_argument('--experiment',required=True,type=Path)
+    p.add_argument('--parent-version-ref')
     for name in ('question-id','title','description','hypothesis','version-label','explanation'):
         p.add_argument('--'+name,required=True)
     p.add_argument('--change',action='append',default=[])

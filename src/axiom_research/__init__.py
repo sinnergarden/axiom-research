@@ -20,6 +20,8 @@ _RUNTIME_EXPORTS = {
     "RotationExperiment": ".rotation", "build_rotation_features": ".rotation",
     "build_rotation_experiment": ".rotation", "load_rotation_experiment": ".rotation",
     "build_stock_ml_experiment": ".stock_ml", "predict_stock_model": ".stock_ml",
+    "build_stock_ml_from_saved_features": ".stock_ml",
+    "normalize_forward_labels": ".stock_label_normalization",
     "load_feature_catalog": ".feature_catalog", "build_feature_plan": ".feature_catalog",
     "build_forward_labels": ".labels", "mature_training_rows": ".labels",
 }

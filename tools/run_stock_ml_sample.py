@@ -53,7 +53,8 @@ def main():
     features=json.loads((experiment.path/'features.json').read_text())
     saved=experiment.predictions(); valid_keys={(r['security_id'],r['session']) for r in saved['rows'] if r['valid']}
     selected=[r for r in features['rows'] if (r['security_id'],r['session']) in valid_keys]
-    independent=predict_stock_model(experiment.path,selected)
+    independent=predict_stock_model(experiment.path,selected,ordered_features=features['ordered_features'],
+                                    feature_selection=features['selection'])
     expected={(r['security_id'],r['session']):r['score'] for r in saved['rows'] if r['valid']}
     errors=[abs(v-expected[r['security_id'],r['session']]) for r,v in zip(selected,independent)]
     if max(errors,default=0)>1e-12: raise AssertionError('saved native model prediction mismatch')
