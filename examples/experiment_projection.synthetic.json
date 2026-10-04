@@ -1,0 +1,147 @@
+{
+  "content_digest": "sha256:7b90a095a849169b27b905d7924c6289b6e613cbdef830b8cc01465fa44f0a96",
+  "contract_version": "experiment_projection_v1",
+  "questions": [
+    {
+      "organization": {
+        "favorite": true,
+        "groups": [
+          "ETF"
+        ],
+        "revision": 1,
+        "shelved": false,
+        "tags": [
+          "baseline",
+          "synthetic"
+        ]
+      },
+      "question": {
+        "created_at": "2026-10-04T00:00:00+00:00",
+        "description": "Illustrative records only; no actual account result",
+        "hypothesis": "Synthetic hypothesis for API illustration",
+        "question_id": "synthetic-etf",
+        "question_ref": "sha256:a13790b8f979fb8eb896be43f7ff0384095e76172832f8f152cbcfb8f2fbf3fe",
+        "title": "Synthetic ETF baseline"
+      },
+      "runs": [
+        {
+          "backtest_ref": {
+            "committed_sequence": 20,
+            "content_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "run_id": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "signal_ref": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "uri": "fixture:synthetic-backtest"
+          },
+          "created_at": "2026-10-04T00:00:00+00:00",
+          "evaluation_ref": {
+            "evaluation_content_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "evaluation_ref": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "input_run_ref": {
+              "committed_sequence": 20,
+              "content_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "run_id": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            "uri": "fixture:synthetic-evaluation"
+          },
+          "outcome": "Synthetic evidence only",
+          "output_refs": [
+            {
+              "artifact_contract_version": "synthetic_v1",
+              "artifact_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "artifact_type": "FeatureBuild",
+              "content_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "contract_type": "ArtifactRef",
+              "contract_version": "1",
+              "metadata": {},
+              "uri": "fixture:synthetic"
+            },
+            {
+              "artifact_contract_version": "synthetic_v1",
+              "artifact_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "artifact_type": "SignalRun",
+              "content_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "contract_type": "ArtifactRef",
+              "contract_version": "1",
+              "metadata": {},
+              "uri": "fixture:synthetic"
+            }
+          ],
+          "question_id": "synthetic-etf",
+          "reason": null,
+          "run_record_ref": "sha256:4d2470f75821f07245e771cdbbaaba33221700e5f67969f288adbe4ad32ffc18",
+          "status": "COMPLETE",
+          "version_ref": "sha256:d190d9d2fb3539a323cd3f2a5fb8c6eb08b275a39b6f86fb913084d15bd19b4f"
+        },
+        {
+          "backtest_ref": null,
+          "created_at": "2026-10-04T00:00:00+00:00",
+          "evaluation_ref": null,
+          "outcome": null,
+          "output_refs": [],
+          "question_id": "synthetic-etf",
+          "reason": "Synthetic unavailable input example",
+          "run_record_ref": "sha256:668059740c916c11ad0b58e3fdeff4b239ff63aa0129aaac8081af3ce598dce8",
+          "status": "BLOCKED",
+          "version_ref": "sha256:a3273ad572ebd36551ad07750a1e261b66a89e840a1e2eaee5c5ae9ac820cffc"
+        }
+      ],
+      "versions": [
+        {
+          "created_at": "2026-10-04T00:00:00+00:00",
+          "explanation": "Clarify evidence; same strategy parameters",
+          "explicit_changes": [
+            "Clarify explanation; no parameter optimization"
+          ],
+          "input_refs": [
+            {
+              "artifact_contract_version": "synthetic_v1",
+              "artifact_id": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "artifact_type": "DataSnapshot",
+              "content_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "contract_type": "ArtifactRef",
+              "contract_version": "1",
+              "metadata": {},
+              "uri": "fixture:synthetic"
+            }
+          ],
+          "label": "v2",
+          "parameters": {
+            "top_k": 1,
+            "window": 20
+          },
+          "parent_version_ref": "sha256:d190d9d2fb3539a323cd3f2a5fb8c6eb08b275a39b6f86fb913084d15bd19b4f",
+          "question_id": "synthetic-etf",
+          "version_ref": "sha256:a3273ad572ebd36551ad07750a1e261b66a89e840a1e2eaee5c5ae9ac820cffc"
+        },
+        {
+          "created_at": "2026-10-04T00:00:00+00:00",
+          "explanation": "Initial synthetic fixed inputs",
+          "explicit_changes": [
+            "Initial synthetic registration"
+          ],
+          "input_refs": [
+            {
+              "artifact_contract_version": "synthetic_v1",
+              "artifact_id": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "artifact_type": "DataSnapshot",
+              "content_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "contract_type": "ArtifactRef",
+              "contract_version": "1",
+              "metadata": {},
+              "uri": "fixture:synthetic"
+            }
+          ],
+          "label": "v1",
+          "parameters": {
+            "top_k": 1,
+            "window": 20
+          },
+          "parent_version_ref": null,
+          "question_id": "synthetic-etf",
+          "version_ref": "sha256:d190d9d2fb3539a323cd3f2a5fb8c6eb08b275a39b6f86fb913084d15bd19b4f"
+        }
+      ]
+    }
+  ],
+  "store_revision": 6
+}

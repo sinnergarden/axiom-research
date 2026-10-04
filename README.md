@@ -132,3 +132,34 @@ identity, disk-write failure, corrupt output, relocation and reuse without execu
 Real saved-Data examples and their measured limits live in
 [axiom-docs](https://github.com/sinnergarden/axiom-docs). Twelve-year bulk and
 many-year feature build performance have not been accepted.
+
+## Saved experiment records and readonly browsing
+
+Research 0.1.3 adds public `ExperimentStore` and `ExperimentReader`. The writer
+registers immutable questions, versions and runs referencing existing artifacts;
+group/tag/favorite/shelved updates use an expected revision and preserve history.
+`ExperimentReader(path).index(...)`, `.detail(question_id)` and
+`.compare_versions(left_ref, right_ref)` only read and validate the small JSON
+index. They do not create files, scan artifact directories or compute metrics.
+Missing indexes raise FileNotFoundError; missing values remain explicit nulls.
+The public Reader import is independent of the optional Data/Core build runtime.
+Existing build/loader exports keep their import paths and load on demand.
+
+Engine associations preserve `run_id`, `content_digest` and committed sequence.
+An optional saved evaluation must refer to that same account result. Signal
+references must match the saved run. Index validation checks metadata consistency;
+the actual artifact is verified by its owner's public loader when opened.
+
+`tools/register_rotation_experiment.py` explicitly registers an already saved
+ETF experiment, optionally with already saved Engine results. It uses the public
+loaders and writes only the specified Research index. It never reads Data facts,
+builds features, trains or backtests. The caller supplies the hypothesis,
+explanation and declared changes; results do not invent those texts.
+It calls `ExperimentStore.register_saved_experiment(question=..., version=...,
+run=...)` to save the complete registration atomically, so an invalid reason or
+parent cannot leave a partial question/version pair.
+
+The complete [synthetic projection](examples/experiment_projection.synthetic.json)
+illustrates the public shape; its references and outcomes are synthetic and do
+not locate real research results. The authoritative schema and ownership rules
+are in [Research design](https://github.com/sinnergarden/axiom-docs/blob/60c2ec912693703b1b4b94a96bf498489ac3f89f/docs/design/05_axiom_research.md#experiment-records).
