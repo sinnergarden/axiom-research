@@ -1,5 +1,14 @@
 # Axiom Research R0
 
+Research 0.2.1 exports saved stock stage reports through
+`export_stock_stage_report(experiment_path, timing_receipts=(), destination="reports/stage.json")`.
+`destination` is a JSON file outside the saved experiment directory. Identical
+reports reuse that file; different content cannot overwrite it. Explicit owner
+receipt paths can supply current measurements and declared reused Feature timings.
+Missing timings stay null. `load_stock_stage_report("reports/stage.json")` verifies
+the report's stored hashes and references without upstream imports or calculations.
+Neither entry point changes saved models, datasets, predictions or registrations.
+
 Versioned research definitions, manifests and content identity contracts for
 Financial RC 60d/180d. Python3.11+. Definition contracts use the standard library;
 Data adapters use Core and the optional build runtime uses Data/Arrow.
