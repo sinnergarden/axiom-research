@@ -1,0 +1,30 @@
+{
+  "artifact_paths_relative_to": "Research worktree; generated artifacts are local and excluded from Git",
+  "build_seconds": 9.259436541935429,
+  "bytes": 39198766,
+  "cache_mtime_preserved": true,
+  "cache_seconds": 0.09843399992678314,
+  "cache_without_fact_reads_or_core": true,
+  "evaluation_rows": 455,
+  "experiment_path": ".artifacts/etf-20261004-final/primary/experiments/4e0bd887831ca4ca9fa4159653a5f403ac7efe848f2aaa37999a574ba1ddf2a2",
+  "feature_identity": "sha256:36e8af3b0426de8ba0e99265c4a4dcad500bbf676c6598b4171b6782690de907",
+  "fresh_process_read": true,
+  "identical_input_reproduction": true,
+  "implementation_ref": "sha256:99f0421f6248be6896e215a5c38f1e7b5975c1819b190017c6a04959131824bc",
+  "input_sessions": 114,
+  "invalid_warmup_rows": 140,
+  "limitations": [
+    "Factor availability and any terminal-vintage assumptions are inherited from the PIT-selected input; this recipe adds no historical evidence",
+    "terminal states ordered by system observation under declared source policy; vendor revision/publication order is unknown",
+    "vendor release time is an assumption, not historical vintage evidence"
+  ],
+  "schema_version": "research_etf_acceptance_v1",
+  "scope": "offline feature/signal acceptance only; Engine owns portfolio/account/backtest",
+  "signal_frame_path": ".artifacts/etf-20261004-final/primary/signals/e2966ff9febf2b72268091f979afbc29a836218dab008305c2ef40c6dcc6b030/signal-frame.json",
+  "signal_rows": 798,
+  "signal_run_ref": "sha256:e2966ff9febf2b72268091f979afbc29a836218dab008305c2ef40c6dcc6b030",
+  "snapshot_id": "s_e32f4511b69d4fce9accad609feb4005f371cc5cb833ca260d6ae563b75558d1",
+  "source_tree_unchanged": true,
+  "universe": 7,
+  "valid_rows": 658
+}

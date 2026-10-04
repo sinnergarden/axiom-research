@@ -1,0 +1,28 @@
+{
+  "schema_version": "research_etf_review_v1",
+  "reviewer": "independent research_review agent",
+  "status": "PASS",
+  "initial_findings": [
+    {
+      "priority": "P2",
+      "file": "src/axiom_research/rotation.py",
+      "area": "_publish",
+      "issue": "macOS concurrent same-identity directory rename raises ENOTEMPTY, not FileExistsError",
+      "resolution": "Catch only EEXIST/ENOTEMPTY, validate completed winner, preserve other errors",
+      "status": "closed"
+    }
+  ],
+  "final_checks": [
+    "114 saved Core plans reconstituted with identical identities",
+    "All shared provenance/source/binding references resolve",
+    "798-row final neutral signal accepted by Engine SignalFrame",
+    "Affected concurrency regression passes"
+  ],
+  "remaining_findings": [],
+  "source_sha256": {
+    "src/axiom_research/rotation.py": "bc228b4c1271f82c845ba56dd3ed46494b76585d128293198c7a5211175c3407",
+    "src/axiom_research/data_adapter.py": "b017a1ed8bb94ae9c0d56e134a87da99702cdd5d8119291cf78da46c7a6aaadb",
+    "tests/test_rotation.py": "8eb008fa347d72db657ab30fe4a2855fa6658e8c62123f6cefb031d9c8885b82"
+  },
+  "review_limits": "Code, boundary cases and frozen small-sample closure; no full-scale performance or historical vintage certification"
+}

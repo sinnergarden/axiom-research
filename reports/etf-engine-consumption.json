@@ -1,0 +1,46 @@
+{
+  "schema_version": "research_engine_consumption_v1",
+  "signal_run_ref": "sha256:e2966ff9febf2b72268091f979afbc29a836218dab008305c2ef40c6dcc6b030",
+  "signal_rows_accepted": 798,
+  "engine_source_sha256": {
+    "plan.py": "296cd5ab4065d314cedbb90bfbc441f1d00efc75485bbb11800b37e140b95500",
+    "execution.py": "c788647f0c7eb5f269ce5eb395309d62a53a5cba1d1736865fab43c1ee505605",
+    "__init__.py": "003f8d9f54c2e4592005a1dfccee34df2d8835019d671d59386c5d445d1a337f",
+    "contracts.py": "43521190a4faeeb95304c95bb1b623b7a79cf7ea99878554d5c3336c2a91f3c8",
+    "portfolio.py": "5f3c30bc96fd88b2d2971691700dd58fe2c2e18489b403fd12f2f594bee75d6e"
+  },
+  "status": "local Engine worktree public API validated; no account backtest executed here",
+  "first_trade_session": "2026-06-01",
+  "previous_feature_session": "2026-05-29",
+  "decision": {
+    "contract_version": "axiom.rotation/1",
+    "expected_account_version": 0,
+    "feature_session": "2026-05-29",
+    "intents": [
+      {
+        "expected_account_version": 0,
+        "intent_id": "sha256:68ae77cab12ea7ac4895fc08af29982ab5a7a05c213fc097041e203a741e559d:0",
+        "quantity": 43900,
+        "security_id": "cn.etf.SSE.513100.20130515",
+        "side": "BUY",
+        "valid_until": "2026-06-01"
+      }
+    ],
+    "selected_security_id": "cn.etf.SSE.513100.20130515",
+    "signal_ref": "sha256:e2966ff9febf2b72268091f979afbc29a836218dab008305c2ef40c6dcc6b030",
+    "status": "DECISION_COMPLETE",
+    "targets": {
+      "cn.etf.SSE.513100.20130515": 43900
+    },
+    "trace": [
+      {
+        "cash_check": "actual_fill_cash",
+        "reason": "POSITIVE_TOP1",
+        "reference_nav_minor": 10000000,
+        "sizing": "previous_observed_close",
+        "tie_break": "security_id_asc"
+      }
+    ],
+    "trade_session": "2026-06-01"
+  }
+}

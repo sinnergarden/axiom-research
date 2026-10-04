@@ -6,3 +6,5 @@ from .api import (
 )
 from .view_ref import ViewRef
 from .joint_build import FeatureBuild, build_joint_features, load_feature_build
+from .rotation import (RotationExperiment, build_rotation_features,
+                       build_rotation_experiment, load_rotation_experiment)

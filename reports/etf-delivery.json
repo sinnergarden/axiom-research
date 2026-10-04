@@ -1,0 +1,58 @@
+{
+  "schema_version": "research_etf_delivery_v1",
+  "version": "0.1.2",
+  "branch": "codex/research-etf-experiment-20261004",
+  "base_commit": "eb6ae3a596d46627c8d52470b595d015cf659711",
+  "project_id_verified": "76e26315-e881-4634-b1de-b60bbb725a0d",
+  "scope": "Fixed existing 7 ETF sample -> Data.adjust_prices -> Core momentum/window/rank -> persistent feature/signal -> public Engine handoff",
+  "public_api": [
+    "build_rotation_features",
+    "build_rotation_experiment",
+    "load_rotation_experiment",
+    "RotationExperiment.signal_frame",
+    "RotationExperiment.feature_frames",
+    "RotationExperiment.manifest"
+  ],
+  "signal_contract": "signal_frame_v1, exact agreed Engine neutral JSON schema",
+  "price_basis": "Data common_anchor_adjusted_v1 at each feature-session cutoff; unadjusted execution prices belong to Engine",
+  "baseline_semantics": "This-round explicit default, not proven equivalent to historical baseline",
+  "affected_distinct_tests": 16,
+  "test_evidence": [
+    "reports/etf-scoped-tests.log (15 tests: initial 5 rotation + 5 adapter + 5 joint)",
+    "reports/etf-final-tests.log (6 final rotation tests, including Mac publication race)"
+  ],
+  "real_evidence": "reports/etf-real-acceptance.json",
+  "engine_evidence": "reports/etf-engine-consumption.json",
+  "independent_review": "reports/etf-review.json",
+  "documentation_alignment": [
+    {
+      "path": "docs/design/05_axiom_research.md",
+      "sections": "2 / 3 / 5 / 8",
+      "needed": "Add bounded deterministic ETF feature-signal path and APIs; R0 model/OOS SignalIdentity remains unchanged; shared proof tables and atomic cache reuse; no general feature executor/training platform"
+    },
+    {
+      "path": "docs/etf-rotation-data.md",
+      "sections": "consumer handoff / acceptance",
+      "needed": "Record this-round common-anchor adjusted 20D, full 21 positive observations, cutoff, security_id ascending tie-break, first open session of ISO week; Engine exact previous-session consumption; retain best-effort and baseline-equivalence limits"
+    },
+    {
+      "path": "docs/current-delivery.md",
+      "sections": "implementation table / real small sample / limits",
+      "needed": "Record 114 sessions x 7 funds, 798 rows / 658 valid / 140 warmup invalid, 455 valid evaluation rows; independent rerun/cache/fresh process/Engine neutral consumption; bounded proof output and no scale extrapolation"
+    },
+    {
+      "path": "versions.json",
+      "needed": "Add Research 0.1.2 isolated branch commit and reviewed source/sample evidence after parent review; no claimed package release/wheel"
+    }
+  ],
+  "remaining_limits": [
+    "Engine account BacktestRun acceptance remains Engine owner scope",
+    "Vendor terminal revision/public-availability assumptions are inherited; not strict historical PIT",
+    "No Twelve-year bulk, multi-year scale acceptance, live account or deployment",
+    "Fixed deterministic baseline only; no arbitrary FeaturePlan, labels/training/OOS model run"
+  ],
+  "original_research_main_status": "clean before and after",
+  "data_code_status": "clean after",
+  "data_sample_files_hash_and_mtime": "unchanged",
+  "bulk_actions": "none"
+}

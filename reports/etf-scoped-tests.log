@@ -1,0 +1,24 @@
+test_adjustment_independent_formula_and_cutoffs (test_rotation.RotationTests.test_adjustment_independent_formula_and_cutoffs) ... ok
+test_cache_reproduction_stage_reuse_and_relocation (test_rotation.RotationTests.test_cache_reproduction_stage_reuse_and_relocation) ... ok
+test_calendar_compression_warmup_and_replay_rejected (test_rotation.RotationTests.test_calendar_compression_warmup_and_replay_rejected) ... ok
+test_corruption_and_partial_write_preserve_old_artifacts (test_rotation.RotationTests.test_corruption_and_partial_write_preserve_old_artifacts) ... ok
+test_interior_gap_nonpositive_price_and_unavailable_factor_fail_closed (test_rotation.RotationTests.test_interior_gap_nonpositive_price_and_unavailable_factor_fail_closed) ... ok
+test_adjusted_provenance_flattens_price_factor_and_anchor (test_data_adapter.AdapterTests.test_adjusted_provenance_flattens_price_factor_and_anchor) ... ok
+test_core_executes_identity_lag_return_with_metadata (test_data_adapter.AdapterTests.test_core_executes_identity_lag_return_with_metadata) ... ok
+test_real_observation_precision_and_vendor_assumption_are_preserved (test_data_adapter.AdapterTests.test_real_observation_precision_and_vendor_assumption_are_preserved) ... ok
+test_rejects_wrong_purpose_and_unmatched_membership (test_data_adapter.AdapterTests.test_rejects_wrong_purpose_and_unmatched_membership) ... ok
+test_absent_and_retracted_are_not_filled (test_joint_build.JointBuildTests.test_absent_and_retracted_are_not_filled) ... pyarrow/cpu_info.cc:239: IOError: sysctlbyname failed for 'hw.l1dcachesize'. Detail: [errno 1] Operation not permitted
+pyarrow/cpu_info.cc:239: IOError: sysctlbyname failed for 'hw.l2cachesize'. Detail: [errno 1] Operation not permitted
+pyarrow/cpu_info.cc:239: IOError: sysctlbyname failed for 'hw.l3cachesize'. Detail: [errno 1] Operation not permitted
+pyarrow/cpu_info.cc:239: IOError: sysctlbyname failed for 'hw.optional.neon'. Detail: [errno 1] Operation not permitted
+ok
+test_cutoff_revisions_core_asof_provenance_and_cross_process_reuse (test_joint_build.JointBuildTests.test_cutoff_revisions_core_asof_provenance_and_cross_process_reuse) ... ok
+test_integrity_and_partial_publication_failures (test_joint_build.JointBuildTests.test_integrity_and_partial_publication_failures) ... ok
+test_multi_period_selection_keeps_new_report_retraction_and_ignores_old_correction (test_joint_build.JointBuildTests.test_multi_period_selection_keeps_new_report_retraction_and_ignores_old_correction) ... ok
+test_multiple_fields_and_domains_merge_by_key (test_joint_build.JointBuildTests.test_multiple_fields_and_domains_merge_by_key) ... ok
+test_scope_and_event_view_contract (test_joint_build.JointBuildTests.test_scope_and_event_view_contract) ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 5.424s
+
+OK
