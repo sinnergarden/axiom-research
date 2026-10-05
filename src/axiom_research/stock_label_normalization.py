@@ -8,37 +8,18 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime
-import math
 from typing import Any
 
 from axiom_engine.core import (ABI, SEMANTICS, ExecutionContext, FactBatch,
                                FeaturePlan, execute_feature_plan)
 
-from .data_adapter import AdapterError, _require, _utc
+from .data_adapter import _require
 from .labels import _instant, _session
 from .stock_artifacts import digest
 
 
 CONTRACT_VERSION = "stock_normalized_label_build_v1"
-NORMALIZATION_SPEC = {
-    "normalization_id": "forward_label_cs_zscore_v1",
-    "semantic_version": "1",
-    "purpose": "label_outcomes",
-    "context_mode": "offline_label_cutoff",
-    "executor": "axiom_engine.core.execute_feature_plan",
-    "operator": "cs_zscore",
-    "operator_version": "1",
-    "params": {"group": "session", "unknown_group": "reject", "missing": "skip",
-               "ddof": 0, "epsilon": 1e-12, "constant": "missing", "clip": None,
-               "excluded": "missing"},
-    "eligibility": "original_member_all_features_finite_valid_and_raw_label_mature",
-    "maturity": "label_available_at_lte_cutoff_and_end_session_lte_cutoff_UTC_date",
-    "grid_policy": "preserve_all_raw_label_keys",
-    "core_partition": "one_feature_session_per_execution",
-    "core_clock_projection": "exact_eligibility_first_then_ceil_cutoff_and_availability_to_seconds",
-    "label_available_at": "original_raw_label_clock",
-    "normalized_available_at": "Core_output_dependency_clock_at_offline_cutoff",
-}
+from .stock_label_contracts import NORMALIZATION_SPEC, _finite, normalization_section_inputs
 
 
 def _sealed(build: Any, version: str, ref_name: str) -> str:
@@ -50,39 +31,6 @@ def _sealed(build: Any, version: str, ref_name: str) -> str:
     return ref
 
 
-def _finite(value: Any) -> bool:
-    return type(value) in (int, float) and math.isfinite(value)
-
-
-def _eligible_reason(raw: dict, feature: dict | None, width: int, cutoff: datetime) -> str | None:
-    if raw.get("valid") is not True:
-        return raw.get("invalid_reason") or "RAW_LABEL_INVALID"
-    if not _finite(raw.get("return")):
-        return "RAW_LABEL_INVALID"
-    try:
-        end = _session(raw.get("end_session"))
-        available = _instant(raw.get("label_available_at"))
-    except AdapterError:
-        return "LABEL_CLOCK_OR_ENDPOINT_UNKNOWN"
-    if end > cutoff.date().isoformat() or available > cutoff:
-        return "LABEL_NOT_MATURE"
-    if feature is None:
-        return "FEATURE_MISSING"
-    if feature.get("member") is not True:
-        return "NOT_MEMBER" if feature.get("member") is False else "MEMBERSHIP_UNKNOWN"
-    values, validity = feature.get("values"), feature.get("validity")
-    if (not isinstance(values, list) or not isinstance(validity, list) or
-            len(values) != width or len(validity) != width or
-            not all(_finite(value) for value in values)):
-        return "FEATURE_MISSING"
-    if not all(value is True for value in validity):
-        return "FEATURE_INVALID"
-    try:
-        if _instant(feature.get("knowledge_cutoff")) > cutoff:
-            return "FEATURE_NOT_AVAILABLE"
-    except AdapterError:
-        return "FEATURE_CLOCK_UNKNOWN"
-    return None
 
 
 def normalize_forward_labels(raw_build: dict, *, features: dict,
@@ -99,7 +47,6 @@ def normalize_forward_labels(raw_build: dict, *, features: dict,
     feature_ref = _sealed(features, "stock_feature_build_v1", "feature_ref")
     instant = _instant(cutoff)
     cutoff_text = instant.isoformat().replace("+00:00", "Z")
-    core_cutoff = _utc(cutoff_text, availability=True)
     columns = features.get("ordered_features")
     _require(isinstance(columns, list) and bool(columns) and
              all(isinstance(name, str) and name for name in columns) and
@@ -128,52 +75,16 @@ def normalize_forward_labels(raw_build: dict, *, features: dict,
     _require(set(raw_index) == {(security, session) for security in securities for session in sessions},
              "complete raw label security/session grid required")
     spec = deepcopy(NORMALIZATION_SPEC)
-    recipe_ref = digest({"normalization_spec": spec, "raw_label_spec": raw_build["label_spec"]})
-    input_column = {"name": "raw_return", "dtype": "float64", "unit": "dimensionless",
-                    "stage": "fact", "missing": "preserve"}
-    output_column = {"name": "normalized_target", "dtype": "float64", "unit": "dimensionless",
-                     "stage": "cross_sectional", "missing": "preserve"}
     rows, sections, plans, facts_list, contexts, frames = [], [], [], [], [], []
     for session in sessions:
         keys = [(security, session) for security in securities]
-        reasons = {key: _eligible_reason(raw_index[key], indexed.get(key), len(columns), instant)
-                   for key in keys}
-        eligible = [list(key) for key in keys if reasons[key] is None]
-        section_definition = {"contract_version": "stock_label_section_v1", "feature_session": session,
-                              "eligible_keys": eligible, "raw_label_ref": raw_ref,
-                              "feature_ref": feature_ref, "cutoff": cutoff_text,
-                              "normalization_spec": spec}
-        section_ref = digest(section_definition)
-        sources = [
-            {"id": "raw_labels", "data_ref": raw_ref, "view_ref": raw_ref,
-             "revision_policy": "frozen_saved_label_build", "qualification": "observed",
-             "availability_basis": "exact_raw_label_available_at"},
-            {"id": "offline_eligibility", "data_ref": feature_ref, "view_ref": section_ref,
-             "revision_policy": "frozen_feature_membership_and_explicit_outcome_cutoff",
-             "qualification": "observed", "availability_basis": "derived_offline_cutoff_selection"}]
-        plan = FeaturePlan.from_dict({"abi": ABI, "semantics": SEMANTICS, "recipe_ref": recipe_ref,
-            "calendar_ref": raw_build["calendar_ref"], "reference_ref": section_ref,
-            "reference_members": {session: {key[0]: None for key in keys if reasons[key] is None}},
-            "input_schema": [input_column], "event_schema": {}, "sources": sources,
-            "observation_domain": "sessions", "history_policy": "partial",
-            "nodes": [{"name": "normalized_target", "op": "cs_zscore", "version": "1",
-                       "inputs": ["raw_return"], "params": deepcopy(spec["params"]),
-                       "column": output_column}],
-            "outputs": [{"node": "normalized_target", "column": output_column}], "obligations": []})
-        facts = FactBatch.from_dict({"abi": ABI, "calendar_ref": raw_build["calendar_ref"],
-            "schema": [input_column], "sources": sources, "event_schema": {}, "events": [],
-            "rows": [{"security_id": key[0], "session": session,
-                      "values": [float(raw_index[key]["return"]) if reasons[key] is None else None],
-                      "availability": [_utc(raw_index[key]["label_available_at"], availability=True)
-                                       if reasons[key] is None else core_cutoff],
-                      "sources": [["raw_labels"] if reasons[key] is None else ["offline_eligibility"]],
-                      "missing_reasons": [reasons[key]]} for key in keys]})
-        context = ExecutionContext.from_dict({"abi": ABI, "calendar_ref": raw_build["calendar_ref"],
-            "reference_ref": section_ref, "sessions": [session], "cutoffs": {session: core_cutoff},
-            "history_keys": [list(key) for key in keys], "output_keys": [list(key) for key in keys],
-            "reference": [{"security_id": key[0], "session": session, "member": reasons[key] is None,
-                           "industry": None, "available_at": core_cutoff, "source": "offline_eligibility"}
-                          for key in keys]})
+        parts = normalization_section_inputs(raw_build, feature_ref=feature_ref, feature_rows=indexed,
+            session=session, securities=securities, width=len(columns), cutoff=cutoff_text,
+            abi=ABI, semantics=SEMANTICS, raw_index=raw_index)
+        reasons, eligible, section_ref = parts['reasons'], parts['eligible_keys'], parts['section_ref']
+        plan = FeaturePlan.from_dict(parts['plan'])
+        facts = FactBatch.from_dict(parts['facts'])
+        context = ExecutionContext.from_dict(parts['context'])
         frame = execute_feature_plan(plan, facts, context)
         frame_ref = frame.identity
         wire = frame.to_dict()

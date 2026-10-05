@@ -1,5 +1,17 @@
 # Axiom Research R0
 
+Research 0.2.2 adds `build_stock_ml_fold_from_saved_inputs(input_manifest,
+fold_spec=..., destination=..., metrics=...)` and `load_stock_ml_fold(path)`.
+The bounded profile selects 65 actual Feature sessions before each fit, reuses
+complete saved parents and mature normalized labels, and uses the existing fixed
+LightGBM backend. The read-only loader verifies parent/stage hashes and separate
+Feature, fit, simulated model publication and inference clocks. It needs explicit
+immutable parent paths and parses complete proofs; it is not a streaming loader.
+`stock_prediction_run_v2` has declared simulation clocks and supports Engine
+neutral validation only; v2 Runtime accounts remain unsupported. Original v1
+artifacts and the same-config helper retain their constraints. The authoritative
+input/output contract is [Research §4.7](https://github.com/sinnergarden/axiom-docs/blob/cdc31c0db7b91c9e08f98d42a17d533934612502/docs/design/05_axiom_research.md#stock-saved-fold-clock-contract).
+
 Research 0.2.1 exports saved stock stage reports through
 `export_stock_stage_report(experiment_path, timing_receipts=(), destination="reports/stage.json")`.
 `destination` is a JSON file outside the saved experiment directory. Identical

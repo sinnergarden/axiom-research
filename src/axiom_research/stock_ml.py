@@ -15,12 +15,7 @@ from .stock_artifacts import (StockMLExperiment, digest, file_digest, write_json
                              load_stock_ml_experiment, load_stock_model)
 
 VERSION = 'axiom.stock_ml/1'
-LGBM_PARAMETERS = {'objective':'regression','boosting_type':'gbdt','learning_rate':0.05,
-    'num_leaves':31,'max_depth':5,'min_data_in_leaf':20,'seed':42,'num_threads':1,
-    'feature_fraction':1.0,'bagging_fraction':1.0,'deterministic':True,
-    'force_col_wise':True,'verbosity':-1}
-TREES = 100
-TARGET_SEMANTICS = 'forward_5_session_cs_zscore_prediction'
+from .stock_training import LGBM_PARAMETERS, TREES, TARGET_SEMANTICS
 
 
 def _instant(value):
@@ -344,13 +339,12 @@ def build_stock_ml_experiment(data, *, config, destination, metrics=None, progre
         'normalization':NORMALIZATION_SPEC,'label_section_refs':[s['section_ref'] for s in normalized_training['sections']]},'dataset_ref')
     stats['label_dataset_seconds']=time.perf_counter()-begin
     X=np.asarray([r['values'] for r in training],dtype=np.float64); y=np.asarray([r['label'] for r in training],dtype=np.float64)
-    begin=time.perf_counter(); booster=lgb.train(LGBM_PARAMETERS,lgb.Dataset(X,label=y,feature_name=columns),num_boost_round=TREES)
-    stats['train_seconds']=time.perf_counter()-begin; stats['train_calls']=1
     prediction_features=[r for r in rows if r['session'] in config['prediction_sessions'] and r['member'] and
                          all(v is not None for v in r['values']) and all(r['validity'])]
-    begin=time.perf_counter()
-    scores=booster.predict(np.asarray([r['values'] for r in prediction_features],dtype=np.float64),num_threads=1) if prediction_features else []
-    stats['predict_seconds']=time.perf_counter()-begin; stats['predict_calls']=1
+    P=np.asarray([r['values'] for r in prediction_features],dtype=np.float64)
+    from .stock_training import fit_predict_stock_model
+    booster,scores=fit_predict_stock_model(X,y,P,ordered_features=columns,
+        parameters=LGBM_PARAMETERS,num_boost_round=TREES,metrics=stats)
     score_map={(r['security_id'],r['session']):float(s) for r,s in zip(prediction_features,scores)}
     target.parent.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.stock-ml-',dir=target.parent) as tmp:
