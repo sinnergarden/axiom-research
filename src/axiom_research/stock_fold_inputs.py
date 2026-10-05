@@ -148,10 +148,19 @@ def project_saved_fold(manifest, spec):
         require(set(proof_desc) == {'path', 'file_digest', 'input_evidence_ref'} and
                 type(proof_desc['path']) is str and Path(proof_desc['path']).is_absolute() and
                 file_digest(proof_desc['path']) == proof_desc['file_digest'] and
-                _canonical_file_ref(proof_desc['path']) == feature['input_evidence_ref'] ==
-                proof_desc['input_evidence_ref'], 'Feature input evidence mismatch')
+                feature['input_evidence_ref'] == proof_desc['input_evidence_ref'],
+                'Feature input evidence mismatch')
+        # Original saved parents can use spaced JSON. Keep the byte hash as
+        # their immutable file identity and verify the logical evidence ref.
+        # Canonical writer bytes avoid reserializing the largest proofs.
+        try:
+            byte_ref = _canonical_file_ref(proof_desc['path'])
+        except ValueError:  # Valid JSON without the canonical writer's final LF.
+            byte_ref = None
         proof = _read(proof_desc['path'])
         require(file_digest(proof_desc['path']) == proof_desc['file_digest'], 'Feature proof changed during read')
+        require(byte_ref == feature['input_evidence_ref'] or
+                digest(proof) == feature['input_evidence_ref'], 'Feature input evidence mismatch')
         by_date = {p['session']: p for p in proof}
         require(len(by_date) == len(proof) and set(by_date) == set(dates), 'Feature proof date coverage mismatch')
         indexed = grid(feature['rows'], dates, universe, 'session')

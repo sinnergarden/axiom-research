@@ -3,6 +3,7 @@ from copy import deepcopy
 from datetime import date, timedelta
 from pathlib import Path
 import builtins
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -172,6 +173,32 @@ class SavedFoldTests(unittest.TestCase):
             norm = seal({k: v for k, v in norm.items() if k != 'label_ref'}, 'label_ref'); write_json(root/'normalized.json', norm)
             m['training_labels'][0]['normalized'].update(file_digest=file_digest(root/'normalized.json'), label_ref=norm['label_ref'])
             with self.assertRaises(ValueError): project_saved_fold(m, s)
+
+    def test_original_json_format_preserves_evidence_ref_and_saved_load(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); m, s = fixture(root); proof = _read(root/'proof.json')
+            expected = project_saved_fold(m, s)
+            for name, text in (('spaced', json.dumps(proof, sort_keys=True)+'\n'),
+                               ('indented', json.dumps(proof, indent=2)+'\n'),
+                               ('no_final_lf', json.dumps(proof))):
+                with self.subTest(format=name):
+                    (root/'proof.json').write_text(text)
+                    m['feature_parents'][0]['input_evidence']['file_digest'] = file_digest(root/'proof.json')
+                    actual = project_saved_fold(m, s)
+                    self.assertEqual(actual[2:], expected[2:])
+                    run, _ = self.build(m, s, root/name)
+                    self.assertEqual(load_stock_ml_fold(run.path).identity, run.identity)
+                    self.assertEqual((root/'proof.json').read_text(), text)
+
+    def test_formatted_proof_rehash_cannot_replace_logical_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); m, s = fixture(root); proof = _read(root/'proof.json')
+            proof[0]['core_frame_ref'] = digest('changed evidence')
+            (root/'proof.json').write_text(json.dumps(proof, indent=2)+'\n')
+            # Even updating the byte descriptor cannot change the Feature's ref.
+            m['feature_parents'][0]['input_evidence']['file_digest'] = file_digest(root/'proof.json')
+            with self.assertRaisesRegex(ValueError, 'input evidence mismatch'):
+                project_saved_fold(m, s)
 
     def test_bool_window_missing_previous_session_and_model_clock_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
