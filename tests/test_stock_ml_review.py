@@ -91,6 +91,29 @@ class StockMLReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "stage linkage"):
                 load_stock_ml_experiment(path)
 
+    def test_loader_parses_once_but_verifies_again_on_every_invocation(self):
+        import axiom_research.stock_artifacts as artifacts
+        expected_names = {"manifest.json", "experiment.json", "features.json", "labels.json",
+                          "dataset.json", "model.json", "predictions.json", "signal-evidence.json"}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            saved_fixture(path)
+            with patch.object(artifacts, "_read", wraps=artifacts._read) as read:
+                artifacts.load_stock_ml_experiment(path)
+                self.assertEqual(len(read.call_args_list), len(expected_names))
+                self.assertEqual({call.args[0].name for call in read.call_args_list}, expected_names)
+                read.reset_mock()
+                artifacts.load_stock_ml_experiment(path)
+                self.assertEqual(len(read.call_args_list), len(expected_names))
+            saved_fixture(path, wrong_dataset=True)
+            with self.assertRaisesRegex(ValueError, "stage linkage"):
+                artifacts.load_stock_ml_experiment(path)
+            saved_fixture(path)
+            with (path / "features.json").open("a") as stream:
+                stream.write(" ")
+            with self.assertRaisesRegex(ValueError, "file mismatch: features.json"):
+                artifacts.load_stock_ml_experiment(path)
+
     def test_loader_import_and_execution_have_no_upstream_dependencies(self):
         import builtins
         import axiom_research.stock_artifacts as artifacts

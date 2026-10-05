@@ -181,7 +181,8 @@ def _prepare_stock_inputs(data, *, config, destination, catalog, chosen, progres
     data.export_qlib(snapshot=config['snapshot'],queries=(price_query,factor_query),destination=qlib_path,
                      universe_query=member_query,universe_name=config['universe_id'])
     view=QlibView(qlib_path).activate(); native=view.read(fields=('open','high','low','close','amount_cny','factor'),symbols=symbols)
-    reverse={v:k for k,v in view.reference['instrument_map'].items()}; values={}
+    view_reference=view.reference; view_id=view_reference['view_id']
+    reverse={v:k for k,v in view_reference['instrument_map'].items()}; values={}
     for (instrument,day),row in native.iterrows():
         values[reverse[instrument],str(day.date())]={k:None if np.isnan(row['$'+k]) else float(row['$'+k])
             for k in ('open','high','low','close','amount_cny','factor')}
@@ -195,8 +196,8 @@ def _prepare_stock_inputs(data, *, config, destination, catalog, chosen, progres
         fq=replace(factor_query,sessions=history,cutoff_by_session=window_cutoffs)
         rq=replace(member_query,sessions=history,cutoff_by_session=window_cutoffs)
         stats['data_read_calls']+=3
-        price=_project_qlib(data.read(snapshot=config['snapshot'],query=pq),values,view.reference['view_id'])
-        factor=_project_qlib(data.read(snapshot=config['snapshot'],query=fq),values,view.reference['view_id'])
+        price=_project_qlib(data.read(snapshot=config['snapshot'],query=pq),values,view_id)
+        factor=_project_qlib(data.read(snapshot=config['snapshot'],query=fq),values,view_id)
         adjusted=_adjust_feature(price,factor,session)
         membership=data.members(snapshot=config['snapshot'],query=rq)
         adapted=adapt_decision_batch(adjusted,reference=membership,recipe_ref=catalog.recipe_ref(
@@ -204,13 +205,14 @@ def _prepare_stock_inputs(data, *, config, destination, catalog, chosen, progres
             source_granularity='batch_field')
         plan=build_feature_plan(adapted.plan,config['feature_selection'],catalog=catalog,normalized=True)
         frame=execute_feature_plan(plan,adapted.facts,adapted.context); stats['core_calls']+=1; stats['feature_core_calls']+=1
+        frame_ref=frame.identity; plan_ref=plan.identity
         frame_wire=frame.to_dict(); member={r['security_id']:r['is_member'] for r in membership.to_json()['records'] if r['session']==session}
         for r in frame_wire['rows']:
             rows.append({'security_id':r['security_id'],'session':session,'values':r['values'],
                 'availability':r['availability'],'validity':r['valid'],'reasons':r['reasons'],
                 'member':member[r['security_id']],
-                'knowledge_cutoff':cutoffs[session],'source_refs':[frame.identity,plan.identity]})
-        inputs.append({'session':session,'core_frame_ref':frame.identity,'core_plan':plan.to_dict(),
+                'knowledge_cutoff':cutoffs[session],'source_refs':[frame_ref,plan_ref]})
+        inputs.append({'session':session,'core_frame_ref':frame_ref,'core_plan':plan.to_dict(),
             'fact_ref':adapted.facts.identity,'context_ref':adapted.context.identity,
             'sessions':list(history),'cutoffs':window_cutoffs,
             'adjusted_input_ref':digest(adjusted.to_json()),'membership_ref':digest(membership.to_json()),
@@ -222,7 +224,7 @@ def _prepare_stock_inputs(data, *, config, destination, catalog, chosen, progres
                       'session':session,'seconds':time.perf_counter()-begin})
     stats['feature_seconds']=time.perf_counter()-begin
     features=_seal({'contract_version':'stock_feature_build_v1','catalog_ref':catalog.identity,
-        'selection':config['feature_selection'],'ordered_features':columns,'qlib_view':view.reference,
+        'selection':config['feature_selection'],'ordered_features':columns,'qlib_view':view_reference,
         'input_evidence_ref':digest(inputs),'rows':rows},'feature_ref')
     begin=time.perf_counter()
     def outcome(cutoff, wanted):
