@@ -174,8 +174,13 @@ def load_stock_ml_experiment(path):
 def load_stock_model(path):
     """Return verified saved ModelRelease metadata, without importing LightGBM."""
     path=Path(path);model=_read(path/'model.json');_verify_ref(model,'model_ref')
-    if model.get('contract_version')!='stock_model_release_v1':
+    if model.get('contract_version') not in ('stock_model_release_v1','stock_model_release_v2'):
         raise ValueError('unsupported stock model contract')
+    if model['contract_version']=='stock_model_release_v2':
+        from .stock_label_contracts import _instant
+        if (model.get('clock_basis')!='declared_simulation' or
+                not _instant(model['fit_cutoff']) < _instant(model['simulated_available_at'])):
+            raise ValueError('saved model simulation clock mismatch')
     columns=model.get('ordered_features')
     if type(columns) is not list or not columns or len(columns)!=len(set(columns)) or any(
             type(c) is not str or not c for c in columns):

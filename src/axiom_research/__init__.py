@@ -9,8 +9,9 @@ from .experiments import (ExperimentStore, ExperimentReader,
 from .stock_artifacts import (StockMLExperiment, load_stock_ml_experiment,
                               load_stock_model)
 from .stock_stage_report import export_stock_stage_report, load_stock_stage_report
+from .stock_fold_artifacts import StockMLFold, load_stock_ml_fold
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 # Readonly metadata consumers do not import an optional Data/Core build runtime.
 # Existing runtime names retain their public import paths and load when requested.
@@ -24,6 +25,7 @@ _RUNTIME_EXPORTS = {
     "build_rotation_experiment": ".rotation", "load_rotation_experiment": ".rotation",
     "build_stock_ml_experiment": ".stock_ml", "predict_stock_model": ".stock_ml",
     "build_stock_ml_from_saved_features": ".stock_ml",
+    "build_stock_ml_fold_from_saved_inputs": ".stock_folds",
     "normalize_forward_labels": ".stock_label_normalization",
     "load_feature_catalog": ".feature_catalog", "build_feature_plan": ".feature_catalog",
     "build_forward_labels": ".labels", "mature_training_rows": ".labels",
