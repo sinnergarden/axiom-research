@@ -120,14 +120,15 @@ def build_stock_ml_fold_from_saved_inputs(input_manifest, *, fold_spec, destinat
             'limitations': ['Declared simulation publication clocks are not historical realtime completion evidence.',
                 'Feature inputs retain their original best-effort historical availability and immutable refs.',
                 'Scores are normalized-target predictions, not return percentages.',
-                'Engine neutral v2 validation is separate; v2 Runtime accounts are unsupported.']}, 'signal_run_ref')
+                'Engine validation and Runtime account execution are not performed by this builder.']}, 'signal_run_ref')
         evidence = _signal_evidence(predictions, evaluation, spec['evaluation_cutoff'])
         refs = {key: value[key] for key, value in [('feature_ref', features), ('label_ref', labels),
             ('dataset_ref', dataset), ('model_ref', model), ('signal_run_ref', predictions), ('evidence_ref', evidence)]}
         fold = {'contract_version': 'stock_ml_fold_v2' if compact else 'stock_ml_fold_v1', 'definition': definition,
             'definition_ref': definition_ref, 'status': 'COMPLETE', **refs,
             'fold_ref': digest({'definition_ref': definition_ref, **refs}),
-            'engine_admission': {'neutral_validation': 'NOT_PERFORMED_BY_BUILDER', 'runtime': 'UNSUPPORTED_V2'},
+            'engine_admission': {'neutral_validation': 'NOT_PERFORMED_BY_BUILDER',
+                                 'runtime': 'NOT_PERFORMED_BY_BUILDER'},
             'limitations': ['Explicit immutable parent paths remain required; relocation is not supported.',
                 'Full parent proof parsing is bounded by caller resources, not streaming.',
                 'No Data, supplier, Feature, label normalization or account execution in this builder.']}

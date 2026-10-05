@@ -134,6 +134,10 @@ def _load_stock_ml_fold(path, *, projection=None):
             evidence['label_ref'] == evaluation['label_ref'] and evidence['evaluation_cutoff'] == spec['evaluation_cutoff'] and
             evidence['score_semantics'] == predictions['score_semantics'] and
             [r['session'] for r in evidence['series']] == features['prediction_sessions'], 'saved evidence input linkage mismatch')
-    require(fold['engine_admission'] == {'neutral_validation': 'NOT_PERFORMED_BY_BUILDER', 'runtime': 'UNSUPPORTED_V2'},
+    # Old artifacts retain the implementation-era Runtime capability marker.
+    # Neither marker is an admission receipt for this particular saved Signal.
+    require(fold['engine_admission'] in (
+        {'neutral_validation': 'NOT_PERFORMED_BY_BUILDER', 'runtime': 'NOT_PERFORMED_BY_BUILDER'},
+        {'neutral_validation': 'NOT_PERFORMED_BY_BUILDER', 'runtime': 'UNSUPPORTED_V2'}),
             'fold cannot claim Engine Runtime admission')
     return StockMLFold(path)

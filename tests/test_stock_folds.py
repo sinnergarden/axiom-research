@@ -161,7 +161,26 @@ class SavedFoldTests(unittest.TestCase):
                 self.assertEqual(row['knowledge_cutoff'], row['session']+'T21:00:00+08:00')
                 if row['security_id'] == 'A':
                     self.assertIsNone(row['feature_available_at']); self.assertIsNone(row['score']); self.assertFalse(row['valid'])
-            self.assertEqual(run.to_dict()['engine_admission']['runtime'], 'UNSUPPORTED_V2')
+            self.assertEqual(run.to_dict()['engine_admission']['runtime'], 'NOT_PERFORMED_BY_BUILDER')
+
+    def test_admission_marker_is_not_a_runtime_capability_or_approval_receipt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); manifest, spec = fixture(root)
+            run, _ = self.build(manifest, spec, root/'folds')
+            before = run.predictions()
+            fold = run.to_dict()
+            for status in ('UNSUPPORTED_V2', 'NOT_PERFORMED_BY_BUILDER', 'ADMITTED'):
+                fold['engine_admission']['runtime'] = status
+                fold = seal({k: v for k, v in fold.items() if k != 'content_digest'}, 'content_digest')
+                write_json(run.path/'fold.json', fold)
+                saved_manifest = _read(run.path/'manifest.json')
+                saved_manifest['files']['fold.json'] = file_digest(run.path/'fold.json')
+                write_json(run.path/'manifest.json', saved_manifest)
+                if status == 'ADMITTED':
+                    with self.assertRaisesRegex(ValueError, 'cannot claim Engine Runtime admission'):
+                        load_stock_ml_fold(run.path)
+                else:
+                    self.assertEqual(load_stock_ml_fold(run.path).predictions(), before)
 
     def test_v2_native_booster_independent_prediction_matches_saved_scores(self):
         with tempfile.TemporaryDirectory() as temp:
