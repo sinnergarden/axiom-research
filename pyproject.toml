@@ -7,7 +7,7 @@ name = "axiom-research"
 version = "0.2.4"
 description = "Axiom Research R0 definitions, manifests and identity contracts"
 requires-python = ">=3.11"
-dependencies = ["axiom-engine>=0.1.0"]
+dependencies = ["axiom-engine>=0.3.0"]
 
 [project.optional-dependencies]
 build = ["axiom-data>=0.3.4", "pyarrow>=14"]
