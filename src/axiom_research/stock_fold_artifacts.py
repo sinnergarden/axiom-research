@@ -40,15 +40,24 @@ def load_stock_ml_fold(path):
     No current implementation/environment requirement is imposed on old saved
     reports. Parent locations and full non-streaming proof parsing are explicit.
     """
+    return _load_stock_ml_fold(path)
+
+
+def _load_stock_ml_fold(path, *, projection=None):
+    """Internal publication check may reuse this call's verified projection."""
     path = Path(path); manifest = _read(path/'manifest.json')
     require(manifest.get('contract_version') == 'stock_ml_fold_manifest_v1' and
             set(manifest.get('files', {})) == {*OUTPUTS, 'fold.json', 'booster.txt'}, 'unexpected saved fold files')
     for name, reference in manifest['files'].items():
         require(file_digest(path/name) == reference, 'saved fold file mismatch: '+name)
     fold = _read(path/'fold.json'); _verify_ref(fold, 'content_digest')
-    require(fold['contract_version'] == 'stock_ml_fold_v1' and fold['status'] == 'COMPLETE', 'incomplete fold')
+    require(fold['contract_version'] in ('stock_ml_fold_v1', 'stock_ml_fold_v2') and
+            fold['status'] == 'COMPLETE', 'incomplete fold')
     definition = fold['definition']; spec = definition['fold_spec']; inputs = definition['input_manifest']
-    require(definition['version'] == 'axiom.stock_ml_fold/1' and definition['parameters'] == LGBM_PARAMETERS and
+    compact = spec['contract_version'] == 'stock_ml_fold_spec_v2'
+    require(fold['contract_version'] == ('stock_ml_fold_v2' if compact else 'stock_ml_fold_v1') and
+            definition['version'] == ('axiom.stock_ml_fold/2' if compact else 'axiom.stock_ml_fold/1') and
+            definition['parameters'] == LGBM_PARAMETERS and
             definition['num_boost_round'] == TREES and definition['target_semantics'] == TARGET_SEMANTICS and
             definition['label_normalization'] == NORMALIZATION_SPEC, 'unsupported saved fold profile')
     require(fold['definition_ref'] == digest(definition) and definition['input_manifest_ref'] == digest(inputs) and
@@ -62,12 +71,13 @@ def load_stock_ml_fold(path):
         value = _read(path/name); _verify_ref(value, key)
         require(value[key] == fold[key], 'fold stage reference mismatch')
         saved[name] = value
-    features, labels, training, excluded, raw_refs, evaluation = project_saved_fold(inputs, spec)
+    features, labels, training, excluded, raw_refs, evaluation = (
+        project_saved_fold(inputs, spec) if projection is None else projection)
     require(saved['feature-slice.json'] == features and saved['label-slice.json'] == labels,
             'saved slice/immutable parent mismatch')
     dataset, model = saved['dataset.json'], saved['model.json']
     predictions, evidence = saved['predictions.json'], saved['signal-evidence.json']
-    require(dataset['contract_version'] == 'stock_fold_dataset_v1' and
+    require(dataset['contract_version'] == ('stock_fold_dataset_v2' if compact else 'stock_fold_dataset_v1') and
             model['contract_version'] == 'stock_model_release_v2', 'unsupported fold stage contract')
     require(len(training) >= 40 and dataset['training_keys'] == [[r['security_id'], r['session']] for r in training] and
             dataset['training_row_count'] == len(training) and dataset['training_rows_ref'] == digest(training) and
