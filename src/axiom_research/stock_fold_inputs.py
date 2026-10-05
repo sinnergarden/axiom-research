@@ -1,10 +1,14 @@
 """Validate explicit saved parents and select a fold; no numerical executor.
 
-Parents are read and released one at a time. This is bounded saved projection,
-not a streaming proof loader or a general storage/path migration service.
+Common proofs are read and released one at a time. Validated Feature rows can
+be reused by a process-local batch; this is not a streaming proof loader or a
+general storage/path migration service.
 """
 from copy import deepcopy
+from collections.abc import Mapping
+from datetime import date
 from pathlib import Path
+from weakref import WeakKeyDictionary
 
 from .stock_artifacts import (digest, file_digest, _read, _verify_ref,
                               _canonical_file_ref, _verify_normalized_labels)
@@ -55,16 +59,131 @@ def feature_available(row):
     return max((v for v in values if v is not None), key=_instant, default=None)
 
 
+_COMMON_SOURCE_KEYS = ('scope', 'snapshot', 'pit_policy', 'calendar', 'universe',
+    'catalog_ref', 'feature_selection', 'ordered_features', 'feature_parents')
+_FEATURE_INPUT_TOKEN = object()
+_FEATURE_INPUT_DATA = WeakKeyDictionary()
+
+
+class _CopyingMapping(Mapping):
+    """Expose indexed saved values without lending their mutable contents."""
+
+    __slots__ = ('__values',)
+
+    def __init__(self, values):
+        self.__values = values
+
+    def __getitem__(self, key):
+        return deepcopy(self.__values[key])
+
+    def __iter__(self):
+        return iter(self.__values)
+
+    def __len__(self):
+        return len(self.__values)
+
+
+def _feature_input_data(value):
+    require(type(value) is _SavedFeatureInputs and value in _FEATURE_INPUT_DATA,
+            'validated saved Feature inputs required')
+    return _FEATURE_INPUT_DATA[value]
+
+
+class _SavedFeatureInputs:
+    """Process-local validated parents, constructed only by the saved loader.
+
+    Public mappings and builds return copies. Private borrowing is reserved for
+    batch orchestration and projection, which must leave the saved values alone.
+    The registry also rejects uninitialized or copied instances.
+    """
+
+    __slots__ = ('__weakref__',)
+
+    def __init__(self, token, *, identity, rows, parents, builds):
+        require(token is _FEATURE_INPUT_TOKEN, 'saved Feature inputs require validation')
+        _FEATURE_INPUT_DATA[self] = {'identity': identity, 'rows': rows,
+            'parents': parents, 'builds': builds}
+
+    @property
+    def common_source_identity(self):
+        return _feature_input_data(self)['identity']
+
+    @property
+    def rows(self):
+        return _CopyingMapping(self._rows)
+
+    @property
+    def parents_by_session(self):
+        return _CopyingMapping(self._parents_by_session)
+
+    @property
+    def feature_builds(self):
+        return _CopyingMapping(_feature_input_data(self)['builds'])
+
+    def feature_build(self, feature_ref):
+        return deepcopy(self._borrow_feature_build(feature_ref))
+
+    @property
+    def _rows(self):
+        return _feature_input_data(self)['rows']
+
+    @property
+    def _parents_by_session(self):
+        return _feature_input_data(self)['parents']
+
+    def _borrow_feature_build(self, feature_ref):
+        return _feature_input_data(self)['builds'][feature_ref]
+
+
+def common_source_identity(manifest):
+    """Bind only the immutable source definition shared by different fits."""
+    require(type(manifest) is dict and all(key in manifest for key in _COMMON_SOURCE_KEYS),
+            'saved common source definition required')
+    return digest({key: manifest[key] for key in _COMMON_SOURCE_KEYS})
+
+
+def _validate_saved_manifest(manifest):
+    require(set(manifest) == {'contract_version', 'scope', 'snapshot', 'pit_policy', 'calendar',
+        'universe', 'catalog_ref', 'feature_selection', 'ordered_features', 'feature_parents',
+        'training_labels', 'evaluation_labels'} and
+        manifest['contract_version'] == 'stock_ml_saved_inputs_v1', 'unsupported saved-input manifest')
+    require(type(manifest['snapshot']) is str and manifest['snapshot'] not in ('', 'current', 'latest') and
+            type(manifest['pit_policy']) is str and bool(manifest['pit_policy']), 'fixed Snapshot/PIT required')
+    calendar = ordered(manifest['calendar'], 'calendar'); [_session(d) for d in calendar]
+    universe = ordered(manifest['universe'], 'universe')
+    columns = manifest['ordered_features']
+    require(type(columns) is list and bool(columns) and len(set(columns)) == len(columns), 'ordered columns required')
+    return calendar, universe, columns
+
+
 def validate_spec(spec, calendar):
     require(set(spec) == {'contract_version', 'training_window', 'fit_session', 'fit_cutoff',
         'simulated_model_available_at', 'oos_trade_sessions', 'inference_cutoff_by_session',
-        'evaluation_cutoff'} and spec['contract_version'] == 'stock_ml_fold_spec_v1', 'unsupported fold spec')
+        'evaluation_cutoff'} and spec['contract_version'] in
+        ('stock_ml_fold_spec_v1', 'stock_ml_fold_spec_v2'), 'unsupported fold spec')
     window = spec['training_window']
-    require(window == {'unit': 'feature_sessions', 'length': 65, 'end': 'previous_fit_session'} and
-            type(window['length']) is int, 'this bounded profile requires 65 actual feature sessions')
     fit = spec['fit_session']; require(fit in calendar, 'fit session outside frozen calendar')
-    i = calendar.index(fit); require(i >= 65, 'insufficient frozen training calendar')
-    training = calendar[i-65:i]
+    i = calendar.index(fit)
+    if spec['contract_version'] == 'stock_ml_fold_spec_v1':
+        require(window == {'unit': 'feature_sessions', 'length': 65, 'end': 'previous_fit_session'} and
+                type(window['length']) is int, 'this bounded profile requires 65 actual feature sessions')
+        require(i >= 65, 'insufficient frozen training calendar')
+        training = calendar[i-65:i]
+    else:
+        require(window == {'unit': 'calendar_years', 'length': 2, 'end': 'previous_fit_session',
+                'start': 'fit_date_minus_years_inclusive', 'leap_day': 'clamp_feb_28'} and
+                type(window['length']) is int, 'this bounded profile requires two calendar years')
+        ordered(calendar, 'calendar'); [_session(d) for d in calendar]
+        fit_date = date.fromisoformat(fit)
+        try:
+            boundary = fit_date.replace(year=fit_date.year-2).isoformat()
+        except ValueError:
+            require(fit_date.month == 2 and fit_date.day == 29, 'unsupported calendar-year boundary')
+            boundary = fit_date.replace(year=fit_date.year-2, day=28).isoformat()
+        require(calendar[0] < boundary, 'insufficient frozen two-year training calendar/lookback')
+        training = [day for day in calendar[:i] if day >= boundary]
+        require(bool(training) and training[-1] == calendar[i-1],
+                'missing previous-fit training session')
     trades = ordered(spec['oos_trade_sessions'], 'OOS trade sessions')
     require(all(d in calendar and calendar.index(d) > 0 for d in trades), 'OOS outside frozen calendar')
     prediction = [calendar[calendar.index(d)-1] for d in trades]
@@ -106,18 +225,10 @@ def validate_raw(raw, manifest, cutoff):
     return indexed
 
 
-def project_saved_fold(manifest, spec):
-    """Verify full immutable parents, return only selected rows and stage slices."""
-    require(set(manifest) == {'contract_version', 'scope', 'snapshot', 'pit_policy', 'calendar',
-        'universe', 'catalog_ref', 'feature_selection', 'ordered_features', 'feature_parents',
-        'training_labels', 'evaluation_labels'} and
-        manifest['contract_version'] == 'stock_ml_saved_inputs_v1', 'unsupported saved-input manifest')
-    require(type(manifest['snapshot']) is str and manifest['snapshot'] not in ('', 'current', 'latest') and
-            type(manifest['pit_policy']) is str and bool(manifest['pit_policy']), 'fixed Snapshot/PIT required')
-    calendar = ordered(manifest['calendar'], 'calendar'); [_session(d) for d in calendar]
-    universe = ordered(manifest['universe'], 'universe')
-    columns = manifest['ordered_features']
-    require(type(columns) is list and bool(columns) and len(set(columns)) == len(columns), 'ordered columns required')
+def load_saved_feature_inputs(manifest):
+    """Validate the complete common parents once and release each full proof."""
+    calendar, universe, columns = _validate_saved_manifest(manifest)
+    identity = common_source_identity(manifest)
     scope = read_parent(manifest['scope'], 'scope_bundle_ref')
     for key, name in (('request_ref', 'request'), ('result_ref', 'result'), ('source_proof_ref', 'source_proof')):
         require(scope[key] == digest(scope[name]), 'scope source linkage mismatch')
@@ -125,11 +236,8 @@ def project_saved_fold(manifest, spec):
     require(result['read_sessions'] == calendar and result['read_symbols'] == universe and
             result['snapshot_id'] == manifest['snapshot'] and result['pit_policy'] == manifest['pit_policy'],
             'frozen scope projection mismatch')
-    del scope
-    training_dates, prediction_dates = validate_spec(spec, calendar)
-    needed = set(training_dates + prediction_dates)
-    needed_for_validation = needed | {d for desc in manifest['training_labels'] for d in desc['sessions']}
-    rows, parents = {}, {}
+    del result, scope
+    rows, parents, builds = {}, {}, {}
     require(bool(manifest['feature_parents']), 'saved Feature parents required')
     for desc in manifest['feature_parents']:
         require(set(desc) == {'features', 'input_evidence', 'sessions'}, 'Feature parent descriptor required')
@@ -176,22 +284,47 @@ def project_saved_fold(manifest, spec):
                 require(_instant(row['knowledge_cutoff']) == _instant(day+'T20:30:00+08:00') and
                         all(a is None or _instant(a) <= _instant(row['knowledge_cutoff']) for a in row['availability']),
                         'original Feature clock conflict')
-                if day in needed_for_validation:
-                    rows[security, day] = row
+                rows[security, day] = row
             parents[day] = {'feature_ref': parent_ref, 'qlib_view_ref': feature['qlib_view']['view_id']}
+        builds[parent_ref] = feature
         del proof, by_date, indexed, feature
+    require(common_source_identity(manifest) == identity, 'common source definition changed during validation')
+    return _SavedFeatureInputs(_FEATURE_INPUT_TOKEN, identity=identity, rows=rows,
+        parents=parents, builds=builds)
+
+
+def project_saved_fold(manifest, spec, *, feature_inputs=None, reader=read_parent):
+    """Verify fold labels/clocks, return the original six selected stage values.
+
+    A validated common object avoids reading its scope, Features, and proofs
+    again. The reader hook is for the batch's private verified label cache.
+    """
+    calendar, universe, columns = _validate_saved_manifest(manifest)
+    training_dates, prediction_dates = validate_spec(spec, calendar)
+    if feature_inputs is None:
+        feature_inputs = load_saved_feature_inputs(manifest)
+    data = _feature_input_data(feature_inputs)
+    require(data['identity'] == common_source_identity(manifest), 'saved common source identity mismatch')
+    rows, parents = data['rows'], data['parents']
+    needed = set(training_dates + prediction_dates)
     require(needed <= set(parents), 'missing complete Feature date')
-    feature_slice = seal({'contract_version': 'stock_feature_slice_v1', 'input_manifest_ref': digest(manifest),
+    compact = spec['contract_version'] == 'stock_ml_fold_spec_v2'
+    feature_slice = seal({'contract_version': 'stock_feature_slice_v2' if compact else 'stock_feature_slice_v1',
+        'input_manifest_ref': digest(manifest),
         'universe': universe, 'ordered_features': columns, 'catalog_ref': manifest['catalog_ref'],
         'selection': manifest['feature_selection'], 'training_sessions': training_dates,
-        'prediction_sessions': prediction_dates, 'parents_by_session': {d: parents[d] for d in sorted(needed)},
-        'rows': [rows[s, d] for d in sorted(needed) for s in universe]}, 'feature_ref')
+        'prediction_sessions': prediction_dates,
+        'parents_by_session': {d: deepcopy(parents[d]) for d in sorted(needed)},
+        # v2 binds the full training range to immutable parents. Only OOS rows
+        # are materialized here; Dataset records the actual joined training keys.
+        'rows': [deepcopy(rows[s, d]) for d in (prediction_dates if compact else sorted(needed))
+                 for s in universe]}, 'feature_ref')
     norm_rows, label_parents, section_refs, raw_refs = {}, [], [], []
     for desc in manifest['training_labels']:
         require(set(desc) == {'raw', 'normalized', 'sessions', 'raw_projection'}, 'training label descriptor required')
         dates = ordered(desc['sessions'], 'normalized parent dates')
-        raw = read_parent(desc['raw'], 'label_ref'); raw_index = validate_raw(raw, manifest, spec['fit_cutoff'])
-        norm = read_parent(desc['normalized'], 'label_ref'); _verify_normalized_labels(norm)
+        raw = reader(desc['raw'], 'label_ref'); raw_index = validate_raw(raw, manifest, spec['fit_cutoff'])
+        norm = reader(desc['normalized'], 'label_ref'); _verify_normalized_labels(norm)
         require(type(desc['raw_projection']) is bool, 'explicit raw projection flag required')
         projected = raw
         if desc['raw_projection']:
@@ -261,16 +394,19 @@ def project_saved_fold(manifest, spec):
                 require(feature_available(feature) is not None and
                         _instant(feature['knowledge_cutoff']) <= _instant(spec['fit_cutoff']) and
                         _instant(feature_available(feature)) <= _instant(spec['fit_cutoff']), 'training Feature clock exceeds fit')
-                training.append({**feature, 'label': label['normalized_target'], 'raw_return': label['raw_return'],
+                training.append({**deepcopy(feature), 'label': label['normalized_target'], 'raw_return': label['raw_return'],
                     'label_available_at': label['label_available_at'], 'normalized_available_at': label['normalized_available_at']})
             else:
                 excluded[reason] = excluded.get(reason, 0)+1
             label_rows.append({'security_id': security, 'feature_session': day,
                 'normalized_parent_ref': label['normalized_parent_ref'] if label else None,
                 'valid': reason is None, 'invalid_reason': reason})
-    label_slice = seal({'contract_version': 'stock_fold_label_slice_v1', 'parents': label_parents,
-        'cutoff': spec['fit_cutoff'], 'rows': label_rows, 'section_refs': section_refs}, 'label_ref')
-    evaluation = read_parent(manifest['evaluation_labels'], 'label_ref')
+    label_selection = ({'training_sessions': training_dates, 'selection_ref': digest(label_rows),
+                        'selection_count': len(label_rows), 'excluded': excluded} if compact else {'rows': label_rows})
+    label_slice = seal({'contract_version': 'stock_fold_label_slice_v2' if compact else 'stock_fold_label_slice_v1',
+        'parents': label_parents, 'cutoff': spec['fit_cutoff'], **label_selection,
+        'section_refs': section_refs}, 'label_ref')
+    evaluation = reader(manifest['evaluation_labels'], 'label_ref')
     evaluation_index = validate_raw(evaluation, manifest, spec['evaluation_cutoff'])
     require(all((s, d) in evaluation_index for d in prediction_dates for s in universe), 'missing OOS raw label grid')
     return feature_slice, label_slice, training, excluded, sorted(set(raw_refs)), evaluation

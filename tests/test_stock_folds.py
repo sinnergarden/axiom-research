@@ -17,14 +17,21 @@ from axiom_research.stock_label_normalization import normalize_forward_labels
 
 
 def fixture(root, *, fit_index=65, all_null_prediction=False, projected=True,
-            label_start=None, labels_include_immature=True):
+            label_start=None, labels_include_immature=True, calendar=None, two_year=False):
     # Explicit artificial sessions with irregular holes, not a market calendar inference.
-    calendar = [(date(2023, 9, 1)+timedelta(days=2*i+(i//7))).isoformat() for i in range(80)]
-    fit = calendar[fit_index]; train_dates = calendar[fit_index-65:fit_index]
+    calendar = calendar or [(date(2023, 9, 1)+timedelta(days=2*i+(i//7))).isoformat() for i in range(80)]
+    fit = calendar[fit_index]
+    start = fit_index-65
+    if two_year:
+        f = date.fromisoformat(fit)
+        try: boundary = f.replace(year=f.year-2)
+        except ValueError: boundary = f.replace(year=f.year-2, day=28)
+        start = next(i for i, d in enumerate(calendar) if d >= boundary.isoformat())
+    train_dates = calendar[start:fit_index]
     pred_dates = [calendar[fit_index], calendar[fit_index+2]]
     fit_cutoff = fit+'T20:30:00+08:00'; universe = ['A', 'B', 'C']
     catalog = load_feature_catalog(); selection = [catalog.default_selection[0].to_dict()]
-    label_dates = calendar[fit_index-65 if label_start is None else label_start:
+    label_dates = calendar[start if label_start is None else label_start:
                            fit_index if labels_include_immature else fit_index-4]
     columns = [selection[0]['id']]; dates = sorted(set(train_dates+pred_dates+label_dates))
     proof = [{'session': d, 'core_plan': {'synthetic_session': d}, 'core_frame_ref': digest(['frame', d])} for d in dates]
@@ -83,6 +90,10 @@ def fixture(root, *, fit_index=65, all_null_prediction=False, projected=True,
         'fit_session': fit, 'fit_cutoff': fit_cutoff, 'simulated_model_available_at': fit+'T20:45:00+08:00',
         'oos_trade_sessions': [calendar[calendar.index(d)+1] for d in pred_dates],
         'inference_cutoff_by_session': {d: d+'T21:00:00+08:00' for d in pred_dates}, 'evaluation_cutoff': eval_cutoff}
+    if two_year:
+        spec.update(contract_version='stock_ml_fold_spec_v2', training_window={
+            'unit': 'calendar_years', 'length': 2, 'end': 'previous_fit_session',
+            'start': 'fit_date_minus_years_inclusive', 'leap_day': 'clamp_feb_28'})
     return manifest, spec
 
 
@@ -150,7 +161,26 @@ class SavedFoldTests(unittest.TestCase):
                 self.assertEqual(row['knowledge_cutoff'], row['session']+'T21:00:00+08:00')
                 if row['security_id'] == 'A':
                     self.assertIsNone(row['feature_available_at']); self.assertIsNone(row['score']); self.assertFalse(row['valid'])
-            self.assertEqual(run.to_dict()['engine_admission']['runtime'], 'UNSUPPORTED_V2')
+            self.assertEqual(run.to_dict()['engine_admission']['runtime'], 'NOT_PERFORMED_BY_BUILDER')
+
+    def test_admission_marker_is_not_a_runtime_capability_or_approval_receipt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); manifest, spec = fixture(root)
+            run, _ = self.build(manifest, spec, root/'folds')
+            before = run.predictions()
+            fold = run.to_dict()
+            for status in ('UNSUPPORTED_V2', 'NOT_PERFORMED_BY_BUILDER', 'ADMITTED'):
+                fold['engine_admission']['runtime'] = status
+                fold = seal({k: v for k, v in fold.items() if k != 'content_digest'}, 'content_digest')
+                write_json(run.path/'fold.json', fold)
+                saved_manifest = _read(run.path/'manifest.json')
+                saved_manifest['files']['fold.json'] = file_digest(run.path/'fold.json')
+                write_json(run.path/'manifest.json', saved_manifest)
+                if status == 'ADMITTED':
+                    with self.assertRaisesRegex(ValueError, 'cannot claim Engine Runtime admission'):
+                        load_stock_ml_fold(run.path)
+                else:
+                    self.assertEqual(load_stock_ml_fold(run.path).predictions(), before)
 
     def test_v2_native_booster_independent_prediction_matches_saved_scores(self):
         with tempfile.TemporaryDirectory() as temp:

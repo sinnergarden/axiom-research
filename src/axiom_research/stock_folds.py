@@ -8,7 +8,7 @@ import time
 from .stock_artifacts import digest, file_digest, write_json
 from .stock_fold_inputs import (project_saved_fold, seal, require, feature_available,
                                 _instant, _finite, NORMALIZATION_SPEC)
-from .stock_fold_artifacts import StockMLFold, load_stock_ml_fold
+from .stock_fold_artifacts import StockMLFold, load_stock_ml_fold, _load_stock_ml_fold
 from .stock_ml import (_implementation, _environment, TARGET_SEMANTICS,
                        LGBM_PARAMETERS, TREES, _signal_evidence)
 
@@ -39,21 +39,28 @@ def prediction_rows(features, spec, model, scores):
     return rows
 
 
-def build_stock_ml_fold_from_saved_inputs(input_manifest, *, fold_spec, destination, metrics=None):
+def build_stock_ml_fold_from_saved_inputs(input_manifest, *, fold_spec, destination, metrics=None, batch=None):
     """Fit/predict once; an exact, fully validated definition alone permits HIT.
 
-    Parent paths are explicit and remain required. Full proof parsing is not
-    streaming. Runtime/account v2 admission is outside this builder.
+    Parent paths are explicit and remain required. An initialized batch reuses
+    verified common parents and a shared Feature matrix within this process.
+    A separate public loader always verifies the complete saved closure.
     """
     begin = time.perf_counter()
     inputs, spec = deepcopy(input_manifest), deepcopy(fold_spec)
-    features, labels, training, excluded, raw_refs, evaluation = project_saved_fold(inputs, spec)
+    if batch is not None:
+        from .stock_batch import _data
+        _data(batch)  # Reject a caller-created object or a skip-validation flag.
+    projection = project_saved_fold(inputs, spec) if batch is None else batch._project(inputs, spec)
+    features, labels, training, excluded, raw_refs, evaluation = projection
+    compact = spec['contract_version'] == 'stock_ml_fold_spec_v2'
     from .feature_catalog import load_feature_catalog
     catalog = load_feature_catalog()
     require(inputs['catalog_ref'] == catalog.identity and inputs['ordered_features'] ==
             [x['id'] for x in catalog.select(inputs['feature_selection'])], 'current catalog selection mismatch')
     implementations = _implementation()
-    definition = {'version': VERSION, 'input_manifest_ref': digest(inputs), 'input_manifest': inputs,
+    definition = {'version': 'axiom.stock_ml_fold/2' if compact else VERSION,
+        'input_manifest_ref': digest(inputs), 'input_manifest': inputs,
         'fold_spec_ref': digest(spec), 'fold_spec': spec, 'catalog_ref': inputs['catalog_ref'],
         'parameters': LGBM_PARAMETERS, 'num_boost_round': TREES, 'target_semantics': TARGET_SEMANTICS,
         'label_normalization': NORMALIZATION_SPEC, 'environment': _environment(),
@@ -62,13 +69,15 @@ def build_stock_ml_fold_from_saved_inputs(input_manifest, *, fold_spec, destinat
     zeros = dict(data_read_calls=0, supplier_calls=0, feature_core_calls=0, label_core_calls=0,
                  core_calls=0, account_calls=0, train_calls=0, predict_calls=0)
     if target.exists():
-        loaded = load_stock_ml_fold(target)
+        loaded = (load_stock_ml_fold(target) if batch is None else
+                  _load_stock_ml_fold(target, projection=projection))
         require(loaded.to_dict()['definition'] == definition, 'cached fold definition mismatch')
         if metrics is not None:
             metrics.update(zeros, cache_hit=True, total_seconds=time.perf_counter()-begin)
         return StockMLFold(target, True)
     require(len(training) >= 40, 'insufficient mature finite training rows')
-    dataset = seal({'contract_version': 'stock_fold_dataset_v1', 'feature_ref': features['feature_ref'],
+    dataset = seal({'contract_version': 'stock_fold_dataset_v2' if compact else 'stock_fold_dataset_v1',
+        'feature_ref': features['feature_ref'],
         'label_ref': labels['label_ref'], 'raw_label_refs': raw_refs, 'fold_spec_ref': digest(spec),
         'fit_cutoff': spec['fit_cutoff'], 'ordered_features': inputs['ordered_features'],
         'training_keys': [[r['security_id'], r['session']] for r in training],
@@ -81,9 +90,12 @@ def build_stock_ml_fold_from_saved_inputs(input_manifest, *, fold_spec, destinat
         r['member'] and all(r['validity']) and all(_finite(v) for v in r['values']) and
         feature_available(r) is not None]
     stats = {**zeros, 'cache_hit': False, 'saved_input_validation_seconds': time.perf_counter()-begin}
-    X = np.asarray([r['values'] for r in training], dtype=np.float64)
-    y = np.asarray([r['label'] for r in training], dtype=np.float64)
-    P = np.asarray([r['values'] for r in candidates], dtype=np.float64)
+    if batch is None:
+        X = np.asarray([r['values'] for r in training], dtype=np.float64)
+        y = np.asarray([r['label'] for r in training], dtype=np.float64)
+        P = np.asarray([r['values'] for r in candidates], dtype=np.float64)
+    else:
+        X, y, P = batch._matrices(training, candidates)
     booster, scores = fit_predict_stock_model(X, y, P, ordered_features=inputs['ordered_features'],
         parameters=LGBM_PARAMETERS, num_boost_round=TREES, metrics=stats)
     require(len(scores) == len(candidates) and all(_finite(float(s)) for s in scores), 'invalid model scores')
@@ -108,14 +120,15 @@ def build_stock_ml_fold_from_saved_inputs(input_manifest, *, fold_spec, destinat
             'limitations': ['Declared simulation publication clocks are not historical realtime completion evidence.',
                 'Feature inputs retain their original best-effort historical availability and immutable refs.',
                 'Scores are normalized-target predictions, not return percentages.',
-                'Engine neutral v2 validation is separate; v2 Runtime accounts are unsupported.']}, 'signal_run_ref')
+                'Engine validation and Runtime account execution are not performed by this builder.']}, 'signal_run_ref')
         evidence = _signal_evidence(predictions, evaluation, spec['evaluation_cutoff'])
         refs = {key: value[key] for key, value in [('feature_ref', features), ('label_ref', labels),
             ('dataset_ref', dataset), ('model_ref', model), ('signal_run_ref', predictions), ('evidence_ref', evidence)]}
-        fold = {'contract_version': 'stock_ml_fold_v1', 'definition': definition,
+        fold = {'contract_version': 'stock_ml_fold_v2' if compact else 'stock_ml_fold_v1', 'definition': definition,
             'definition_ref': definition_ref, 'status': 'COMPLETE', **refs,
             'fold_ref': digest({'definition_ref': definition_ref, **refs}),
-            'engine_admission': {'neutral_validation': 'NOT_PERFORMED_BY_BUILDER', 'runtime': 'UNSUPPORTED_V2'},
+            'engine_admission': {'neutral_validation': 'NOT_PERFORMED_BY_BUILDER',
+                                 'runtime': 'NOT_PERFORMED_BY_BUILDER'},
             'limitations': ['Explicit immutable parent paths remain required; relocation is not supported.',
                 'Full parent proof parsing is bounded by caller resources, not streaming.',
                 'No Data, supplier, Feature, label normalization or account execution in this builder.']}
@@ -126,13 +139,20 @@ def build_stock_ml_fold_from_saved_inputs(input_manifest, *, fold_spec, destinat
             write_json(stage/name, value)
         write_json(stage/'manifest.json', {'contract_version': 'stock_ml_fold_manifest_v1', 'fold_ref': fold['fold_ref'],
             'files': {n: file_digest(stage/n) for n in [*values, 'booster.txt']}})
-        load_stock_ml_fold(stage)
+        if batch is None:
+            load_stock_ml_fold(stage)
+        else:
+            batch._check_sources()
+            _load_stock_ml_fold(stage, projection=projection)
+            batch._check_sources()
         try:
             stage.rename(target)
         except OSError as exc:
             if exc.errno not in (errno.EEXIST, errno.ENOTEMPTY):
                 raise
-            require(load_stock_ml_fold(target).identity == fold['fold_ref'], 'concurrent fold conflict')
+            loaded = (load_stock_ml_fold(target) if batch is None else
+                      _load_stock_ml_fold(target, projection=projection))
+            require(loaded.identity == fold['fold_ref'], 'concurrent fold conflict')
     stats.update(training_rows=len(training), training_sessions=len({r['session'] for r in training}),
         prediction_rows=len(predictions['rows']), valid_predictions=len(candidates),
         matrix_bytes=X.nbytes+y.nbytes+P.nbytes, artifact_bytes=sum(p.stat().st_size for p in target.iterdir()),
