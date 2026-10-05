@@ -161,13 +161,13 @@ def _signal_evidence(predictions, labels, cutoff):
         'limitations':['Forward-label statistics are not account returns.','No tuning or confidence claim.']},'evidence_ref')
 
 
-def _prepare_stock_inputs(data, *, config, destination, catalog, chosen, progress):
+def _prepare_stock_features(data, *, config, destination, catalog, chosen, progress):
+    """Build decision features once; no outcome reads or fold label cutoff."""
     from .feature_catalog import build_feature_plan
-    from axiom_data import QuerySpec,adjust_prices
+    from axiom_data import QuerySpec
     from axiom_engine.core import execute_feature_plan
     from .data_adapter import adapt_decision_batch
     from .qlib_adapter import QlibView
-    from .labels import build_forward_labels
     import numpy as np
     stats={'feature_core_calls':0,'core_calls':0,'data_read_calls':0,'feature_cache_hit':False}
     symbols=tuple(config['symbols']); sessions=tuple(config['read_sessions']); cutoffs=config['cutoff_by_session']
@@ -226,21 +226,40 @@ def _prepare_stock_inputs(data, *, config, destination, catalog, chosen, progres
     features=_seal({'contract_version':'stock_feature_build_v1','catalog_ref':catalog.identity,
         'selection':config['feature_selection'],'ordered_features':columns,'qlib_view':view_reference,
         'input_evidence_ref':digest(inputs),'rows':rows},'feature_ref')
-    begin=time.perf_counter()
+    return features, inputs, stats
+
+
+def _prepare_stock_labels(data, *, config, training_sessions, metrics=None):
+    """Read original outcome inputs separately at this fold's two cutoffs."""
+    from axiom_data import QuerySpec,adjust_prices
+    from .labels import build_forward_labels
+    if not training_sessions: raise ValueError('training feature sessions required')
+    symbols=tuple(config['symbols']); sessions=tuple(config['read_sessions'])
+    price_query=QuerySpec('market_daily',('open','high','low','close','amount_cny'),symbols,
+        sessions,config['pit_policy'],config['cutoff_by_session'])
     def outcome(cutoff, wanted):
         allowed=tuple(s for s in config['calendar'] if sessions[0]<=s<=_instant(cutoff).date().isoformat())
         if not allowed: raise ValueError('no actual label calendar at cutoff')
         q=replace(price_query,fields=('open','close'),sessions=allowed,
                   cutoff_by_session={s:cutoff for s in allowed},purpose='label_outcomes')
         f=replace(q,domain='adjustment_factors',fields=('factor',))
-        stats['data_read_calls']+=2
+        if metrics is not None: metrics['data_read_calls']=metrics.get('data_read_calls',0)+2
         p=data.read(snapshot=config['snapshot'],query=q); factors=data.read(snapshot=config['snapshot'],query=f)
         adjusted=adjust_prices(p,factors,fields=('open','close'),anchor_session=allowed[-1],
                                decision_session=allowed[-1],factor_field='factor')
         return build_forward_labels(adjusted,calendar=config['calendar'],feature_sessions=wanted)
-    training_sessions=[s for s in config['feature_sessions'] if _instant(cutoffs[s])<=_instant(config['fit_cutoff'])]
     train_labels=outcome(config['fit_cutoff'],training_sessions)
     evaluation_labels=outcome(config['evaluation_cutoff'],config['prediction_sessions'])
+    return train_labels, evaluation_labels
+
+
+def _prepare_stock_inputs(data, *, config, destination, catalog, chosen, progress):
+    features, inputs, stats=_prepare_stock_features(data,config=config,destination=destination,
+        catalog=catalog,chosen=chosen,progress=progress)
+    cutoffs=config['cutoff_by_session']
+    training_sessions=[s for s in config['feature_sessions'] if _instant(cutoffs[s])<=_instant(config['fit_cutoff'])]
+    train_labels, evaluation_labels=_prepare_stock_labels(data,config=config,
+        training_sessions=training_sessions,metrics=stats)
     return features, train_labels, evaluation_labels, inputs, stats
 
 
