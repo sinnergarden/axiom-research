@@ -175,11 +175,12 @@ def normalize_forward_labels(raw_build: dict, *, features: dict,
                            "industry": None, "available_at": core_cutoff, "source": "offline_eligibility"}
                           for key in keys]})
         frame = execute_feature_plan(plan, facts, context)
+        frame_ref = frame.identity
         wire = frame.to_dict()
         projected = {(row["security_id"], row["session"]): row for row in wire["rows"]}
         sections.append({"feature_session": session, "eligible_keys": eligible, "section_ref": section_ref,
                          "core_plan_ref": plan.identity, "core_context_ref": context.identity,
-                         "fact_ref": facts.identity, "frame_ref": frame.identity})
+                         "fact_ref": facts.identity, "frame_ref": frame_ref})
         plans.append(plan.to_dict())
         facts_list.append(facts.to_dict())
         contexts.append(context.to_dict())
@@ -189,7 +190,7 @@ def normalize_forward_labels(raw_build: dict, *, features: dict,
             target = computed["values"][0]
             valid = reasons[key] is None and computed["valid"][0] and _finite(target)
             refs = deepcopy(raw["source_refs"])
-            refs.extend([raw_ref, feature_ref, section_ref, frame.identity])
+            refs.extend([raw_ref, feature_ref, section_ref, frame_ref])
             rows.append({"security_id": key[0], "feature_session": session,
                 "start_session": raw.get("start_session"), "end_session": raw.get("end_session"),
                 "raw_return": raw.get("return"), "normalized_target": float(target) if valid else None,

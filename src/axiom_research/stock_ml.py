@@ -161,13 +161,13 @@ def _signal_evidence(predictions, labels, cutoff):
         'limitations':['Forward-label statistics are not account returns.','No tuning or confidence claim.']},'evidence_ref')
 
 
-def _prepare_stock_inputs(data, *, config, destination, catalog, chosen, progress):
+def _prepare_stock_features(data, *, config, destination, catalog, chosen, progress):
+    """Build decision features once; no outcome reads or fold label cutoff."""
     from .feature_catalog import build_feature_plan
-    from axiom_data import QuerySpec,adjust_prices
+    from axiom_data import QuerySpec
     from axiom_engine.core import execute_feature_plan
     from .data_adapter import adapt_decision_batch
     from .qlib_adapter import QlibView
-    from .labels import build_forward_labels
     import numpy as np
     stats={'feature_core_calls':0,'core_calls':0,'data_read_calls':0,'feature_cache_hit':False}
     symbols=tuple(config['symbols']); sessions=tuple(config['read_sessions']); cutoffs=config['cutoff_by_session']
@@ -181,7 +181,8 @@ def _prepare_stock_inputs(data, *, config, destination, catalog, chosen, progres
     data.export_qlib(snapshot=config['snapshot'],queries=(price_query,factor_query),destination=qlib_path,
                      universe_query=member_query,universe_name=config['universe_id'])
     view=QlibView(qlib_path).activate(); native=view.read(fields=('open','high','low','close','amount_cny','factor'),symbols=symbols)
-    reverse={v:k for k,v in view.reference['instrument_map'].items()}; values={}
+    view_reference=view.reference; view_id=view_reference['view_id']
+    reverse={v:k for k,v in view_reference['instrument_map'].items()}; values={}
     for (instrument,day),row in native.iterrows():
         values[reverse[instrument],str(day.date())]={k:None if np.isnan(row['$'+k]) else float(row['$'+k])
             for k in ('open','high','low','close','amount_cny','factor')}
@@ -195,8 +196,8 @@ def _prepare_stock_inputs(data, *, config, destination, catalog, chosen, progres
         fq=replace(factor_query,sessions=history,cutoff_by_session=window_cutoffs)
         rq=replace(member_query,sessions=history,cutoff_by_session=window_cutoffs)
         stats['data_read_calls']+=3
-        price=_project_qlib(data.read(snapshot=config['snapshot'],query=pq),values,view.reference['view_id'])
-        factor=_project_qlib(data.read(snapshot=config['snapshot'],query=fq),values,view.reference['view_id'])
+        price=_project_qlib(data.read(snapshot=config['snapshot'],query=pq),values,view_id)
+        factor=_project_qlib(data.read(snapshot=config['snapshot'],query=fq),values,view_id)
         adjusted=_adjust_feature(price,factor,session)
         membership=data.members(snapshot=config['snapshot'],query=rq)
         adapted=adapt_decision_batch(adjusted,reference=membership,recipe_ref=catalog.recipe_ref(
@@ -204,13 +205,14 @@ def _prepare_stock_inputs(data, *, config, destination, catalog, chosen, progres
             source_granularity='batch_field')
         plan=build_feature_plan(adapted.plan,config['feature_selection'],catalog=catalog,normalized=True)
         frame=execute_feature_plan(plan,adapted.facts,adapted.context); stats['core_calls']+=1; stats['feature_core_calls']+=1
+        frame_ref=frame.identity; plan_ref=plan.identity
         frame_wire=frame.to_dict(); member={r['security_id']:r['is_member'] for r in membership.to_json()['records'] if r['session']==session}
         for r in frame_wire['rows']:
             rows.append({'security_id':r['security_id'],'session':session,'values':r['values'],
                 'availability':r['availability'],'validity':r['valid'],'reasons':r['reasons'],
                 'member':member[r['security_id']],
-                'knowledge_cutoff':cutoffs[session],'source_refs':[frame.identity,plan.identity]})
-        inputs.append({'session':session,'core_frame_ref':frame.identity,'core_plan':plan.to_dict(),
+                'knowledge_cutoff':cutoffs[session],'source_refs':[frame_ref,plan_ref]})
+        inputs.append({'session':session,'core_frame_ref':frame_ref,'core_plan':plan.to_dict(),
             'fact_ref':adapted.facts.identity,'context_ref':adapted.context.identity,
             'sessions':list(history),'cutoffs':window_cutoffs,
             'adjusted_input_ref':digest(adjusted.to_json()),'membership_ref':digest(membership.to_json()),
@@ -222,23 +224,42 @@ def _prepare_stock_inputs(data, *, config, destination, catalog, chosen, progres
                       'session':session,'seconds':time.perf_counter()-begin})
     stats['feature_seconds']=time.perf_counter()-begin
     features=_seal({'contract_version':'stock_feature_build_v1','catalog_ref':catalog.identity,
-        'selection':config['feature_selection'],'ordered_features':columns,'qlib_view':view.reference,
+        'selection':config['feature_selection'],'ordered_features':columns,'qlib_view':view_reference,
         'input_evidence_ref':digest(inputs),'rows':rows},'feature_ref')
-    begin=time.perf_counter()
+    return features, inputs, stats
+
+
+def _prepare_stock_labels(data, *, config, training_sessions, metrics=None):
+    """Read original outcome inputs separately at this fold's two cutoffs."""
+    from axiom_data import QuerySpec,adjust_prices
+    from .labels import build_forward_labels
+    if not training_sessions: raise ValueError('training feature sessions required')
+    symbols=tuple(config['symbols']); sessions=tuple(config['read_sessions'])
+    price_query=QuerySpec('market_daily',('open','high','low','close','amount_cny'),symbols,
+        sessions,config['pit_policy'],config['cutoff_by_session'])
     def outcome(cutoff, wanted):
         allowed=tuple(s for s in config['calendar'] if sessions[0]<=s<=_instant(cutoff).date().isoformat())
         if not allowed: raise ValueError('no actual label calendar at cutoff')
         q=replace(price_query,fields=('open','close'),sessions=allowed,
                   cutoff_by_session={s:cutoff for s in allowed},purpose='label_outcomes')
         f=replace(q,domain='adjustment_factors',fields=('factor',))
-        stats['data_read_calls']+=2
+        if metrics is not None: metrics['data_read_calls']=metrics.get('data_read_calls',0)+2
         p=data.read(snapshot=config['snapshot'],query=q); factors=data.read(snapshot=config['snapshot'],query=f)
         adjusted=adjust_prices(p,factors,fields=('open','close'),anchor_session=allowed[-1],
                                decision_session=allowed[-1],factor_field='factor')
         return build_forward_labels(adjusted,calendar=config['calendar'],feature_sessions=wanted)
-    training_sessions=[s for s in config['feature_sessions'] if _instant(cutoffs[s])<=_instant(config['fit_cutoff'])]
     train_labels=outcome(config['fit_cutoff'],training_sessions)
     evaluation_labels=outcome(config['evaluation_cutoff'],config['prediction_sessions'])
+    return train_labels, evaluation_labels
+
+
+def _prepare_stock_inputs(data, *, config, destination, catalog, chosen, progress):
+    features, inputs, stats=_prepare_stock_features(data,config=config,destination=destination,
+        catalog=catalog,chosen=chosen,progress=progress)
+    cutoffs=config['cutoff_by_session']
+    training_sessions=[s for s in config['feature_sessions'] if _instant(cutoffs[s])<=_instant(config['fit_cutoff'])]
+    train_labels, evaluation_labels=_prepare_stock_labels(data,config=config,
+        training_sessions=training_sessions,metrics=stats)
     return features, train_labels, evaluation_labels, inputs, stats
 
 

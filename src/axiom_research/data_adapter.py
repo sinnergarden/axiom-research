@@ -202,6 +202,9 @@ def adapt_decision_batch(batch: Any, *, reference: Any, recipe_ref: str,
     _require(source_granularity in ("cell", "batch_field"), "unknown source granularity")
     records, field_meta, ctx = _versioned(batch, "decision_facts")
     ref_records, ref_meta, ref_ctx = _versioned(reference, "decision_facts")
+    # These are the exact three keys checked by _versioned, with no projection.
+    batch_wire = {"records": records, "field_meta": field_meta, "context": ctx}
+    reference_wire = {"records": ref_records, "field_meta": ref_meta, "context": ref_ctx}
     q, rq = ctx["query"], ref_ctx["query"]
     _require(ref_ctx.get("domain") == "universe_membership" and
              rq.get("fields") == ["is_member"], "explicit membership batch required")
@@ -253,8 +256,9 @@ def adapt_decision_batch(batch: Any, *, reference: Any, recipe_ref: str,
                              "reader_version": ref_ctx["reader_version"]})
     calendar_ref = _digest({"sessions": sessions, "snapshot_id": ctx["snapshot_id"]})
     sources, evidence = {}, {}
-    batch_refs = {_ref: _digest(_batch.to_json()) for _ref, _batch in
-                  ((False, batch), (True, reference))} if source_granularity == "batch_field" else {}
+    batch_refs = {_ref: _digest(wire) for _ref, wire in
+                  ((False, batch_wire), (True, reference_wire))} if source_granularity == "batch_field" else {}
+    source_ids = {}
 
     def bind(field: str, key: tuple[str, str], meta: dict, *, ref: bool = False) -> str:
         leaves = _leaves(meta)
@@ -264,9 +268,15 @@ def adapt_decision_batch(batch: Any, *, reference: Any, recipe_ref: str,
                          "verified" if all(m.get("evidence_ref") for m in leaves) else
                          "observed" if all(m.get("first_observed_at") for m in leaves) else
                          "best_effort")
-        source_id = _digest({"field": field, "batch_ref": batch_refs[ref],
-                            "qualification": qualification, "basis": basis}) if batch_refs else _digest(
-                                {"field": field, "key": key, "meta": meta, "reference": ref})
+        if batch_refs:
+            source_key = (field, batch_refs[ref], qualification, basis)
+            source_id = source_ids.get(source_key)
+            if source_id is None:
+                source_id = _digest({"field": field, "batch_ref": batch_refs[ref],
+                                     "qualification": qualification, "basis": basis})
+                source_ids[source_key] = source_id
+        else:
+            source_id = _digest({"field": field, "key": key, "meta": meta, "reference": ref})
         if source_id not in sources:
             sources[source_id] = dict(id=source_id, data_ref=data_ref if not ref else reference_ref,
                                       view_ref=view_ref if not ref else reference_ref,
@@ -334,4 +344,8 @@ def adapt_decision_batch(batch: Any, *, reference: Any, recipe_ref: str,
         reference_ref=reference_ref, sessions=sessions, cutoffs=cutoffs,
         history_keys=[list(k) for k in keys], output_keys=[list(k) for k in outputs],
         reference=reference_rows))
-    return AdaptedFacts(facts, context, plan, evidence, ViewRef.from_batch(batch))
+    class SerializedInput:
+        def to_json(self):
+            return batch_wire
+
+    return AdaptedFacts(facts, context, plan, evidence, ViewRef.from_batch(SerializedInput()))

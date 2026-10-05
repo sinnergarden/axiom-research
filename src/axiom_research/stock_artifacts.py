@@ -110,15 +110,17 @@ def load_stock_ml_experiment(path):
     for name, ref in manifest['files'].items():
         if file_digest(path / name) != ref: raise ValueError('saved stock file mismatch: ' + name)
     experiment = _read(path / 'experiment.json'); _verify_ref(experiment, 'experiment_ref')
+    verified = {}
     for name, key in (('features.json','feature_ref'), ('labels.json','label_ref'),
                       ('dataset.json','dataset_ref'),('model.json','model_ref'),
                       ('predictions.json','signal_run_ref'),('signal-evidence.json','evidence_ref')):
         value = _read(path / name); _verify_ref(value, key)
         if experiment[key] != value[key]: raise ValueError('stock experiment reference mismatch: ' + key)
-    model = _read(path / 'model.json')
-    features=_read(path/'features.json'); labels=_read(path/'labels.json')
-    dataset=_read(path/'dataset.json'); predictions=_read(path/'predictions.json')
-    evidence=_read(path/'signal-evidence.json')
+        verified[name] = value
+    model = verified['model.json']
+    features=verified['features.json']; labels=verified['labels.json']
+    dataset=verified['dataset.json']; predictions=verified['predictions.json']
+    evidence=verified['signal-evidence.json']
     _verify_ref(labels['training'],'label_ref'); _verify_ref(labels['evaluation'],'label_ref')
     training_labels=labels['training']
     normalized='normalized_training' in labels or 'normalized_evaluation' in labels

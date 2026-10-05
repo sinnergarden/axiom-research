@@ -95,6 +95,33 @@ class LabelNormalizationTests(unittest.TestCase):
             {"feature_session": section["feature_session"], "frame_ref": section["frame_ref"]}
             for section in result["sections"]]))
 
+    def test_frame_identity_is_resolved_once_per_immutable_section(self):
+        raw, features = inputs(("A", "B", "C"))
+        original = normalization.execute_feature_plan
+        resolved = []
+
+        class CountedFrame:
+            def __init__(self, frame):
+                self.frame, self.identity_reads = frame, 0
+
+            @property
+            def identity(self):
+                self.identity_reads += 1
+                return self.frame.identity
+
+            def to_dict(self):
+                return self.frame.to_dict()
+
+        def execute(*args):
+            frame = CountedFrame(original(*args))
+            resolved.append(frame)
+            return frame
+
+        with patch.object(normalization, "execute_feature_plan", side_effect=execute):
+            result = normalize_forward_labels(raw, features=features, cutoff=CUTOFF)
+        self.assertEqual([frame.identity_reads for frame in resolved], [1] * len(SESSIONS))
+        self.assertEqual(result, normalize_forward_labels(raw, features=features, cutoff=CUTOFF))
+
     def test_membership_feature_missing_invalid_and_immature_do_not_change_section(self):
         raw, features = inputs(("A", "B", "C", "D", "E", "F"), sessions=(SESSIONS[0],))
         row(features, "C")["member"] = False
