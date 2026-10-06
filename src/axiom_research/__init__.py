@@ -13,8 +13,10 @@ from .stock_fold_artifacts import StockMLFold, load_stock_ml_fold
 from .stock_feature_inputs import StockFeatureInputs, load_stock_feature_inputs
 from .stock_signal_evaluation import (StockSignalEvaluation, evaluate_stock_signal,
     evaluate_stock_signals, save_stock_signal_evaluation, load_stock_signal_evaluation)
+from .stock_signal_evaluation_projection import (save_stock_signal_evaluation_inputs,
+    evaluate_stock_signal_inputs, audit_stock_signal_evaluation)
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 
 # Readonly metadata consumers do not import an optional Data/Core build runtime.
 # Existing runtime names retain their public import paths and load when requested.

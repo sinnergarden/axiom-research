@@ -6,7 +6,7 @@ to that operator. Loading never imports it or recomputes a correlation or IR.
 """
 from copy import deepcopy
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
 import os
@@ -208,13 +208,22 @@ def _verify_report(report, *, batch=None):
 class StockSignalEvaluation:
     path: Path
     reused: bool = False
+    _verified: object = field(default=None, init=False, repr=False, compare=False)
 
     def to_dict(self):
+        if self._verified is not None:
+            return deepcopy(self._verified)
         return _read(self.path/'signal-evidence.json' if self.path.is_dir() else self.path)
 
     @property
     def identity(self):
         return self.to_dict()['evidence_ref']
+
+
+def _verified_evaluation(path, reused, report):
+    saved = StockSignalEvaluation(Path(path), reused)
+    object.__setattr__(saved, '_verified', deepcopy(report))
+    return saved
 
 
 def load_stock_signal_evaluation(path, *, batch=None):
@@ -225,6 +234,18 @@ def load_stock_signal_evaluation(path, *, batch=None):
     A batch reuses only inputs admitted in this process; saved statistics and
     every fold output are still verified without numerical execution.
     """
+    path = Path(path)
+    if path.is_file():
+        # Dispatch is only a hint. V3 hashes/parses its consumed buffer again
+        # against the group manifest and returns that verified snapshot.
+        if _read(path).get('contract_version') == 'stock_signal_evidence_v3':
+            _require(batch is None, 'frozen v3 evaluation does not accept a training batch')
+            from .stock_signal_evaluation_projection import _load_v3_report
+            return _load_v3_report(path)
+    elif path.is_dir() and _read(path/'manifest.json').get('contract_version') == 'stock_signal_evaluation_manifest_v2':
+        _require(batch is None, 'frozen v3 evaluation does not accept a training batch')
+        from .stock_signal_evaluation_projection import _load_v3_report
+        return _load_v3_report(path)
     if batch is not None:
         from .stock_batch import _data
         _data(batch)

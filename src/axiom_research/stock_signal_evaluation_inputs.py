@@ -237,8 +237,20 @@ def _saved_signal(descriptor, scope, *, batch=None):
             feature_clocks = [_instant(v) for v in original['availability'] if v is not None]
             _require(knowledge == _instant(original['knowledge_cutoff']) and
                 available == max(feature_clocks + [_instant(model['fit_cutoff'])]), 'Signal original clock mismatch')
+    clocks = [model['fit_cutoff'], *(r['knowledge_cutoff'] for r in feature_index.values()),
+              *(r['knowledge_cutoff'] for r in indexed.values())]
+    if version == 'stock_prediction_run_v1':
+        clocks.extend(c for q in view['queries'] + [view['universe_query']]
+                      for c in q['cutoff_by_session'].values())
     return {'signal': signal, 'rows': indexed, 'members': feature_index,
-        'snapshot': snapshot, 'pit': pit, 'source_records': _source_records(root)}
+        'snapshot': snapshot, 'pit': pit, 'source_records': _source_records(root),
+        'metadata': {'signal_contract_version': version, 'signal_run_ref': signal['signal_run_ref'],
+            'prediction_sessions': list(dates),
+            'signal_stage': signal['signal_stage'], 'score_unit': signal['score_unit'],
+            'score_semantics': signal['score_semantics'], 'model': model,
+            'feature_contract_version': feature.get('contract_version'), 'feature_ref': feature['feature_ref'],
+            'snapshot': snapshot, 'pit_policy': pit,
+            'evaluation_clock_floor': max(map(_instant, clocks)).isoformat().replace('+00:00', 'Z')}}
 
 
 def _raw_labels(descriptor, scope, snapshot, pit):
@@ -313,17 +325,19 @@ def _raw_labels(descriptor, scope, snapshot, pit):
     return raw, indexed
 
 
-def _inputs(signal_inputs, raw_label_input, scope, *, batch=None):
+def _admit_inputs(signal_inputs, raw_label_input, scope, *, batch=None):
     _require(isinstance(signal_inputs, dict) and bool(signal_inputs) and
         all(type(key) is str and key for key in signal_inputs), 'ordered Signal mapping required')
-    projected, closures, refs = {}, {}, {}
+    projected, closures, refs, metadata = {}, {}, {}, {}
     snapshot = pit = None
     for name, descriptors in signal_inputs.items():
+        metadata[name] = []
         descriptors = descriptors if type(descriptors) is list else [descriptors]
         _require(bool(descriptors), 'nonempty weekly Signal list required')
         rows, members, sources, signal_refs, previous = {}, {}, [], [], None
         for descriptor in descriptors:
             item = _saved_signal(descriptor, scope, batch=batch)
+            metadata[name].append(item['metadata'])
             if snapshot is None:
                 snapshot, pit = item['snapshot'], item['pit']
             _require((snapshot, pit) == (item['snapshot'], item['pit']), 'comparison Snapshot/PIT mismatch')
@@ -341,6 +355,14 @@ def _inputs(signal_inputs, raw_label_input, scope, *, batch=None):
         projected[name] = {'rows': rows, 'members': members}
         closures[name] = sources; refs[name] = signal_refs
     raw, labels = _raw_labels(raw_label_input, scope, snapshot, pit)
+    return {'projected': projected, 'closures': closures, 'refs': refs, 'metadata': metadata,
+            'raw': raw, 'labels': labels, 'scope': scope}
+
+
+def _select_inputs(admission, scope):
+    """The shared exact sample/coverage selection for original and frozen inputs."""
+    projected, closures, refs = (admission[k] for k in ('projected', 'closures', 'refs'))
+    raw, labels = admission['raw'], admission['labels']
     keys = [(security, day) for day in scope['sessions'] for security in scope['universe']]
     historical, native, reasons, coverage = {}, {}, {}, {}
     evaluation_cutoff = _instant(scope['evaluation_cutoff'])
@@ -384,14 +406,18 @@ def _inputs(signal_inputs, raw_label_input, scope, *, batch=None):
     def table(mask):
         pairs = [{'signal_key': signal_keys[name], 'security_id': security, 'session': day,
             'score': projected[name]['rows'][security, day]['score'], 'outcome': labels[security, day]['return']}
-            for name in signal_inputs for security, day in mask[name]]
+            for name in projected for security, day in mask[name]]
         return {'contract_version': 'signal_statistics_input_v1', 'sessions': scope['sessions'],
             'signal_keys': list(signal_keys.values()), 'pairs': sorted(pairs,
                 key=lambda p: (p['signal_key'], p['session'], p['security_id']))}
     mask = {'signals': [{'name': name, 'signal_key': signal_keys[name], 'input_signal_refs': refs[name]}
-                       for name in signal_inputs], 'label_ref': raw['label_ref'], 'scope': scope,
+                       for name in projected], 'label_ref': raw['label_ref'], 'scope': scope,
         'common_keys': [list(key) for key in common],
-        'native_keys': {name: [list(key) for key in native[name]] for name in signal_inputs}}
+        'native_keys': {name: [list(key) for key in native[name]] for name in projected}}
     return {'scope': scope, 'raw': raw, 'refs': refs, 'closures': closures, 'signal_keys': signal_keys,
-        'mask': mask, 'common_input': table({name: common for name in signal_inputs}),
+        'mask': mask, 'common_input': table({name: common for name in projected}),
         'native_input': table(native), 'native_coverage': coverage, 'common_keys': common}
+
+
+def _inputs(signal_inputs, raw_label_input, scope, *, batch=None):
+    return _select_inputs(_admit_inputs(signal_inputs, raw_label_input, scope, batch=batch), scope)
