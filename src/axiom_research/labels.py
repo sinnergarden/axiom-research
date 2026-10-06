@@ -19,14 +19,45 @@ CONTRACT_VERSION = "stock_label_build_v1"
 PRICE_BASIS = "common_anchor_adjusted_v1"
 
 
-def _content_ref(value: Any) -> str:
-    """Hash strict canonical JSON; never stringify an unknown scalar."""
+def _canonical_bytes(value: Any) -> bytes:
+    """Encode strict canonical JSON; never stringify an unknown scalar."""
     try:
-        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"),
-                             ensure_ascii=False, allow_nan=False).encode("utf-8")
+        return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False, allow_nan=False).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise AdapterError("label evidence must be strict JSON") from exc
-    return "sha256:" + sha256(encoded).hexdigest()
+
+
+def _content_ref(value: Any) -> str:
+    """Hash strict canonical JSON; never stringify an unknown scalar."""
+    return "sha256:" + sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _batch_source_refs(records: list, field_meta: dict, context: dict) -> dict:
+    """Resolve the three existing refs with one encoding of each subtree.
+
+    The fixed DataBatch outer keys are already admitted by _versioned. Feed
+    their exact canonical JSON bytes in sorted order, releasing each buffer
+    before encoding the next one. Nothing is reused across calls or cutoffs.
+    """
+    whole = sha256()
+    whole.update(b'{"context":')
+    context_bytes = _canonical_bytes(context)
+    whole.update(context_bytes)
+    del context_bytes
+    whole.update(b',"field_meta":')
+    metadata_bytes = _canonical_bytes(field_meta)
+    metadata_ref = "sha256:" + sha256(metadata_bytes).hexdigest()
+    whole.update(metadata_bytes)
+    del metadata_bytes
+    whole.update(b',"records":')
+    record_bytes = _canonical_bytes(records)
+    records_ref = "sha256:" + sha256(record_bytes).hexdigest()
+    whole.update(record_bytes)
+    del record_bytes
+    whole.update(b'}')
+    return {"source_ref": "sha256:" + whole.hexdigest(),
+            "records_ref": records_ref, "field_meta_ref": metadata_ref}
 
 
 def _session(value: Any) -> str:
@@ -174,8 +205,8 @@ def build_forward_labels(batch: Any, *, calendar: tuple[str, ...] | list[str],
     _require(set(features) <= set(calendar), "feature sessions must belong to the supplied calendar")
     records, field_meta, ctx = _versioned(batch, "label_outcomes")
     q, securities, anchor, cutoff = _query_context(ctx, calendar)
-    wire = {"records": records, "field_meta": field_meta, "context": ctx}
-    source_ref = _content_ref(wire)
+    source_refs = _batch_source_refs(records, field_meta, ctx)
+    source_ref = source_refs["source_ref"]
     calendar_ref = _content_ref({"contract_version": "stock_label_calendar_v1", "sessions": list(calendar)})
     keys = {(security, session) for security in securities for session in q["sessions"]}
     indexed = _keyed(records, keys, "label record")
@@ -217,8 +248,8 @@ def build_forward_labels(batch: Any, *, calendar: tuple[str, ...] | list[str],
         "availability": "max_endpoint_price_factor_anchor_usable_from",
         "missing_policy": "invalid_null_preserve_grid"},
         source_ref=source_ref, calendar_ref=calendar_ref,
-        source_evidence={"context": deepcopy(ctx), "records_ref": _content_ref(records),
-                         "field_meta_ref": _content_ref(field_meta),
+        source_evidence={"context": deepcopy(ctx), "records_ref": source_refs["records_ref"],
+                         "field_meta_ref": source_refs["field_meta_ref"],
                          "recovery": "fixed_snapshot_reader_queries_and_declared_Data_adjust_prices"},
         rows=rows)
     result["label_ref"] = _content_ref(result)
