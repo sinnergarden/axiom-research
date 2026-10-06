@@ -3,11 +3,13 @@ from copy import deepcopy
 from datetime import date, timedelta
 from pathlib import Path
 import builtins
+import gc
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import weakref
 from unittest.mock import patch
 
 from axiom_research import (build_stock_ml_fold_from_saved_inputs, load_stock_ml_fold,
@@ -228,9 +230,105 @@ print(load_stock_ml_fold(sys.argv[1]).identity)
                 else: raw['rows'][0]['end_session'] = item['input_manifest']['calendar'][6]
                 raw = seal({k: v for k, v in raw.items() if k != 'label_ref'}, 'label_ref'); write_json(desc['path'], raw)
                 desc.update(file_digest=file_digest(desc['path']), label_ref=raw['label_ref'])
-                with load_stock_ml_batch_inputs(definition) as batch:
-                    with self.assertRaisesRegex(ValueError, 'endpoint conflict|duplicate'):
-                        self.build(item, root/'out', batch=batch)
+                # Full per-fit Label admission now happens before the batch
+                # returns, while standalone fold loading keeps its disk path.
+                with self.assertRaisesRegex(ValueError, 'endpoint conflict|duplicate'):
+                    load_stock_ml_batch_inputs(definition)
+
+    def test_complete_label_objects_released_and_only_selection_inputs_retained(self):
+        class Parent(dict):
+            pass
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); definition = batch_fixture(root)
+            live = []
+            evaluation_path = definition['folds'][0]['input_manifest']['evaluation_labels']['path']
+            def tracked(desc, key):
+                parent = Parent(read_parent(desc, key))
+                live.append((desc['path'], weakref.ref(parent)))
+                return parent
+            with patch('axiom_research.stock_batch.read_parent', side_effect=tracked):
+                batch = load_stock_ml_batch_inputs(definition)
+            from axiom_research.stock_batch import _DATA
+            value = _DATA[batch]
+            self.assertNotIn('read_parent', value)
+            self.assertNotIn('cache', value)
+            self.assertEqual(len(value['labels']), len(definition['folds']))
+            fields = {'valid', 'invalid_reason', 'normalized_target', 'raw_return',
+                      'label_available_at', 'normalized_available_at', 'normalized_parent_ref'}
+            for admission in value['labels'].values():
+                self.assertEqual(set(admission), {'input_manifest_ref', 'fold_spec_ref',
+                    'rows', 'parents', 'section_refs', 'raw_refs', 'evaluation'})
+                self.assertTrue(admission['rows'])
+                self.assertTrue(any(not row['valid'] for row in admission['rows'].values()))
+                self.assertTrue(all(set(row) == fields for row in admission['rows'].values()))
+            gc.collect()
+            self.assertTrue(all(ref() is None for path, ref in live if path != evaluation_path))
+            self.assertEqual(sum(ref() is not None for path, ref in live), 1)
+            del admission, value
+            batch.close(); gc.collect()
+            self.assertTrue(all(ref() is None for path, ref in live))
+
+    def test_six_value_projection_exact_with_zero_parent_reads_and_no_mutation_leak(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); definition = batch_fixture(root, two_year=True, reverse=True)
+            originals = [project_saved_fold(f['input_manifest'], f['fold_spec']) for f in definition['folds']]
+            with load_stock_ml_batch_inputs(definition) as batch, \
+                 patch('axiom_research.stock_batch.read_parent', side_effect=AssertionError('projection read parent')), \
+                 patch('axiom_research.stock_batch._admit_saved_fold_labels', side_effect=AssertionError('projection admitted again')):
+                for f, expected in zip(definition['folds'], originals):
+                    projected = batch._project(f['input_manifest'], f['fold_spec'])
+                    self.assertEqual(projected, expected)
+                    projected[0]['rows'][0]['values'][0] = -999
+                    projected[1]['parents'][0]['sessions'].clear()
+                    projected[1]['section_refs'].clear()
+                    projected[2][0]['values'][0] = -999
+                    projected[3]['injected'] = 1
+                    projected[4].clear()
+                    projected[5]['rows'][0]['return'] = -999
+                    self.assertEqual(batch._project(f['input_manifest'], f['fold_spec']), expected)
+
+    def test_missing_immature_rows_remain_distinct_from_explicit_invalid_tail(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); definition = batch_fixture(root)
+            item = definition['folds'][0]
+            manifest, spec = item['input_manifest'], item['fold_spec']
+            original = project_saved_fold(manifest, spec)
+            shortened = deepcopy(item)
+            desc = shortened['input_manifest']['training_labels'][0]
+            raw = _read(desc['raw']['path'])
+            fit = manifest['calendar'].index(spec['fit_session'])
+            mature = [d for d in desc['sessions'] if manifest['calendar'].index(d) + 5 <= fit]
+            projected = {k: v for k, v in raw.items() if k not in ('rows', 'label_ref')}
+            feature = _read(manifest['feature_parents'][0]['features']['path'])
+            projected.update(rows=[r for r in raw['rows'] if r['feature_session'] in mature],
+                             parent_label_ref=raw['label_ref'], feature_parent_ref=feature['feature_ref'],
+                             date_projection=mature)
+            norm = normalize_forward_labels(seal(projected, 'label_ref'), features=feature, cutoff=spec['fit_cutoff'])
+            path = root/'mature-only.json'; write_json(path, norm)
+            desc['sessions'] = mature
+            desc['normalized'] = {'path': str(path), 'file_digest': file_digest(path), 'label_ref': norm['label_ref']}
+            expected = project_saved_fold(shortened['input_manifest'], spec)
+            self.assertEqual(expected[2], original[2])
+            self.assertEqual(expected[3], original[3])
+            self.assertGreater(expected[3]['LABEL_NOT_MATURE'], 0)
+            missing = [r for r in expected[1]['rows'] if r['invalid_reason'] == 'LABEL_NOT_MATURE']
+            explicit = [r for r in original[1]['rows'] if r['invalid_reason'] == 'LABEL_NOT_MATURE']
+            self.assertTrue(all(r['normalized_parent_ref'] is None for r in missing))
+            self.assertTrue(all(r['normalized_parent_ref'] is not None for r in explicit))
+            one = {'contract_version': definition['contract_version'], 'folds': [shortened]}
+            with load_stock_ml_batch_inputs(one) as batch:
+                self.assertEqual(batch._project(shortened['input_manifest'], spec), expected)
+
+    def test_label_file_change_after_compact_admission_still_rejects_projection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); definition = batch_fixture(root)
+            with load_stock_ml_batch_inputs(definition) as batch:
+                item = definition['folds'][0]
+                desc = item['input_manifest']['training_labels'][0]['normalized']
+                with Path(desc['path']).open('a') as stream:
+                    stream.write(' ')
+                with self.assertRaisesRegex(ValueError, 'source changed'):
+                    batch._project(item['input_manifest'], item['fold_spec'])
 
 
 if __name__ == '__main__': unittest.main()

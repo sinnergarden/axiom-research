@@ -5,13 +5,15 @@ continues to use normalize_forward_labels and Feature Core when preparing those
 parents. This loader neither reads Data nor creates a second numerical executor.
 """
 from copy import deepcopy
+from collections import Counter
 from pathlib import Path
 from weakref import WeakKeyDictionary
 import time
 
 from .stock_artifacts import digest
 from .stock_fold_inputs import (common_source_identity, load_saved_feature_inputs,
-                                project_saved_fold, read_parent, require, validate_spec)
+                                _admit_saved_fold_labels, _project_admitted_saved_fold,
+                                read_parent, require, validate_spec)
 
 DEFAULT_LIMITS = {'maximum_source_bytes': 8 * 1024**3,
                   'maximum_matrix_bytes': 512 * 1024**2}
@@ -76,7 +78,9 @@ class StockMLBatchInputs:
         value = _data(self)
         self._check_sources()
         require((digest(inputs), digest(spec)) in value['fold_keys'], 'fold outside saved batch definition')
-        result = project_saved_fold(inputs, spec, feature_inputs=value['features'], reader=value['read_parent'])
+        key = digest(inputs), digest(spec)
+        result = _project_admitted_saved_fold(inputs, spec, feature_inputs=value['features'],
+                                             labels=value['labels'][key])
         self._check_sources()
         value['metrics']['fold_projection_calls'] += 1
         return result
@@ -156,21 +160,36 @@ def load_stock_ml_batch_inputs(batch_manifest, *, limits=None):
     matrix_bytes = rows * len(first['ordered_features']) * 8
     require(matrix_bytes <= budgets['maximum_matrix_bytes'], 'saved batch matrix byte budget exceeded')
     features = load_saved_feature_inputs(first)
-    cache = {}; read_counts = {}
+    cache = {}; read_counts = {}; remaining = Counter()
+    for fold in manifest['folds']:
+        inputs = fold['input_manifest']
+        # Raw admission is shared within one fit; normalized parents and the
+        # evaluation parent are each consumed exactly once by that admission.
+        remaining.update((p, 'label_ref') for p in {d['raw']['path'] for d in inputs['training_labels']})
+        remaining.update((d['normalized']['path'], 'label_ref') for d in inputs['training_labels'])
+        remaining[inputs['evaluation_labels']['path'], 'label_ref'] += 1
     def reader(desc, ref_key):
         key = desc['path'], ref_key
         require(descriptors.get(desc['path']) == desc, 'parent outside saved batch definition')
+        require(remaining[key] > 0, 'unexpected saved parent admission read')
         if key not in cache:
             cache[key] = read_parent(desc, ref_key)
             read_counts[desc['path']] = read_counts.get(desc['path'], 0) + 1
-        return cache[key]
-    # Labels are parsed and content-hashed once. Semantic/maturity/clock checks
-    # remain per fit, as the same bytes can be eligible at different cutoffs.
+        value = cache[key]
+        remaining[key] -= 1
+        if remaining[key] == 0:
+            del cache[key]
+        return value
+    # Each unique parent is still parsed/content-hashed once. Verify every
+    # fit's Core/raw/Feature/clock closure now, then release its full objects.
+    # Keep invalid rows and the original metadata/order, not four training
+    # projections or a second normalization executor.
+    labels = {}
     for fold in manifest['folds']:
-        inputs = fold['input_manifest']
-        for desc in inputs['training_labels']:
-            reader(desc['raw'], 'label_ref'); reader(desc['normalized'], 'label_ref')
-        reader(inputs['evaluation_labels'], 'label_ref')
+        inputs, spec = fold['input_manifest'], fold['fold_spec']
+        labels[digest(inputs), digest(spec)] = _admit_saved_fold_labels(
+            inputs, spec, feature_inputs=features, reader=reader)
+    require(not cache and not any(remaining.values()), 'saved parent admission cache not released')
     import numpy as np
     keys = sorted(features._rows, key=lambda k: (k[1], k[0]))
     matrix = np.asarray([features._rows[k]['values'] for k in keys], dtype=np.float64)
@@ -179,7 +198,7 @@ def load_stock_ml_batch_inputs(batch_manifest, *, limits=None):
     require(all(_fingerprint(p) == mark for p, mark in fingerprints.items()), 'batch source changed during initialization')
     value = {'identity': digest(manifest), 'manifest': manifest, 'features': features,
         'matrix': matrix, 'key_index': {key: i for i, key in enumerate(keys)}, 'columns': first['ordered_features'],
-        'read_parent': reader, 'fingerprints': fingerprints, 'fold_keys': fold_keys, 'closed': False,
+        'labels': labels, 'fingerprints': fingerprints, 'fold_keys': fold_keys, 'closed': False,
         'metrics': {'source_bytes': source_bytes, 'shared_matrix_bytes': matrix.nbytes,
             'shared_matrix_builds': 1, 'common_source_validations': 1,
             'feature_parent_reads': len(first['feature_parents']), 'proof_reads': len(first['feature_parents']),

@@ -310,32 +310,19 @@ def load_saved_feature_inputs(manifest):
         parents=parents, builds=builds)
 
 
-def project_saved_fold(manifest, spec, *, feature_inputs=None, reader=read_parent):
-    """Verify fold labels/clocks, return the original six selected stage values.
+def _admit_saved_fold_labels(manifest, spec, *, feature_inputs, reader=read_parent):
+    """Fully verify original parents, retain only per-fit selection inputs.
 
-    A validated common object avoids reading its scope, Features, and proofs
-    again. The reader hook is for the batch's private verified label cache.
+    This private admission is held only by the batch registry. No trimmed
+    document is passed off as a full Raw/normalized parent or public proof.
     """
     calendar, universe, columns = _validate_saved_manifest(manifest)
     training_dates, prediction_dates = validate_spec(spec, calendar)
-    if feature_inputs is None:
-        feature_inputs = load_saved_feature_inputs(manifest)
     data = _feature_input_data(feature_inputs)
     require(data['identity'] == common_source_identity(manifest), 'saved common source identity mismatch')
     rows, parents = data['rows'], data['parents']
     needed = set(training_dates + prediction_dates)
     require(needed <= set(parents), 'missing complete Feature date')
-    compact = spec['contract_version'] == 'stock_ml_fold_spec_v2'
-    feature_slice = seal({'contract_version': 'stock_feature_slice_v2' if compact else 'stock_feature_slice_v1',
-        'input_manifest_ref': digest(manifest),
-        'universe': universe, 'ordered_features': columns, 'catalog_ref': manifest['catalog_ref'],
-        'selection': manifest['feature_selection'], 'training_sessions': training_dates,
-        'prediction_sessions': prediction_dates,
-        'parents_by_session': {d: deepcopy(parents[d]) for d in sorted(needed)},
-        # v2 binds the full training range to immutable parents. Only OOS rows
-        # are materialized here; Dataset records the actual joined training keys.
-        'rows': [deepcopy(rows[s, d]) for d in (prediction_dates if compact else sorted(needed))
-                 for s in universe]}, 'feature_ref')
     # A complete Raw ref binds its query and horizon. Reuse only this call's
     # admitted object/index at the exact fit information set, never selected
     # normalized rows or a caller-supplied trusted flag.
@@ -419,7 +406,10 @@ def project_saved_fold(manifest, spec, *, feature_inputs=None, reader=read_paren
                         'normalized output provenance/clock mismatch')
                 if valid:
                     require(_instant(row['normalized_available_at']) <= _instant(spec['fit_cutoff']), 'normalized clock exceeds fit')
-                norm_rows[key] = {**row, 'raw_parent_ref': raw['label_ref'], 'normalized_parent_ref': norm['label_ref']}
+                norm_rows[key] = {field: row[field] for field in (
+                    'valid', 'invalid_reason', 'normalized_target', 'raw_return',
+                    'label_available_at', 'normalized_available_at')}
+                norm_rows[key]['normalized_parent_ref'] = norm['label_ref']
             if day in needed:
                 require(section['eligible_keys'] == eligible, 'normalized eligibility linkage mismatch')
                 section_refs.append(section['section_ref'])
@@ -427,6 +417,48 @@ def project_saved_fold(manifest, spec, *, feature_inputs=None, reader=read_paren
             'label_ref': norm['label_ref'], 'feature_ref': norm['feature_ref'], 'cutoff': norm['cutoff'], 'sessions': dates})
         raw_refs.append(raw['label_ref'])
         del raw, raw_index, norm, indexed, computed, projected
+    evaluation = reader(manifest['evaluation_labels'], 'label_ref')
+    evaluation_index = validate_raw(evaluation, manifest, spec['evaluation_cutoff'])
+    require(all((s, d) in evaluation_index for d in prediction_dates for s in universe), 'missing OOS raw label grid')
+    require(all(file_fingerprint(path) == mark and
+                digest({'raw_ref':raw['label_ref'],'query':raw['source_evidence']['context'],
+                        'label_spec':raw['label_spec'],'calendar_ref':raw['calendar_ref']}) == admitted
+                for raw, indexed, mark, admitted, path, date_rows in raw_admissions.values()),
+            'Raw parent changed before projection completed')
+    return {'input_manifest_ref': digest(manifest), 'fold_spec_ref': digest(spec),
+        'rows': norm_rows, 'parents': label_parents, 'section_refs': section_refs,
+        'raw_refs': sorted(set(raw_refs)), 'evaluation': evaluation}
+
+
+def _project_admitted_saved_fold(manifest, spec, *, feature_inputs, labels):
+    """Select one active fold after admission; keep original six-value ABI."""
+    calendar, universe, columns = _validate_saved_manifest(manifest)
+    training_dates, prediction_dates = validate_spec(spec, calendar)
+    data = _feature_input_data(feature_inputs)
+    require(data['identity'] == common_source_identity(manifest), 'saved common source identity mismatch')
+    rows, parents = data['rows'], data['parents']
+    needed = set(training_dates + prediction_dates)
+    require(needed <= set(parents), 'missing complete Feature date')
+    require(labels['input_manifest_ref'] == digest(manifest) and
+            labels['fold_spec_ref'] == digest(spec), 'saved label admission definition mismatch')
+    norm_rows = labels['rows']
+    # Projection results are mutable plain documents. Never lend registry
+    # metadata or the shared small evaluation parent to an earlier caller.
+    label_parents = deepcopy(labels['parents'])
+    section_refs = list(labels['section_refs'])
+    raw_refs = list(labels['raw_refs'])
+    evaluation = deepcopy(labels['evaluation'])
+    compact = spec['contract_version'] == 'stock_ml_fold_spec_v2'
+    feature_slice = seal({'contract_version': 'stock_feature_slice_v2' if compact else 'stock_feature_slice_v1',
+        'input_manifest_ref': digest(manifest),
+        'universe': universe, 'ordered_features': columns, 'catalog_ref': manifest['catalog_ref'],
+        'selection': manifest['feature_selection'], 'training_sessions': training_dates,
+        'prediction_sessions': prediction_dates,
+        'parents_by_session': {d: deepcopy(parents[d]) for d in sorted(needed)},
+        # v2 binds the full training range to immutable parents. Only OOS rows
+        # are materialized here; Dataset records the actual joined training keys.
+        'rows': [deepcopy(rows[s, d]) for d in (prediction_dates if compact else sorted(needed))
+                 for s in universe]}, 'feature_ref')
     training, excluded, label_rows = [], {}, []
     for day in training_dates:
         i = calendar.index(day)
@@ -452,12 +484,17 @@ def project_saved_fold(manifest, spec, *, feature_inputs=None, reader=read_paren
     label_slice = seal({'contract_version': 'stock_fold_label_slice_v2' if compact else 'stock_fold_label_slice_v1',
         'parents': label_parents, 'cutoff': spec['fit_cutoff'], **label_selection,
         'section_refs': section_refs}, 'label_ref')
-    evaluation = reader(manifest['evaluation_labels'], 'label_ref')
-    evaluation_index = validate_raw(evaluation, manifest, spec['evaluation_cutoff'])
-    require(all((s, d) in evaluation_index for d in prediction_dates for s in universe), 'missing OOS raw label grid')
-    require(all(file_fingerprint(path) == mark and
-                digest({'raw_ref':raw['label_ref'],'query':raw['source_evidence']['context'],
-                        'label_spec':raw['label_spec'],'calendar_ref':raw['calendar_ref']}) == admitted
-                for raw, indexed, mark, admitted, path, date_rows in raw_admissions.values()),
-            'Raw parent changed before projection completed')
-    return feature_slice, label_slice, training, excluded, sorted(set(raw_refs)), evaluation
+    return feature_slice, label_slice, training, excluded, raw_refs, evaluation
+
+
+def project_saved_fold(manifest, spec, *, feature_inputs=None, reader=read_parent):
+    """Verify full parent closure and project a fold without numerical execution.
+
+    Public standalone loads always admit original disk parents. A batch holds
+    only its private verified Label selection inputs and checks source changes
+    before and after each projection.
+    """
+    if feature_inputs is None:
+        feature_inputs = load_saved_feature_inputs(manifest)
+    labels = _admit_saved_fold_labels(manifest, spec, feature_inputs=feature_inputs, reader=reader)
+    return _project_admitted_saved_fold(manifest, spec, feature_inputs=feature_inputs, labels=labels)
