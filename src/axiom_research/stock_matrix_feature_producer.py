@@ -601,6 +601,7 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
         stats['native_window_peak_sessions'] = max(stats['native_window_peak_sessions'], len(history))
         stats['native_window_peak_bytes'] = max(stats['native_window_peak_bytes'], window.bytes)
         previous = None
+        previous_bytes = sys.getsizeof(None)
         pending = []
         for day in block:
             position = positions[day]
@@ -609,7 +610,6 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
             price_query = replace(qlib_inputs['price_query'], sessions=history, cutoff_by_session=cutoffs)
             factor_query = replace(qlib_inputs['factor_query'], sessions=history, cutoff_by_session=cutoffs)
             member_query = replace(qlib_inputs['member_query'], sessions=history, cutoff_by_session=cutoffs)
-            previous_bytes = _owned_bytes(previous)
             resident_base = base+window.bytes+previous_bytes
             before_read = resident_base+_pending_core_bytes(pending)+read_estimate+core_estimate+reuse_budget_bytes
             if pending and before_read+_caller_bytes(caller_retained_bytes) > maximum_resident_bytes:
@@ -639,9 +639,9 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
             tick = time.perf_counter_ns()
             source = data.read(snapshot=config['snapshot'], query=factor_query)
             stats['data_read_ns'] += time.perf_counter_ns()-tick
-            # A Data/public adjustment call may retain mutable metadata aliases.
-            # Re-measure after each such boundary; reuse only within this phase.
-            prices_bytes = _batch_bytes(prices,stats=stats)
+            # Reader batches are isolated; public adjustment reads its inputs.
+            # The local amount-provenance alias is never written in this phase.
+            stats['reader_batch_size_reuses'] = stats.get('reader_batch_size_reuses',0)+1
             factors = window.project(source,
                 view_ref=qlib_inputs['view_reference']['view_id'], stats=stats,
                 maximum_resident_bytes=maximum_resident_bytes, retained_bytes=retained_pending+prices_bytes,
@@ -655,19 +655,25 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature adjustment/source working set exceeds resident budget')
             tick = time.perf_counter_ns()
             adjusted, adjusted_wire = _adjust_feature(prices, factors, day, _with_wire=True)
-            reader_bytes = sum(_batch_bytes(batch,stats=stats) for batch in (prices,factors,adjusted))
+            adjusted_bytes = _batch_bytes(adjusted,stats=stats)
+            reader_bytes = prices_bytes+factors_bytes+adjusted_bytes
+            stats['reader_batch_size_reuses'] += 2
+            # to_json owns this wire. The adapter only reads it and retains
+            # provenance aliases; no Data operation receives this private graph.
+            adjusted_wire_bytes = _owned_bytes(adjusted_wire)
             _guard_resident(resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes+
-                reader_bytes+_owned_bytes(adjusted_wire)+read_estimate,
+                reader_bytes+adjusted_wire_bytes+read_estimate,
                 maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature membership/source working set exceeds resident budget')
             stats['data_read_calls'] += 1
             membership_tick = time.perf_counter_ns()
             membership = data.members(snapshot=config['snapshot'], query=member_query)
             stats['data_read_ns'] += time.perf_counter_ns()-membership_tick
-            reader_bytes = sum(_batch_bytes(batch,stats=stats) for batch in (prices,factors,adjusted))
+            stats['reader_batch_size_reuses'] += 3
             membership_bytes = _batch_bytes(membership,stats=stats)
             retained = resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes+reader_bytes
-            reserve = retained+_owned_bytes(adjusted_wire)+2*membership_bytes
+            reserve = retained+adjusted_wire_bytes+2*membership_bytes
+            stats['private_wire_size_reuses'] = stats.get('private_wire_size_reuses',0)+1
             _guard_resident(reserve, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature membership/source working set exceeds resident budget')
             membership_wire = membership.to_json()
@@ -693,6 +699,7 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                 for reason in classification['reasons']:
                     counts[reason] = counts.get(reason, 0)+1
             previous = signature
+            previous_bytes = _measure_owned_bytes(signature,stats=stats,kind='signature')
             owned = base+window.bytes+reuse_budget_bytes+_pending_owned_bytes(pending)+reader_bytes+membership_bytes+_owned_bytes([
                     previous, adjusted_wire, membership_wire, signature, documents,
                     adapted.plan, wires, adapted.source_evidence])
@@ -715,7 +722,7 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
             del wires, documents, evidence, members
             stats['feature_adaptation_ns'] += time.perf_counter_ns()-tick
             read_estimate = max(read_estimate, owned-(resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes))
-            resident_base = base+window.bytes+_owned_bytes(previous)
+            resident_base = base+window.bytes+previous_bytes
             candidate = pending+[current_view]
             must_flush = pending and resident_base+_pending_core_bytes(candidate)+reuse_budget_bytes+_caller_bytes(caller_retained_bytes) > maximum_resident_bytes
             del candidate
@@ -731,11 +738,11 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
             pending.append(current_view)
             del current_view
             stats['pending_view_peak_bytes'] = max(stats['pending_view_peak_bytes'], _pending_owned_bytes(pending))
-            _guard_resident(base+window.bytes+_owned_bytes(previous)+_pending_core_bytes(pending)+reuse_budget_bytes,
+            _guard_resident(base+window.bytes+previous_bytes+_pending_core_bytes(pending)+reuse_budget_bytes,
                 maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Core batch snapshots/output working set exceeds resident budget')
         completed = yield from _iter_core_feature_batch(pending,
-            resident_base=base+window.bytes+_owned_bytes(previous), maximum_resident_bytes=maximum_resident_bytes,
+            resident_base=base+window.bytes+previous_bytes, maximum_resident_bytes=maximum_resident_bytes,
             reuse_budget_bytes=reuse_budget_bytes, stats=stats, caller_retained_bytes=caller_retained_bytes,
             progress=progress, completed=completed, total=len(outputs), begin=begin)
         del window, previous, signature, pending
