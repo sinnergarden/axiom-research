@@ -538,6 +538,23 @@ print(result.identity)
             proof_by_day={p['session']:p for p in proof}
             for row in feature['rows']:
                 row['source_refs'][1]=digest(proof_by_day[row['session']]['core_plan'])
+            future_proof=[p for p in proof if p['session']==future]
+            future_feature={k:deepcopy(v) for k,v in feature.items() if k!='feature_ref'}
+            future_feature.update(rows=[r for r in future_feature['rows'] if r['session']==future],
+                                  input_evidence_ref=digest(future_proof))
+            future_feature=seal(future_feature,'feature_ref')
+            write_json(parents/'future-feature.json',future_feature)
+            write_json(parents/'future-proof.json',future_proof)
+            proof=[p for p in proof if p['session']!=future]
+            write_json(parents/'proof.json',proof)
+            feature['rows']=[r for r in feature['rows'] if r['session']!=future]
+            feature['input_evidence_ref']=digest(proof)
+            manifest['feature_parents'][0]['sessions'].remove(future)
+            manifest['feature_parents'].append({'features':{'path':str(parents/'future-feature.json'),
+                'file_digest':file_digest(parents/'future-feature.json'),'feature_ref':future_feature['feature_ref']},
+                'input_evidence':{'path':str(parents/'future-proof.json'),
+                    'file_digest':file_digest(parents/'future-proof.json'),'input_evidence_ref':digest(future_proof)},
+                'sessions':[future]})
             feature=seal({k:v for k,v in feature.items() if k!='feature_ref'},'feature_ref')
             write_json(parents/'features.json',feature)
             normalized=normalize_forward_labels(_read(parents/'raw.json'),features=feature,cutoff=spec['fit_cutoff'])
@@ -575,7 +592,9 @@ print(result.identity)
                 'signal_run_ref':signal['signal_run_ref']}
             scope={'sessions':sorted({r['session'] for r in signal['rows']}),'universe':manifest['universe'],
                 'calendar':calendar,'evaluation_cutoff':spec['evaluation_cutoff']}
-            report=evaluate_stock_signal(descriptor,raw_label_input=manifest['evaluation_labels'],scope=scope)
+            with patch('axiom_research.stock_signal_evaluation_inputs._read',wraps=_read) as reads:
+                report=evaluate_stock_signal(descriptor,raw_label_input=manifest['evaluation_labels'],scope=scope)
+            self.assertNotIn(str(parents/'future-proof.json'),[str(c.args[0]) for c in reads.call_args_list])
             self.assertEqual(report['coverage']['reference_key_count'],4)
             self.assertEqual(report['coverage']['excluded_counts']['NOT_MEMBER'],2)
             saved=save_stock_signal_evaluation(report,destination=root/'reports')
@@ -622,6 +641,11 @@ print(load_stock_signal_evaluation(sys.argv[1]).identity)
 '''
             completed=subprocess.run([sys.executable,'-c',script,str(saved.path)],env=os.environ,capture_output=True,text=True,check=True)
             self.assertEqual(completed.stdout.strip(),report['evidence_ref'])
+            unused_bytes=(parents/'future-proof.json').read_bytes()
+            (parents/'future-proof.json').write_text('[]')
+            with self.assertRaisesRegex(ValueError,'Feature input evidence mismatch'):
+                load_stock_signal_evaluation(saved.path)
+            (parents/'future-proof.json').write_bytes(unused_bytes)
             # An unused parent date after evaluation is admitted above; a
             # source query after a selected Feature's knowledge still fails.
             day=scope['sessions'][0]

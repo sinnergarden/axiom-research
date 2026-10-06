@@ -194,6 +194,8 @@ def _saved_signal(descriptor, scope, *, batch=None):
         by_day = {}
         wanted = set(feature_dates)
         for parent in config['feature_parents']:
+            if not wanted.intersection(parent['sessions']):
+                continue  # Complete parent dates/proofs were admitted by the fold loader.
             for evidence in _read(parent['input_evidence']['path']):
                 if evidence['session'] not in wanted:
                     continue
