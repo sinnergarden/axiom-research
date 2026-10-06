@@ -49,8 +49,8 @@ class SyntheticWideInputs(SyntheticInputs):
         with patch('axiom_research.feature_catalog.load_feature_catalog',return_value=self.catalog), \
              patch('axiom_research.stock_ml._implementation',return_value=self.implementation), \
              patch('axiom_research.stock_ml._environment',return_value=self.environment), \
-             patch('axiom_research.stock_ml._prepare_stock_qlib',side_effect=self.prepare), \
-             patch('axiom_research.stock_ml._iter_stock_feature_days',side_effect=self.iterate):
+             patch('axiom_research.stock_matrix_feature_producer.prepare_matrix_qlib',side_effect=self.prepare), \
+             patch('axiom_research.stock_matrix_feature_producer.iter_matrix_feature_days',side_effect=self.iterate):
             return build_stock_feature_inputs(self.data,spec=self.spec,destination=self.root/'saved',
                 progress=progress,storage_options=options or {'layout':'matrix_v1',
                     'row_block_sessions':2,'column_block':32,'maximum_resident_bytes':64*1024**2})
@@ -157,6 +157,35 @@ class MatrixStorageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'positive integer'):
                 fixture.matrix(options={'layout':'matrix_v1','row_block_sessions':True})
             self.assertFalse((Path(temp)/'saved').exists())
+
+    def test_suspended_producer_budget_blocks_publish_before_children(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture=SyntheticWideInputs(Path(temp),6)
+            original=fixture.iterate
+            limit=64*1024**2
+            observed=[]
+            def retained_generator(*args, **kwargs):
+                stats=kwargs['stats']; reserve=kwargs['caller_retained_bytes']
+                observed.append(reserve())
+                for rows,proof in original(*args, **kwargs):
+                    # Both the pending writer block and this producer value
+                    # fit independently. Their combined publication cannot.
+                    stats['yield_live_bytes']=limit-1
+                    try:
+                        yield rows,proof
+                    finally:
+                        stats['yield_live_bytes']=0
+                    observed.append(reserve())
+            fixture.iterate=retained_generator
+            with patch('axiom_research.stock_feature_inputs._write_feature_matrix_block',
+                       side_effect=AssertionError('overbudget child publication')) as publish:
+                with self.assertRaisesRegex(ValueError,'writer/producer combined working set'):
+                    fixture.matrix()
+                self.assertEqual(publish.call_count,0)
+            self.assertGreater(observed[1],observed[0])
+            target,=(Path(temp)/'saved').iterdir()
+            self.assertFalse((target/'index.json').exists())
+            self.assertFalse((target/'checkpoint.json').exists())
 
     def test_rehashed_cross_day_query_selection_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:

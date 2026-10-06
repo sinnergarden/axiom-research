@@ -120,6 +120,13 @@ class StockMLBatchInputs:
         self._check_sources()
         return value['matrix_state'].source_records
 
+    def _admit_raw_label(self, descriptor):
+        """Admit an explicit Raw override through the owner's storage checks."""
+        from .stock_matrix_reader import _admit_raw_label
+        value=_data(self); self._check_sources()
+        state=value.get('matrix_state')
+        return _admit_raw_label(descriptor,store=None if state is None else state.store)
+
     def _matrices(self, training, candidates):
         import numpy as np
         value = _data(self)
