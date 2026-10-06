@@ -8,6 +8,7 @@ original daily views; shared-panel classification remains diagnostic.
 from __future__ import annotations
 
 from dataclasses import replace
+from itertools import chain
 from pathlib import Path
 import sys
 import time
@@ -30,18 +31,30 @@ def _positive(value, name):
 def _owned_bytes(value, seen=None):
     """Account this bounded Python graph; this is not process-tree RSS."""
     seen = set() if seen is None else seen
-    if id(value) in seen:
-        return 0
-    seen.add(id(value))
-    amount = sys.getsizeof(value)
-    if isinstance(value, dict):
-        amount += sum(_owned_bytes(k, seen)+_owned_bytes(v, seen) for k, v in value.items())
-    elif isinstance(value, (list, tuple, set, frozenset)):
-        amount += sum(_owned_bytes(v, seen) for v in value)
-    elif type(getattr(value, 'payload', None)) is str:
-        # Core Documents own canonical JSON, rather than a numeric panel alone.
-        amount += _owned_bytes(value.payload, seen)
-        amount += sys.getsizeof(getattr(value, '__dict__', {}))
+    amount = 0
+    # Depth-first iterators preserve key/value order and shared-object accounting
+    # without recursive calls or materializing a wide child list.
+    stack = [iter((value,))]
+    while stack:
+        for item in stack[-1]:
+            identity = id(item)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            amount += sys.getsizeof(item)
+            if isinstance(item, dict):
+                stack.append(chain.from_iterable(item.items()))
+                break
+            if isinstance(item, (list, tuple, set, frozenset)):
+                stack.append(iter(item))
+                break
+            if type(getattr(item, 'payload', None)) is str:
+                # Keep the existing conservative Document dictionary charge,
+                # including when that dictionary is reachable separately.
+                amount += _owned_bytes(item.payload, seen)
+                amount += sys.getsizeof(getattr(item, '__dict__', {}))
+        else:
+            stack.pop()
     return amount
 
 
