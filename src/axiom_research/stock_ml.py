@@ -51,18 +51,43 @@ def _project_qlib(batch, values, view_ref):
     borrowing earlier values and attaching a later revision's provenance.
     """
     import numpy as np
+    import pandas as pd
     from axiom_data import DataBatch
     wire = batch.to_json(); frame = batch.frame.copy()
-    fields = wire['context']['query']['fields']
-    for i, row in enumerate(wire['records']):
-        key = (row['security_id'], row['session'])
-        for field in fields:
-            expected = row[field]; value = values[key][field]
-            if expected is None:
-                if value is not None: raise ValueError('Qlib/Reader missingness mismatch')
-            elif value is None or float(np.float32(expected))!=value:
-                raise ValueError('Qlib/Reader revision or value mismatch: '+str((key,field)))
-            frame.at[frame.index[i],field] = value
+    query = wire['context']['query']; fields = query['fields']
+    keys = [(row['security_id'],row['session']) for row in wire['records']]
+    if len(keys) != len(set(keys)): raise ValueError('duplicate Reader projection key')
+    if 'symbols' in query and 'sessions' in query and set(keys) != {
+            (security,day) for day in query['sessions'] for security in query['symbols']}:
+        raise ValueError('complete Reader projection grid required')
+    if any(key not in values or any(f not in values[key] for f in fields) for key in keys):
+        raise ValueError('complete Qlib projection keys/fields required')
+    # Construct only this window, then align by stable keys. Both dictionary
+    # insertion order and the Reader's physical row/index order are irrelevant.
+    ordered_keys = sorted(keys)
+    native = pd.DataFrame.from_records([values[k] for k in ordered_keys],columns=fields,
+        index=pd.MultiIndex.from_tuples(ordered_keys)).reindex(pd.MultiIndex.from_tuples(keys))
+    for field in fields:
+        expected = np.asarray([r[field] for r in wire['records']],dtype=np.float64)
+        value = native[field].to_numpy(dtype=np.float64)
+        missing = np.asarray([r[field] is None for r in wire['records']],dtype=bool)
+        native_missing = np.asarray([values[k][field] is None for k in keys],dtype=bool)
+        if np.any(missing & ~native_missing): raise ValueError('Qlib/Reader missingness mismatch')
+        mismatch = ~missing & (native_missing | (expected.astype(np.float32).astype(np.float64) != value))
+        if np.any(mismatch):
+            key = keys[int(np.flatnonzero(mismatch)[0])]
+            raise ValueError('Qlib/Reader revision or value mismatch: '+str((key,field)))
+        # Scalar assignment previously retained integral Reader columns when
+        # float32 rounding stayed integral; keep those original wire types.
+        dtype = frame[field].dtype
+        if pd.api.types.is_integer_dtype(dtype):
+            bounds = np.iinfo(getattr(dtype,'numpy_dtype',dtype))
+            if any(not np.isfinite(v) or int(v) < bounds.min or int(v) > bounds.max or
+                   float(int(v)) != v for v,absent in zip(value,native_missing) if not absent):
+                raise ValueError('lossy integer Qlib projection assignment')
+            frame[field] = pd.array(value,dtype=dtype)
+        else:
+            frame[field] = value
     context = {**wire['context'], 'numeric_projection':{
         'contract_version':'research_qlib_native_projection_v1','view_ref':view_ref,
         'reader_batch_ref':digest(wire),'revision_admission':'exact_reader_float32_value',

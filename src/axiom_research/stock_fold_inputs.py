@@ -353,24 +353,31 @@ def project_saved_fold(manifest, spec, *, feature_inputs=None, reader=read_paren
             require(raw['label_ref'] == descriptor['label_ref'], 'Raw parent ref mismatch')
             indexed = validate_raw(raw, manifest, spec['fit_cutoff'])
             require(file_fingerprint(descriptor['path']) == before, 'Raw parent changed during admission')
-            raw_admissions[key] = raw, indexed, before, signature(raw), descriptor['path']
-        raw, indexed, mark, admitted, path = raw_admissions[key]
+            date_rows = {}
+            for ordinal,row in enumerate(raw['rows']):
+                date_rows.setdefault(row['feature_session'],[]).append((ordinal,row))
+            raw_admissions[key] = raw, indexed, before, signature(raw), descriptor['path'], date_rows
+        raw, indexed, mark, admitted, path, date_rows = raw_admissions[key]
         require(file_fingerprint(path) == mark and signature(raw) == admitted,
                 'Raw parent changed during projection')
-        return raw, indexed
+        return raw, indexed, date_rows
     norm_rows, label_parents, section_refs, raw_refs = {}, [], [], []
     for desc in manifest['training_labels']:
         require(set(desc) == {'raw', 'normalized', 'sessions', 'raw_projection'}, 'training label descriptor required')
         dates = ordered(desc['sessions'], 'normalized parent dates')
-        raw, raw_index = raw_parent(desc['raw'])
+        raw, raw_index, raw_date_rows = raw_parent(desc['raw'])
         norm = reader(desc['normalized'], 'label_ref'); _verify_normalized_labels(norm)
         require(type(desc['raw_projection']) is bool, 'explicit raw projection flag required')
         projected = raw
         if desc['raw_projection']:
             projected = {k: v for k, v in raw.items() if k not in ('rows', 'label_ref')}
-            projected.update(rows=[r for r in raw['rows'] if r['feature_session'] in dates],
+            # Use this load's admitted date buckets. Restore original Raw row
+            # order so the saved projection ref is byte-for-byte unchanged.
+            selected = sorted((item for day in dates for item in raw_date_rows.get(day,())),key=lambda item:item[0])
+            projected.update(rows=[row for ordinal,row in selected],
                 parent_label_ref=raw['label_ref'], feature_parent_ref=norm['feature_ref'], date_projection=dates)
             projected = seal(projected, 'label_ref')
+            del selected
         require(norm['contract_version'] == 'stock_normalized_label_build_v1' and
                 norm['raw_label_ref'] == projected['label_ref'] and norm['normalization_spec'] == NORMALIZATION_SPEC and
                 _instant(norm['cutoff']) == _instant(spec['fit_cutoff']), 'normalized parent input/cutoff mismatch')
@@ -451,6 +458,6 @@ def project_saved_fold(manifest, spec, *, feature_inputs=None, reader=read_paren
     require(all(file_fingerprint(path) == mark and
                 digest({'raw_ref':raw['label_ref'],'query':raw['source_evidence']['context'],
                         'label_spec':raw['label_spec'],'calendar_ref':raw['calendar_ref']}) == admitted
-                for raw, indexed, mark, admitted, path in raw_admissions.values()),
+                for raw, indexed, mark, admitted, path, date_rows in raw_admissions.values()),
             'Raw parent changed before projection completed')
     return feature_slice, label_slice, training, excluded, sorted(set(raw_refs)), evaluation

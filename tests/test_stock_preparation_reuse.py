@@ -101,11 +101,23 @@ class PreparationReuseTests(unittest.TestCase):
                 parents.append({**original,'sessions':part,'normalized':{'path':str(path),
                     'file_digest':file_digest(path),'label_ref':norm['label_ref']}})
             manifest['training_labels']=parents; reads=[]
+            class CountedRows(list):
+                scans=0
+                def __iter__(self):
+                    self.scans+=1
+                    return super().__iter__()
+            admitted=[]
             def reader(desc,key):
-                reads.append(desc['path']); return read_parent(desc,key)
+                reads.append(desc['path']); value=read_parent(desc,key)
+                if desc['path']==str(root/'raw.json'):
+                    value['rows']=CountedRows(value['rows']);admitted.append(value['rows'])
+                return value
             with patch('axiom_research.stock_fold_inputs.validate_raw',wraps=validate_raw) as admit:
                 values=project_saved_fold(manifest,spec,reader=reader)
             self.assertEqual(reads.count(str(root/'raw.json')),1)
+            # Two original validator passes plus one admission bucket pass;
+            # normalized parent count adds no whole-Raw row scan.
+            self.assertEqual(admitted[0].scans,3)
             self.assertEqual([call.args[2] for call in admit.call_args_list],[spec['fit_cutoff'],spec['evaluation_cutoff']])
             self.assertEqual(values[2],baseline[2]);self.assertEqual(values[3],baseline[3])
             self.assertEqual(values[4],baseline[4])
