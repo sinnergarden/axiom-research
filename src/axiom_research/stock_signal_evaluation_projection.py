@@ -177,10 +177,11 @@ def _shard(admission, scope, day):
         for name, item in admission['projected'].items():
             prediction = deepcopy(item['rows'].get(key))
             if prediction is not None:
-                feature = item['members'][key]
+                feature = item['prediction_features'][key]
                 clocks = [_instant(c) for c in feature['availability'] if c is not None]
                 prediction['feature_knowledge_cutoff'] = feature['knowledge_cutoff']
                 prediction['feature_available_at'] = (max(clocks).isoformat().replace('+00:00', 'Z') if clocks else None)
+                prediction['feature_source_refs'] = deepcopy(feature['source_refs'])
             predictions[name] = prediction
         rows.append({'security_id': security, 'member': member,
             'label': {k: deepcopy(label.get(k)) for k in LABEL_FIELDS},
@@ -351,7 +352,8 @@ def _load_inputs(input_ref, scope, *, marks=None):
                     continue
                 _require((prediction['security_id'], prediction['session']) == key and
                     type(prediction['valid']) is bool and type(prediction['member']) is bool and
-                    prediction['member'] is row['member'], 'frozen Signal key/member mismatch')
+                    prediction['member'] is row['member'] and type(prediction.get('feature_source_refs')) is list,
+                    'frozen Signal key/member/Feature source mismatch')
                 knowledge, available = _instant(prediction['knowledge_cutoff']), _instant(prediction['available_at'])
                 _require(available <= knowledge <= cutoff and knowledge.date().isoformat() >= day,
                          'frozen Signal source clock conflict')

@@ -13,9 +13,9 @@ from unittest.mock import patch
 from axiom_research import (save_stock_signal_evaluation_inputs, evaluate_stock_signal_inputs,
     audit_stock_signal_evaluation, evaluate_stock_signals, load_stock_signal_evaluation,
     save_stock_signal_evaluation, semantic_identity)
-from axiom_research.stock_artifacts import _read, write_json, file_digest
+from axiom_research.stock_artifacts import _read, write_json, file_digest, digest
 from axiom_research import stock_signal_evaluation_projection as projection
-from test_stock_signal_evaluation import fixture, mutate_signal, raw_variant
+from test_stock_signal_evaluation import fixture, mutate_signal, raw_variant, seal
 
 
 class FrozenSignalEvaluationTests(unittest.TestCase):
@@ -277,6 +277,76 @@ print(load_stock_signal_evaluation(sys.argv[1]).identity)
         with patch.object(original_tests, 'evaluate_stock_signal', side_effect=compare_fold):
             owner._saved_fold_source_closure(compact=False)
             owner._saved_fold_source_closure(compact=True)
+
+    def test_overlapping_weekly_feature_revision_keeps_prediction_original_dependency(self):
+        from axiom_research.stock_signal_evaluation_inputs import _inputs, _scope
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); _, label, scope = fixture(root/'template')
+            first, _, _ = fixture(root/'first', dates=scope['sessions'][:2])
+            last, _, _ = fixture(root/'last', dates=scope['sessions'][2:])
+            late = root/'last'; clock = scope['sessions'][2]+'T21:00:00Z'
+            available = scope['sessions'][2]+'T20:00:00Z'
+            proof = _read(late/'feature-inputs.json')
+            earlier_proof = deepcopy(_read(root/'first'/'feature-inputs.json'))
+            for row in earlier_proof:
+                day = row['session']; row['cutoffs'] = {day: clock}
+                row['core_frame_ref'] = digest(['later-frame', day])
+                row['membership_ref'] = digest(['later-membership', day])
+                member = row['source_evidence']['membership']
+                member['batch_ref'] = row['membership_ref']
+                member['query_context']['query']['cutoff_by_session'] = {day: clock}
+            proof = earlier_proof + proof; write_json(late/'feature-inputs.json', proof)
+            features = _read(late/'features.json')
+            earlier = deepcopy(_read(root/'first'/'features.json')['rows'])
+            by_day = {p['session']: p for p in proof}
+            for row in earlier:
+                row.update(knowledge_cutoff=clock, availability=[available], values=[99.0],
+                    source_refs=[by_day[row['session']]['core_frame_ref'], digest(by_day[row['session']]['core_plan'])])
+            features['rows'] = earlier + features['rows']; features['input_evidence_ref'] = digest(proof)
+            for query in features['qlib_view']['queries'] + [features['qlib_view']['universe_query']]:
+                query['sessions'] = list(scope['sessions'])
+                query['cutoff_by_session'].update({day: clock for day in scope['sessions'][:2]})
+            features = seal({k: v for k, v in features.items() if k != 'feature_ref'}, 'feature_ref')
+            write_json(late/'features.json', features)
+            dataset = _read(late/'dataset.json'); dataset['feature_ref'] = features['feature_ref']
+            dataset = seal({k: v for k, v in dataset.items() if k != 'dataset_ref'}, 'dataset_ref')
+            write_json(late/'dataset.json', dataset)
+            model = _read(late/'model.json'); model.update(feature_ref=features['feature_ref'], dataset_ref=dataset['dataset_ref'])
+            model = seal({k: v for k, v in model.items() if k != 'model_ref'}, 'model_ref'); write_json(late/'model.json', model)
+            signal = _read(late/'predictions.json'); signal.update(feature_ref=features['feature_ref'], model_ref=model['model_ref'])
+            for row in signal['rows']:
+                row['source_refs'][:2] = [features['feature_ref'], model['model_ref']]
+            signal = seal({k: v for k, v in signal.items() if k != 'signal_run_ref'}, 'signal_run_ref')
+            write_json(late/'predictions.json', signal)
+            evidence = _read(late/'signal-evidence.json'); evidence['signal_ref'] = signal['signal_run_ref']
+            evidence = seal({k: v for k, v in evidence.items() if k != 'evidence_ref'}, 'evidence_ref')
+            write_json(late/'signal-evidence.json', evidence)
+            experiment = _read(late/'experiment.json')
+            experiment.update(feature_ref=features['feature_ref'], dataset_ref=dataset['dataset_ref'], model_ref=model['model_ref'],
+                              signal_run_ref=signal['signal_run_ref'], evidence_ref=evidence['evidence_ref'])
+            experiment['definition']['config']['cutoff_by_session'].update({d: clock for d in scope['sessions'][:2]})
+            experiment = seal({k: v for k, v in experiment.items() if k != 'experiment_ref'}, 'experiment_ref')
+            write_json(late/'experiment.json', experiment)
+            manifest = _read(late/'manifest.json'); manifest['experiment_ref'] = experiment['experiment_ref']
+            manifest['files'] = {name: file_digest(late/name) for name in manifest['files']}; write_json(late/'manifest.json', manifest)
+            last.update(file_digest=file_digest(late/'predictions.json'), signal_run_ref=signal['signal_run_ref'])
+            inputs = {'weekly': [first, last]}
+            original = evaluate_stock_signals(inputs, raw_label_input=label, scope=scope)['weekly']
+            self.assertEqual(original['coverage']['valid_pair_count'], 96)
+            selected = _inputs(inputs, label, _scope(scope))
+            ref = self.freeze(root, inputs, label, scope)
+            _, _, frozen = projection._load_inputs(ref, scope)
+            self.assertEqual(selected['common_input'], frozen['common_input'])
+            self.assertEqual(selected['native_input'], frozen['native_input'])
+            day = scope['sessions'][0]
+            shard = _read(Path(ref.uri).parent/(day+'.json'))
+            prediction = shard['rows'][0]['predictions']['weekly']
+            self.assertEqual(prediction['knowledge_cutoff'], day+'T21:00:00Z')
+            self.assertEqual(prediction['feature_knowledge_cutoff'], day+'T21:00:00Z')
+            first_feature = _read(root/'first'/'features.json')['rows'][0]
+            self.assertEqual(prediction['feature_source_refs'], first_feature['source_refs'])
+            saved = evaluate_stock_signal_inputs(ref, scope=scope, destination=root/'reports')['weekly']
+            self.compare(original, saved.to_dict()); audit_stock_signal_evaluation(saved.path)
 
 
 if __name__ == '__main__':

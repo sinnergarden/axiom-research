@@ -334,7 +334,7 @@ def _admit_inputs(signal_inputs, raw_label_input, scope, *, batch=None):
         metadata[name] = []
         descriptors = descriptors if type(descriptors) is list else [descriptors]
         _require(bool(descriptors), 'nonempty weekly Signal list required')
-        rows, members, sources, signal_refs, previous = {}, {}, [], [], None
+        rows, members, prediction_features, sources, signal_refs, previous = {}, {}, {}, [], [], None
         for descriptor in descriptors:
             item = _saved_signal(descriptor, scope, batch=batch)
             metadata[name].append(item['metadata'])
@@ -346,13 +346,17 @@ def _admit_inputs(signal_inputs, raw_label_input, scope, *, batch=None):
             previous = dates[-1]
             _require(not set(rows) & set(item['rows']), 'duplicate weekly Signal key')
             rows.update(item['rows'])
+            # Feature dates can overlap across weekly folds and carry different
+            # revisions. Keep the exact dependency of each disjoint prediction;
+            # the merged membership map below only supplies the shared mask.
+            prediction_features.update({key: item['members'][key] for key in item['rows']})
             for key, row in item['members'].items():
                 _require(key not in members or members[key]['member'] is row['member'], 'weekly historical membership conflict')
                 members[key] = row
             signal_refs.append(item['signal']['signal_run_ref'])
             sources.append({'signal_input': deepcopy(descriptor), 'model_ref': item['signal']['model_ref'],
                 'feature_ref': item['signal']['feature_ref'], 'source_records': item['source_records']})
-        projected[name] = {'rows': rows, 'members': members}
+        projected[name] = {'rows': rows, 'members': members, 'prediction_features': prediction_features}
         closures[name] = sources; refs[name] = signal_refs
     raw, labels = _raw_labels(raw_label_input, scope, snapshot, pit)
     return {'projected': projected, 'closures': closures, 'refs': refs, 'metadata': metadata,
