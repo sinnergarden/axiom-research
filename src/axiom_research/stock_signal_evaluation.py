@@ -156,7 +156,7 @@ def _statistics(value, expected_input, spec):
                         (row[std] > 0 and _finite(row[ir]) and row[reason] is None), 'saved IR null/reason mismatch')
 
 
-def _verify_report(report):
+def _verify_report(report, *, batch=None):
     _require(type(report) is dict and set(report) == TOP_FIELDS and
         report['contract_version'] == 'stock_signal_evidence_v2', 'unsupported saved Signal evaluation')
     _verify_ref(report, 'content_digest')
@@ -172,7 +172,8 @@ def _verify_report(report):
     order = [item['name'] for item in evidence['sample_mask']['signals']]
     _require(len(order) == len(set(order)) and set(order) == set(evidence['signal_inputs']),
         'saved comparison order mismatch')
-    selected = _inputs({name: evidence['signal_inputs'][name] for name in order}, evidence['raw_label_input'], scope)
+    selected = _inputs({name: evidence['signal_inputs'][name] for name in order}, evidence['raw_label_input'], scope,
+                       batch=batch)
     name = evidence['signal_name']; _require(name in selected['signal_keys'], 'saved comparison Signal missing')
     _require(evidence['source_closure'] == selected['closures'] and evidence['sample_mask'] == selected['mask'] and
         report['sample_mask_ref'] == digest(selected['mask']), 'saved source/sample-mask binding mismatch')
@@ -216,12 +217,18 @@ class StockSignalEvaluation:
         return self.to_dict()['evidence_ref']
 
 
-def load_stock_signal_evaluation(path):
+def load_stock_signal_evaluation(path, *, batch=None):
     """Read saved values and verify their immutable sources; no runtime imports.
 
     Direct legacy v1 JSON preserves its original ref-only read behavior. V2
     directories additionally freeze file bytes in the existing records layout.
+    A batch reuses only inputs admitted in this process; saved statistics and
+    every fold output are still verified without numerical execution.
     """
+    if batch is not None:
+        from .stock_batch import _data
+        _data(batch)
+        batch._check_sources()
     path = Path(path)
     if path.is_dir():
         manifest = _read(path/'manifest.json')
@@ -235,9 +242,12 @@ def load_stock_signal_evaluation(path):
     else:
         report = _read(path)
     if report.get('contract_version') == 'stock_signal_evidence_v1':
+        _require(batch is None, 'saved batch requires v2 evaluation')
         _verify_ref(report, 'evidence_ref')
     else:
-        _verify_report(report)
+        _verify_report(report, batch=batch)
+    if batch is not None:
+        batch._check_sources()
     return StockSignalEvaluation(path)
 
 

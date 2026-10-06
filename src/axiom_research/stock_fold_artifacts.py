@@ -34,17 +34,23 @@ class StockMLFold:
         return _read(self.path/'signal-evidence.json')
 
 
-def load_stock_ml_fold(path):
+def load_stock_ml_fold(path, *, batch=None):
     """Validate saved bytes, parent closure and clocks, never run a stage.
 
     No current implementation/environment requirement is imposed on old saved
-    reports. Parent locations and full non-streaming proof parsing are explicit.
+    reports. A fresh batch may reuse its fully admitted inputs in this process;
+    all saved output checks remain. Without a batch, disk parents are rechecked.
     """
-    return _load_stock_ml_fold(path)
+    return _load_stock_ml_fold(path, batch=batch)
 
 
-def _load_stock_ml_fold(path, *, projection=None):
+def _load_stock_ml_fold(path, *, projection=None, batch=None):
     """Internal publication check may reuse this call's verified projection."""
+    if batch is not None:
+        from .stock_batch import _data
+        _data(batch)
+        require(projection is None, 'batch cannot accept a caller projection')
+        batch._check_sources()
     path = Path(path); manifest = _read(path/'manifest.json')
     require(manifest.get('contract_version') == 'stock_ml_fold_manifest_v1' and
             set(manifest.get('files', {})) == {*OUTPUTS, 'fold.json', 'booster.txt'}, 'unexpected saved fold files')
@@ -71,6 +77,8 @@ def _load_stock_ml_fold(path, *, projection=None):
         value = _read(path/name); _verify_ref(value, key)
         require(value[key] == fold[key], 'fold stage reference mismatch')
         saved[name] = value
+    if batch is not None:
+        projection = batch._project(inputs, spec)
     features, labels, training, excluded, raw_refs, evaluation = (
         project_saved_fold(inputs, spec) if projection is None else projection)
     require(saved['feature-slice.json'] == features and saved['label-slice.json'] == labels,
@@ -140,4 +148,6 @@ def _load_stock_ml_fold(path, *, projection=None):
         {'neutral_validation': 'NOT_PERFORMED_BY_BUILDER', 'runtime': 'NOT_PERFORMED_BY_BUILDER'},
         {'neutral_validation': 'NOT_PERFORMED_BY_BUILDER', 'runtime': 'UNSUPPORTED_V2'}),
             'fold cannot claim Engine Runtime admission')
+    if batch is not None:
+        batch._check_sources()
     return StockMLFold(path)

@@ -81,6 +81,82 @@ class StockBatchTests(unittest.TestCase):
                        destination=destination, batch=batch, metrics=stats)
         return run, stats
 
+    def test_public_saved_batch_reader_reuses_inputs_and_keeps_outputs_readonly(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); definition = batch_fixture(root, two_year=True)
+            with load_stock_ml_batch_inputs(definition) as batch:
+                runs = [self.build(item, root/'folds', batch=batch)[0] for item in definition['folds']]
+            marks = {p: (file_digest(p), p.stat().st_mtime_ns) for p in root.rglob('*') if p.is_file()}
+            with patch('axiom_research.stock_batch.read_parent', wraps=read_parent) as reader:
+                with load_stock_ml_batch_inputs(definition) as batch:
+                    initial_reads = reader.call_count
+                    with patch('axiom_research.stock_fold_inputs.load_saved_feature_inputs',
+                               side_effect=AssertionError('reloaded common inputs')), \
+                         patch('axiom_research.stock_fold_inputs._admit_saved_fold_labels',
+                               side_effect=AssertionError('readmitted labels')), \
+                         patch('axiom_research.stock_training.fit_predict_stock_model',
+                               side_effect=AssertionError('reader trained')):
+                        for run in runs:
+                            loaded = load_stock_ml_fold(run.path, batch=batch)
+                            self.assertEqual(loaded.to_dict(), run.to_dict())
+                            self.assertEqual(loaded.predictions(), run.predictions())
+                    self.assertEqual(reader.call_count, initial_reads)
+                    self.assertEqual(batch.metrics['fold_projection_calls'], 2)
+            self.assertEqual({p: (file_digest(p), p.stat().st_mtime_ns) for p in marks}, marks)
+            write_json(root/'batch.json', definition)
+            script = '''import builtins,json,sys
+original=builtins.__import__
+def guard(name,*a,**kw):
+    if name.split('.')[0] in {'axiom_data','axiom_engine','qlib','lightgbm','pandas','pyarrow'}:
+        raise AssertionError('forbidden runtime '+name)
+    return original(name,*a,**kw)
+builtins.__import__=guard
+from axiom_research import load_stock_ml_batch_inputs,load_stock_ml_fold
+with load_stock_ml_batch_inputs(json.load(open(sys.argv[1]))) as batch:
+    print(json.dumps([load_stock_ml_fold(p,batch=batch).identity for p in sys.argv[2:]]))
+'''
+            loaded = subprocess.run([sys.executable, '-c', script, str(root/'batch.json'),
+                                     *(str(run.path) for run in runs)],
+                env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'}, capture_output=True, text=True,
+                check=True, timeout=15)
+            import json
+            self.assertEqual(json.loads(loaded.stdout), [run.identity for run in runs])
+
+    def test_public_saved_reader_rejects_fake_closed_wrong_fold_and_saved_corruption(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); definition = batch_fixture(root)
+            with load_stock_ml_batch_inputs(definition) as batch:
+                runs = [self.build(item, root/'folds', batch=batch)[0] for item in definition['folds']]
+            with self.assertRaisesRegex(ValueError, 'validated saved batch'):
+                load_stock_ml_fold(runs[0].path, batch=True)
+            with self.assertRaisesRegex(ValueError, 'closed'):
+                load_stock_ml_fold(runs[0].path, batch=batch)
+            one = {**definition, 'folds': definition['folds'][:1]}
+            with load_stock_ml_batch_inputs(one) as batch:
+                with self.assertRaisesRegex(ValueError, 'outside saved batch'):
+                    load_stock_ml_fold(runs[1].path, batch=batch)
+                (runs[0].path/'booster.txt').write_text('changed saved booster')
+                with self.assertRaisesRegex(ValueError, 'saved fold file mismatch'):
+                    load_stock_ml_fold(runs[0].path, batch=batch)
+
+    def test_public_saved_reader_checks_source_after_output_validation(self):
+        from axiom_research.stock_fold_inputs import feature_available
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); definition = batch_fixture(root)
+            with load_stock_ml_batch_inputs(definition) as batch:
+                run = self.build(definition['folds'][0], root/'folds', batch=batch)[0]
+                changed = False
+                def alter(row):
+                    nonlocal changed
+                    if not changed:
+                        with (root/'shared-proof.json').open('a') as stream: stream.write(' ')
+                        changed = True
+                    return feature_available(row)
+                with patch('axiom_research.stock_fold_artifacts.feature_available', side_effect=alter):
+                    with self.assertRaisesRegex(ValueError, 'source changed'):
+                        load_stock_ml_fold(run.path, batch=batch)
+                self.assertTrue(changed)
+
     def test_unique_inputs_once_same_artifact_and_exact_hit_without_execution(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); definition = batch_fixture(root)
@@ -198,6 +274,9 @@ print(load_stock_ml_fold(sys.argv[1]).identity)
             for name in manifest['files']: manifest['files'][name] = file_digest(run.path/name)
             write_json(run.path/'manifest.json', manifest)
             with self.assertRaisesRegex(ValueError, 'slice/immutable parent mismatch'): load_stock_ml_fold(run.path)
+            with load_stock_ml_batch_inputs(definition) as batch:
+                with self.assertRaisesRegex(ValueError, 'slice/immutable parent mismatch'):
+                    load_stock_ml_fold(run.path, batch=batch)
 
     def test_limits_definition_changes_and_source_mutation_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
