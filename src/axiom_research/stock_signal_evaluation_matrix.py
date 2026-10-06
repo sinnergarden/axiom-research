@@ -23,6 +23,19 @@ RAW_FIELDS = {'raw_input', 'contract_version', 'label_ref', 'label_spec',
     'calendar_ref', 'source_ref', 'source_context', 'sessions'}
 
 
+def _raw_header_fields(header):
+    return isinstance(header, Mapping) and set(header) in (RAW_FIELDS, RAW_FIELDS | {'storage_binding'})
+
+
+def _storage_binding(value, descriptor, records):
+    _require(type(value) is dict and set(value) == {'representation', 'carrier'} and
+        value['representation'] == 'stock_native_json_carrier_v1' and
+        value['carrier'] == descriptor and type(descriptor) is dict and
+        set(descriptor) == {'path', 'file_digest', 'label_ref'} and
+        records.get(descriptor['path']) == descriptor['file_digest'],
+        'Raw carrier storage descriptor/closure mismatch')
+
+
 def _ref(value):
     return (type(value) is str and len(value) == 71 and value.startswith('sha256:')
             and all(c in '0123456789abcdef' for c in value[7:]))
@@ -120,7 +133,7 @@ def _join_target_slices(items, *, calendar, universe, scope, state):
         _require(isinstance(provenance, Mapping) and bool(provenance), 'original matrix RawLabel provenance required')
         source_days = {}
         for ref, header in provenance.items():
-            _require(_ref(ref) and isinstance(header, Mapping) and set(header) == RAW_FIELDS and
+            _require(_ref(ref) and _raw_header_fields(header) and
                 header['label_ref'] == ref and header['contract_version'] == 'stock_label_build_v1' and
                 _ref(header['source_ref']), 'matrix RawLabel provenance identity mismatch')
             descriptor = header['raw_input']
@@ -239,7 +252,7 @@ def _sources_table(value):
     return result
 
 
-def _owner_targets(view):
+def _owner_targets(view, source_records):
     """Translate the admitted owner's original OOS proof, while its lease lives."""
     evidence = view.label_leaf_bindings
     _require(type(evidence) is dict and set(evidence) == {'rows', 'contents'} and
@@ -263,6 +276,16 @@ def _owner_targets(view):
         days.setdefault(leaf['raw_label_ref'], set()).add(key[1])
     _require(type(view.raw_provenance) is list and bool(view.raw_provenance),
         'matrix owner original RawLabel headers required')
+    storage = view.fold_binding.get('raw_provenance_storage', {})
+    _require(type(storage) is dict, 'matrix owner Raw storage map required')
+    known = {}
+    for raw in view.raw_provenance + view.fold_binding.get('training_raw_provenance', []):
+        _require(raw['label_ref'] not in known or known[raw['label_ref']] == raw['raw_build'],
+            'conflicting matrix owner Raw storage identity')
+        known[raw['label_ref']] = raw['raw_build']
+    _require(set(storage) <= set(known), 'unknown matrix owner Raw storage entry')
+    for ref, binding in storage.items():
+        _storage_binding(binding, known[ref], source_records)
     provenance = {}
     for raw in view.raw_provenance:
         _require(type(raw) is dict and set(raw) == {'raw_build', 'contract_version',
@@ -272,6 +295,8 @@ def _owner_targets(view):
             ('contract_version', 'label_ref', 'label_spec', 'calendar_ref', 'source_ref')}
         header.update(raw_input=_copy_wire(raw['raw_build']),
             source_context=_copy_wire(raw['source_evidence']['context']), sessions=sorted(days[raw['label_ref']]))
+        if raw['label_ref'] in storage:
+            header['storage_binding'] = _copy_wire(storage[raw['label_ref']])
         _require(raw['label_ref'] not in provenance, 'duplicate matrix owner RawLabel identity')
         provenance[raw['label_ref']] = header
     for leaf in evidence['rows']:
@@ -355,7 +380,7 @@ def _admit_matrix(signal_inputs, raw_label_input, scope, batch):
                 consumed = {shared_table[index][0] for index in indices}
                 if raw_label_input is None:
                     # Copy only this fold's small original proof and OOS rows.
-                    _join_target_slices([_owner_targets(view)],
+                    _join_target_slices([_owner_targets(view, {path: records[path] for path in consumed})],
                         calendar=common['calendar'], universe=common['universe'], scope=scope, state=target_state)
             days = features['prediction_sessions']; universe = common['universe']
             feature_index = _grid(features['rows'], universe, days, 'session', 'OOS Feature')
@@ -407,19 +432,33 @@ def _admit_matrix(signal_inputs, raw_label_input, scope, batch):
             del features, feature_index, original, view, fold_members, fold_predictions
         projected[name] = {'rows': rows, 'members': members, 'prediction_features': prediction_features}
     if raw_label_input is not None:
-        raw_wire = _checked_descriptor(raw_label_input, 'label_ref', marks)
-        original, labels = _validate_raw_labels(raw_wire, scope, common['snapshot'], common['pit_policy'])
         from .stock_signal_evaluation_projection import _raw_metadata
-        header = {**_raw_metadata(original), 'raw_input': deepcopy(raw_label_input),
-            'sessions': sorted({row['feature_session'] for row in original['rows']})}
-        keys = [(security, day) for day in scope['sessions'] for security in scope['universe']]
-        targets = {'labels': {key: labels[key] for key in keys},
-            'label_leaf_bindings': {key: _override_leaf_ref(header, labels[key]) for key in keys},
-            'raw_provenance': {original['label_ref']: header}, 'label_inputs': [], 'label_spec': deepcopy(original['label_spec'])}
-        label_ref, mode = original['label_ref'], 'raw_override'
-        source_path = raw_label_input['path']
-        _require(source_path not in records or records[source_path] == raw_label_input['file_digest'], 'conflicting shared evaluation Label pin')
-        records[source_path] = raw_label_input['file_digest']
+        # Both inline and carried overrides use the owner's one native
+        # admission. The returned skeleton is already bound to original refs.
+        with batch._admit_raw_label(raw_label_input) as lease:
+            source_records = _sources_table(lease.source_records)
+            _require(type(lease.source_fingerprints) is dict and
+                set(lease.source_fingerprints) == set(source_records), 'Raw override source fingerprints required')
+            for source_path, file_ref in source_records.items():
+                _require(source_path not in records or records[source_path] == file_ref,
+                    'conflicting shared evaluation Label pin')
+                records[source_path] = file_ref
+                mark = tuple(lease.source_fingerprints[source_path]); source_path = Path(source_path)
+                _require(source_path not in marks or marks[source_path] == mark,
+                    'Raw override source changed during admission')
+                marks[source_path] = mark
+            original, labels = _validate_raw_labels(lease.raw, scope, common['snapshot'], common['pit_policy'])
+            header = {**_raw_metadata(original), 'raw_input': deepcopy(raw_label_input),
+                'sessions': sorted({row['feature_session'] for row in original['rows']})}
+            if lease.storage_binding is not None:
+                _storage_binding(lease.storage_binding, raw_label_input, source_records)
+                header['storage_binding'] = deepcopy(lease.storage_binding)
+            keys = [(security, day) for day in scope['sessions'] for security in scope['universe']]
+            targets = {'labels': {key: labels[key] for key in keys},
+                'label_leaf_bindings': {key: _override_leaf_ref(header, labels[key]) for key in keys},
+                'raw_provenance': {original['label_ref']: header}, 'label_inputs': [], 'label_spec': deepcopy(original['label_spec'])}
+            label_ref, mode = original['label_ref'], 'raw_override'
+        del original, labels, lease
     else:
         targets = _finish_targets(target_state, scope)
         label_ref, mode = None, 'fold_targets'
@@ -450,7 +489,8 @@ def _save_matrix_inputs(signal_inputs, raw_label_input, scope, destination, batc
         for source in sources] for name, sources in admitted['closures'].items()}
     names = ('stock_signal_evaluation_matrix.py', 'stock_signal_evaluation_projection.py',
         'stock_signal_evaluation_inputs.py', 'stock_batch.py', 'stock_matrix_reader.py',
-        'stock_matrix_folds.py', 'stock_fold_artifacts.py', 'stock_artifacts.py', 'stock_label_contracts.py')
+        'stock_matrix_folds.py', 'stock_fold_artifacts.py', 'stock_artifacts.py', 'stock_label_contracts.py',
+        'stock_native_json.py', 'stock_canonical_json.py')
     receipt = {'contract_version': 'stock_signal_evaluation_admission_v2',
         'signal_inputs': deepcopy(signal_inputs), 'raw_label_input': deepcopy(raw_label_input), 'scope': scope,
         'batch_manifest': manifest, 'batch_ref': manifest['batch_ref'], 'source_records': table,
@@ -522,7 +562,7 @@ def _verify_matrix_root(root, ref, scope):
         'frozen matrix Label metadata mismatch')
     records = _sources_table(receipt['source_records'])
     for raw_ref, header in raw['sources'].items():
-        _require(type(header) is dict and set(header) == RAW_FIELDS and header['label_ref'] == raw_ref and
+        _require(type(header) is dict and _raw_header_fields(header) and header['label_ref'] == raw_ref and
             _ref(raw_ref) and type(header['sessions']) is list and bool(header['sessions']) and
             header['sessions'] == sorted(set(header['sessions'])) and set(header['sessions']) <= set(base['calendar']),
             'frozen original RawLabel header/date mismatch')
@@ -530,6 +570,8 @@ def _verify_matrix_root(root, ref, scope):
         _require(type(descriptor) is dict and set(descriptor) == {'path', 'file_digest', 'label_ref'} and
             descriptor['label_ref'] == raw_ref and records.get(descriptor['path']) == descriptor['file_digest'],
             'frozen RawLabel original byte binding mismatch')
+        if 'storage_binding' in header:
+            _storage_binding(header['storage_binding'], descriptor, records)
         wire = {key: header[key] for key in ('contract_version', 'label_ref', 'label_spec', 'calendar_ref', 'source_ref')}
         wire['source_evidence'] = {'context': header['source_context']}
         _validate_raw_label_header(wire, scope, raw['snapshot'], raw['pit_policy'])

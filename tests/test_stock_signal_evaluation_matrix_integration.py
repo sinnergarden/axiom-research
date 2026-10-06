@@ -132,13 +132,16 @@ class MatrixFrozenRealOwnerTests(unittest.TestCase):
                         default = save_stock_signal_evaluation_inputs(inputs, batch=batch, scope=scope, destination=root/'default')
                     gc.collect(); self.assertTrue(all(ref() is None for ref in tracked))
                     self.assertEqual(len(checked), 6)
+                    for counter in ('file_hash_calls', 'json_decode_calls', 'common_key_index_builds'):
+                        self.assertEqual(batch.metrics[counter], admitted[counter], counter)
                     override = save_stock_signal_evaluation_inputs(inputs, batch=batch, raw_label_input=shared,
                         scope=scope, destination=root/'override')
                     t6 = save_stock_signal_evaluation_inputs(inputs, batch=batch, raw_label_input=independent,
                         scope=scope, destination=root/'t6')
                 self.assertEqual(state.store.borrowers, 0); self.assertEqual(state.store.lease_bytes, 0)
-                for counter in ('file_hash_calls', 'json_decode_calls', 'common_key_index_builds'):
-                    self.assertEqual(batch.metrics[counter], admitted[counter], counter)
+                for counter in ('file_hash_calls', 'json_decode_calls'):
+                    self.assertEqual(batch.metrics[counter], admitted[counter]+2, counter)
+                self.assertEqual(batch.metrics['common_key_index_builds'], admitted['common_key_index_builds'])
                 _, frozen_root, selected = _load_inputs(default, scope)
                 for pair in selected['native_input']['pairs']:
                     key = pair['security_id'], pair['session']

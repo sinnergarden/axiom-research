@@ -91,6 +91,7 @@ class MockOwner:
                     'adjustment_anchor': header['label_spec']['adjustment_anchor'],
                     'start_open_ref': ref, 'end_close_ref': ref})
             value = SimpleNamespace(common=self.common, features=features, evaluation=evaluation,
+                fold_binding={'training_raw_provenance': []},
                 raw_provenance=[{'raw_build': header['raw_input'], **{key: header[key] for key in
                     ('contract_version', 'label_ref', 'label_spec', 'calendar_ref', 'source_ref')},
                     'source_evidence': self.raw['source_evidence']}],
@@ -149,8 +150,12 @@ class MockOwner:
     def patch_owner(self):
         owner = self
         def project(batch, inputs, spec): return owner.project(batch, inputs, spec)
+        def raw(batch, descriptor):
+            from axiom_research.stock_matrix_reader import _admit_raw_label
+            return _admit_raw_label(descriptor)
         with patch.object(StockMLBatchInputs, '_project_evaluation', new=project, create=True), \
              patch.object(StockMLBatchInputs, '_evaluation_source_records', return_value=self.table), \
+             patch.object(StockMLBatchInputs, '_admit_raw_label', new=raw), \
              patch('axiom_research.stock_fold_artifacts.load_stock_ml_fold', side_effect=self.load_fold), \
              patch('axiom_research.stock_batch.load_stock_ml_batch_inputs', side_effect=lambda manifest: self.batch()):
             yield
@@ -210,13 +215,13 @@ class MatrixPublicFrozenMockTests(unittest.TestCase):
     def test_shared_override_buffer_read_once_and_normalized_source_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); owner = MockOwner(root/'source', two_signals=True)
-            reads = []; checked = frozen._read_checked
-            def read(path, *args, **kwargs):
-                reads.append(str(path)); return checked(path, *args, **kwargs)
-            with owner.patch_owner(), owner.batch() as batch, patch.object(frozen, '_read_checked', side_effect=read):
-                save_stock_signal_evaluation_inputs(owner.inputs, raw_label_input=owner.label,
-                    batch=batch, scope=owner.scope, destination=root/'frozen')
-            self.assertEqual(reads.count(owner.label['path']), 1)
+            with owner.patch_owner(), owner.batch() as batch:
+                admitted = batch._admit_raw_label
+                with patch.object(StockMLBatchInputs, '_admit_raw_label', side_effect=admitted) as raw:
+                    save_stock_signal_evaluation_inputs(owner.inputs, raw_label_input=owner.label,
+                        batch=batch, scope=owner.scope, destination=root/'frozen')
+                self.assertEqual(raw.call_count, 1)
+                self.assertEqual(raw.call_args.args, (owner.label,))
             target = raw_variant(root, owner.label, lambda raw: raw['label_spec'].update(normalization='cs_zscore'))
             with owner.patch_owner(), owner.batch() as batch, self.assertRaisesRegex(ValueError, 'endpoint semantics'):
                 save_stock_signal_evaluation_inputs(owner.inputs, raw_label_input=target,
