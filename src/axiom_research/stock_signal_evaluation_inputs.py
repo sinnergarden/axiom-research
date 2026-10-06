@@ -255,6 +255,11 @@ def _saved_signal(descriptor, scope, *, batch=None):
 
 def _raw_labels(descriptor, scope, snapshot, pit):
     raw = _descriptor(descriptor, 'label_ref')
+    return _validate_raw_labels(raw, scope, snapshot, pit)
+
+
+def _validate_raw_label_header(raw, scope, snapshot, pit):
+    """The original source, endpoint, Snapshot/PIT and visibility constraints."""
     _require(raw.get('contract_version') == 'stock_label_build_v1', 'evaluation requires saved Raw Labels')
     calendar = scope['calendar']; cutoff = _instant(scope['evaluation_cutoff'])
     _require(raw.get('calendar_ref') == digest({'contract_version': 'stock_label_calendar_v1', 'sessions': calendar}),
@@ -302,6 +307,13 @@ def _raw_labels(descriptor, scope, snapshot, pit):
         _require(all((native.get('policy_by_session') or {}).get(day) ==
             (query.get('policy_by_session') or {}).get(day) for day in query['sessions']),
             'Raw Label native per-session PIT policy mismatch')
+    return universe, source_cutoff
+
+
+def _validate_raw_labels(raw, scope, snapshot, pit):
+    """Admit the same original RawLabel wire, including a checked input buffer."""
+    universe, source_cutoff = _validate_raw_label_header(raw, scope, snapshot, pit)
+    calendar = scope['calendar']; query = raw['source_evidence']['context']['query']; spec = raw['label_spec']
     dates = sorted({r['feature_session'] for r in raw['rows']})
     _require(set(dates) <= set(calendar) and set(scope['sessions']) <= set(dates), 'Raw Label feature scope mismatch')
     indexed = _grid(raw['rows'], universe, dates, 'feature_session', 'Raw Label')

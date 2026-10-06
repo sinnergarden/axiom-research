@@ -17,6 +17,7 @@ from .stock_signal_evaluation_inputs import (
 
 
 INPUT_VERSION = 'stock_signal_evaluation_inputs_v1'
+MATRIX_INPUT_VERSION = 'stock_signal_evaluation_inputs_v2'
 ROOT_FIELDS = {'contract_version', 'input_id', 'scope', 'signal_order', 'signal_refs',
     'signal_metadata', 'raw_metadata', 'clock_floor', 'admission_receipt', 'shards'}
 LABEL_FIELDS = {'security_id', 'feature_session', 'start_session', 'end_session',
@@ -62,7 +63,8 @@ def _input_ref(value):
     _require(type(value) is ArtifactRef, 'frozen evaluation ArtifactRef required')
     validate(value)
     _require(value.artifact_type == 'StockSignalEvaluationInputs' and
-        value.artifact_contract_version == INPUT_VERSION, 'frozen evaluation input ref type/version mismatch')
+        value.artifact_contract_version in (INPUT_VERSION, MATRIX_INPUT_VERSION),
+        'frozen evaluation input ref type/version mismatch')
     _require(Path(value.uri).is_absolute(), 'fixed absolute frozen input locator required')
     return value
 
@@ -81,6 +83,8 @@ def _root_id(root):
             return [locations(v) for v in item]
         return item
     body['admission_receipt'] = locations(receipt)
+    if root['contract_version'] == MATRIX_INPUT_VERSION:
+        body['raw_metadata'] = locations(body['raw_metadata'])
     return digest(body)
 
 
@@ -183,16 +187,23 @@ def _shard(admission, scope, day):
                 prediction['feature_available_at'] = (max(clocks).isoformat().replace('+00:00', 'Z') if clocks else None)
                 prediction['feature_source_refs'] = deepcopy(feature['source_refs'])
             predictions[name] = prediction
-        rows.append({'security_id': security, 'member': member,
+        frozen_row = {'security_id': security, 'member': member,
             'label': {k: deepcopy(label.get(k)) for k in LABEL_FIELDS},
-            'predictions': predictions})
-    return {'contract_version': 'stock_signal_evaluation_date_v1', 'session': day, 'rows': rows}
+            'predictions': predictions}
+        if 'label_leaf_bindings' in admission:
+            frozen_row['label_leaf_ref'] = admission['label_leaf_bindings'][key]
+        rows.append(frozen_row)
+    version = 'stock_signal_evaluation_date_v2' if 'label_leaf_bindings' in admission else 'stock_signal_evaluation_date_v1'
+    return {'contract_version': version, 'session': day, 'rows': rows}
 
 
-def save_stock_signal_evaluation_inputs(signal_inputs, *, raw_label_input, scope, destination):
+def save_stock_signal_evaluation_inputs(signal_inputs, *, raw_label_input=None, scope, destination, batch=None):
     """Fully admit original sources, then atomically freeze the small projection."""
     scope = _scope(scope)
     _require(type(signal_inputs) is dict and bool(signal_inputs), 'ordered Signal mapping required')
+    if batch is not None:
+        from .stock_signal_evaluation_matrix import _save_matrix_inputs
+        return _save_matrix_inputs(signal_inputs, raw_label_input, scope, destination, batch)
     pins, source_marks = _source_pins(signal_inputs, raw_label_input)
     admitted = _admit_inputs(signal_inputs, raw_label_input, scope)
     observed = _records(admitted['closures'])
@@ -249,6 +260,9 @@ def save_stock_signal_evaluation_inputs(signal_inputs, *, raw_label_input, scope
 
 
 def _verify_root(root, ref, scope):
+    if ref.artifact_contract_version == MATRIX_INPUT_VERSION:
+        from .stock_signal_evaluation_matrix import _verify_matrix_root
+        return _verify_matrix_root(root, ref, scope)
     _require(type(root) is dict and set(root) == ROOT_FIELDS and root['contract_version'] == INPUT_VERSION,
              'frozen input root contract mismatch')
     _require(root['input_id'] == ref.artifact_id == _root_id(root), 'frozen input identity mismatch')
@@ -324,22 +338,32 @@ def _load_inputs(input_ref, scope, *, marks=None):
     positions = {day: i for i, day in enumerate(base['calendar'])}
     wanted = set(scope['universe'])
     cutoff = _instant(scope['evaluation_cutoff'])
-    raw = root['raw_metadata']; raw_cutoff = _instant(raw['source_context']['derivation']['decision_cutoff'])
+    raw = root['raw_metadata']; matrix = ref.artifact_contract_version == MATRIX_INPUT_VERSION
+    if matrix:
+        from .stock_signal_evaluation_matrix import _matrix_label_context
+        label_context = _matrix_label_context(root)
+    raw_cutoff = None if matrix else _instant(raw['source_context']['derivation']['decision_cutoff'])
     for day in scope['sessions']:
         descriptor = root['shards'][day]
         shard, _ = _read_checked(Path(ref.uri).parent/descriptor['file'], descriptor['file_digest'], marks=marks)
         _require(set(shard) == {'contract_version', 'session', 'rows'} and
-            shard['contract_version'] == 'stock_signal_evaluation_date_v1' and shard['session'] == day and
+            shard['contract_version'] == ('stock_signal_evaluation_date_v2' if matrix else 'stock_signal_evaluation_date_v1') and
+            shard['session'] == day and
             type(shard['rows']) is list and [r['security_id'] for r in shard['rows']] == base['universe'],
             'frozen shard complete ordered keys required')
         for row in shard['rows']:
-            _require(set(row) == {'security_id', 'member', 'label', 'predictions'} and
+            row_fields = {'security_id', 'member', 'label', 'predictions'} | ({'label_leaf_ref'} if matrix else set())
+            _require(set(row) == row_fields and
                 (row['member'] is None or type(row['member']) is bool) and set(row['predictions']) == set(names),
                 'frozen membership/prediction fields mismatch')
             key = row['security_id'], day
             label = row['label']
-            _require(set(label) == LABEL_FIELDS and (label['security_id'], label['feature_session']) == key and
-                type(label['valid']) is bool and label['source_refs'] == [raw['source_ref']], 'frozen Label key/source mismatch')
+            if matrix:
+                from .stock_signal_evaluation_matrix import _validate_matrix_label
+                _validate_matrix_label(root, row, key, label_context)
+            else:
+                _require(set(label) == LABEL_FIELDS and (label['security_id'], label['feature_session']) == key and
+                    type(label['valid']) is bool and label['source_refs'] == [raw['source_ref']], 'frozen Label key/source mismatch')
             for field, offset in (('start_session', 1), ('end_session', raw['label_spec']['horizon_sessions'])):
                 i = positions[day] + offset
                 _require(label[field] == (base['calendar'][i] if i < len(base['calendar']) else None),
@@ -347,7 +371,7 @@ def _load_inputs(input_ref, scope, *, marks=None):
             if label['valid']:
                 _require(_finite(label['return']) and label['invalid_reason'] is None and
                     label['start_session'] is not None and label['end_session'] is not None and
-                    _instant(label['label_available_at']) <= raw_cutoff, 'frozen valid Label value/clock mismatch')
+                    (matrix or _instant(label['label_available_at']) <= raw_cutoff), 'frozen valid Label value/clock mismatch')
             else:
                 _require(label['return'] is None and bool(label['invalid_reason']), 'frozen invalid Label null/reason mismatch')
             for name, prediction in row['predictions'].items():
@@ -391,6 +415,9 @@ def _load_inputs(input_ref, scope, *, marks=None):
                     projected[name]['rows'][key] = prediction
             if key[0] in wanted:
                 labels[key] = label; shared_members[key] = {'member': row['member']}
+        if matrix:
+            from .stock_signal_evaluation_matrix import _label_day_ref
+            _require(raw['label_shard_refs'][day] == _label_day_ref(shard), 'frozen matrix Label date binding mismatch')
     _check_marks(marks)
     admission = {'projected': projected, 'labels': labels, 'raw': raw,
         'refs': {name: root['signal_refs'][name] for name in names}, 'closures': _expand_closure(root['admission_receipt'])}
@@ -399,6 +426,9 @@ def _load_inputs(input_ref, scope, *, marks=None):
 
 def _audit_input(input_ref):
     ref = _input_ref(input_ref)
+    if ref.artifact_contract_version == MATRIX_INPUT_VERSION:
+        from .stock_signal_evaluation_matrix import _audit_matrix_input
+        return _audit_matrix_input(ref)
     root, _ = _read_checked(ref.uri, ref.content_digest)
     marks = {}
     _, root, _ = _load_inputs(ref, root['scope'], marks=marks)
@@ -422,18 +452,21 @@ def _audit_input(input_ref):
     return ref
 
 
-def _implementation_v3():
+def _implementation_v3(matrix=False):
     module = import_module('axiom_engine.core.signal_statistics')
     core = Path(module.__file__).parent
     names = ('stock_signal_evaluation.py', 'stock_signal_evaluation_inputs.py',
              'stock_artifacts.py', 'stock_label_contracts.py', 'stock_signal_evaluation_projection.py')
+    if matrix:
+        names += ('stock_signal_evaluation_matrix.py',)
     return {'research': {name: file_digest(Path(__file__).parent/name) for name in names},
         'core': {name: file_digest(core/name) for name in ('signal_statistics.py', 'contracts.py')},
         'operator': 'axiom_engine.core.evaluate_signal_statistics'}
 
 
 def _group_key(group):
-    return digest({'contract_version': 'stock_signal_evidence_v3',
+    version = _input_ref(group['input_ref']).artifact_contract_version
+    return digest({'contract_version': 'stock_signal_evidence_v4' if version == MATRIX_INPUT_VERSION else 'stock_signal_evidence_v3',
         'input_identity': semantic_identity(_input_ref(group['input_ref'])),
         **{key: group[key] for key in ('scope', 'signal_order', 'spec_ref', 'sample_mask_ref',
             'common_input_ref', 'native_input_ref', 'implementation_ref')}})
@@ -452,6 +485,7 @@ def _group_definition(ref, root, admitted, implementation):
 
 
 def _reports_v3(group, admitted, common, native):
+    matrix = _input_ref(group['input_ref']).artifact_contract_version == MATRIX_INPUT_VERSION
     reports = {}
     counts = Counter(day for _, day in admitted['common_keys'])
     for name, key in admitted['signal_keys'].items():
@@ -469,8 +503,8 @@ def _reports_v3(group, admitted, common, native):
             row['valid_pair_count'] = counts[row['session']]
         coverage.update(comparison_mode='common_valid_key_intersection', native=own_native,
             common_statistics_ref=common['statistics_ref'], native_statistics_ref=native['statistics_ref'])
-        report = {'contract_version': 'stock_signal_evidence_v3',
-            'validation_basis': 'frozen_projection_v1', 'evaluation_key': group['evaluation_key'],
+        report = {'contract_version': 'stock_signal_evidence_v4' if matrix else 'stock_signal_evidence_v3',
+            'validation_basis': 'frozen_projection_v2' if matrix else 'frozen_projection_v1', 'evaluation_key': group['evaluation_key'],
             'input_signal_refs': admitted['refs'][name], 'input_evidence': {
                 'input_ref': group['input_ref'], 'signal_name': name,
                 'admission_receipt_ref': group['admission_receipt_ref']},
@@ -485,6 +519,8 @@ def _reports_v3(group, admitted, common, native):
                 'Label spec is copied from the saved Raw Label build; absent unit fields remain absent.'],
             'implementation_ref': group['implementation_ref']}
         report['evidence_ref'] = digest({'evaluation_key': group['evaluation_key'], 'signal_name': name})
+        if matrix:
+            report['limitations'][-1] = 'Evaluation targets are independent of training targets; exact original Label specs and slice lineage remain in the frozen input.'
         report['content_digest'] = digest(report)
         reports[name] = report
     return reports
@@ -548,7 +584,7 @@ def evaluate_stock_signal_inputs(input_ref, *, scope, destination):
     marks = {}
     prepared = _load_inputs(input_ref, scope, marks=marks)
     ref, root, admitted = prepared
-    group = _group_definition(ref, root, admitted, _implementation_v3())
+    group = _group_definition(ref, root, admitted, _implementation_v3(ref.artifact_contract_version == MATRIX_INPUT_VERSION))
     destination = Path(destination).resolve(); target = destination/group['evaluation_key'][7:]
     if target.exists():
         return _load_group(target, prepared=prepared, marks=marks, expected_key=group['evaluation_key'], reused=True)
