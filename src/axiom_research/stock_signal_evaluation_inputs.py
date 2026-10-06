@@ -245,7 +245,7 @@ def _saved_signal(descriptor, scope, *, batch=None):
     return {'signal': signal, 'rows': indexed, 'members': feature_index,
         'snapshot': snapshot, 'pit': pit, 'source_records': _source_records(root),
         'metadata': {'signal_contract_version': version, 'signal_run_ref': signal['signal_run_ref'],
-            'prediction_sessions': list(dates),
+            'prediction_sessions': sorted(set(dates)),
             'signal_stage': signal['signal_stage'], 'score_unit': signal['score_unit'],
             'score_semantics': signal['score_semantics'], 'model': model,
             'feature_contract_version': feature.get('contract_version'), 'feature_ref': feature['feature_ref'],

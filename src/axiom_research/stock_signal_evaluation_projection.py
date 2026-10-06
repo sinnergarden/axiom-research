@@ -275,6 +275,7 @@ def _verify_root(root, ref, scope):
         spec.get('label_id') == f"forward_{spec['horizon_sessions']}_session_open_close_v1" and
         spec.get('start_price') == 'open' and spec.get('end_price') == 'close', 'frozen Raw Label semantics mismatch')
     context = raw['source_context']
+    by_day = {name: {} for name in names}
     for name in names:
         metadata = root['signal_metadata'][name]
         sources = expanded[name]
@@ -292,6 +293,12 @@ def _verify_root(root, ref, scope):
                 meta['score_semantics'] == meta['model']['target_semantics'] and
                 meta['snapshot'] == context['snapshot_id'] and meta['pit_policy'] == context['query']['pit_policy'],
                 'frozen Signal model/stage/Snapshot/PIT mismatch')
+            dates = meta['prediction_sessions']
+            _require(type(dates) is list and bool(dates) and dates == sorted(set(dates)) and
+                set(dates) <= set(base['calendar']), 'frozen Signal ordered date coverage mismatch')
+            for day in dates:
+                _require(day not in by_day[name], 'frozen weekly Signal date overlap')
+                by_day[name][day] = meta
     _require(root['clock_floor'] == _clock_floor(root['signal_metadata'], raw) and
         _instant(scope['evaluation_cutoff']) >= _instant(root['clock_floor']),
         'evaluation cutoff precedes frozen source revision/Signal visibility')
@@ -299,13 +306,14 @@ def _verify_root(root, ref, scope):
     for day, descriptor in root['shards'].items():
         _require(set(descriptor) == {'file', 'file_digest'} and descriptor['file'] == day + '.json',
                  'frozen shard locator mismatch')
+    return by_day
 
 
 def _load_inputs(input_ref, scope, *, marks=None):
     ref = _input_ref(input_ref); scope = _scope(scope)
     marks = {} if marks is None else marks
     root, _ = _read_checked(ref.uri, ref.content_digest, marks=marks)
-    _verify_root(root, ref, scope)
+    metadata_by_day = _verify_root(root, ref, scope)
     names, base = root['signal_order'], root['scope']
     shared_members, labels = {}, {}
     projected = {name: {'rows': {}, 'members': shared_members} for name in names}
@@ -352,11 +360,9 @@ def _load_inputs(input_ref, scope, *, marks=None):
                 _require(feature_knowledge <= knowledge and
                     (feature_available is None or _instant(feature_available) <= feature_knowledge),
                     'frozen Feature dependency clock mismatch')
-                candidates = [m for m in root['signal_metadata'][name]
-                              if day in m['prediction_sessions'] and m['model']['model_ref'] in prediction['source_refs']
-                              and m['feature_ref'] in prediction['source_refs']]
-                _require(len(candidates) == 1, 'frozen Signal original model/Feature mismatch')
-                meta = candidates[0]
+                meta = metadata_by_day[name].get(day)
+                _require(meta is not None and meta['model']['model_ref'] in prediction['source_refs'] and
+                    meta['feature_ref'] in prediction['source_refs'], 'frozen Signal original model/Feature mismatch')
                 _require(_instant(meta['evaluation_clock_floor']) >= knowledge,
                          'frozen Signal admission clock floor mismatch')
                 _require(_instant(meta['model']['fit_cutoff']) <= available, 'frozen model fit clock mismatch')
