@@ -94,6 +94,46 @@ class NativeCarrierTests(unittest.TestCase):
             with self.subTest(type=type(value)):
                 self.assertEqual(native_digest(value, maximum_workspace_bytes=WORKSPACE), old_digest(value))
 
+    def test_budgeted_ordinary_subtrees_use_exact_stdlib_bytes(self):
+        metrics={}
+        value={'mixed':[True,1,-0.0,0.0,None,'甲𝄞\n"\\'],
+               'rows':[{'k':i,'v':i/7} for i in range(40)]}
+        self.assertEqual(native_digest(value,maximum_workspace_bytes=WORKSPACE,metrics=metrics),old_digest(value))
+        self.assertEqual(metrics['ordinary_encode_calls'],1)
+        self.assertEqual(metrics['ordinary_encode_bytes'],len(canonical(value)))
+        self.assertEqual(metrics['native_hash_bytes'],len(canonical(value)))
+        self.assertLessEqual(metrics['peak_combined_workspace_bytes'],WORKSPACE)
+
+    def test_ordinary_encoder_never_swallows_nested_coverage_binding(self):
+        coverage={'proof':[True,1,-0.0,'甲']}
+        path=self.root/'nested.bin';path.write_bytes(canonical(coverage))
+        ref='sha256:'+sha256(path.read_bytes()).hexdigest()
+        desc={'path':str(path),'file_digest':ref,'buffer_digest':ref,'dtype':'uint8','shape':[path.stat().st_size]}
+        context={'query':'fixed'}
+        skeleton={'ordinary':[True,1,-0.0],'nested':[{'context':context}]}
+        original={'ordinary':[True,1,-0.0],'nested':[{'context':{**context,'coverage':coverage}}]}
+        metrics={}
+        self.assertEqual(native_digest(skeleton,coverage_bindings=((context,desc),),
+            maximum_workspace_bytes=WORKSPACE,metrics=metrics),old_digest(original))
+        self.assertEqual(metrics['coverage_replay_calls'],1)
+        self.assertGreater(metrics['ordinary_encode_calls'],0)
+        path.write_bytes(b'x'*path.stat().st_size)
+        with self.assertRaisesRegex(ValueError,'coverage replay digest mismatch'):
+            native_digest(skeleton,coverage_bindings=((context,desc),),maximum_workspace_bytes=WORKSPACE)
+
+    def test_ordinary_encoding_does_not_borrow_mutable_caller_graph(self):
+        import axiom_research.stock_native_json as native
+        value={'nested':[{'v':-0.0,'flag':False}]};expected=old_digest(value)
+        original_dumps=json.dumps
+        def mutate_original_before_encoding(snapshot,**kwargs):
+            self.assertIsNot(snapshot,value)
+            self.assertIsNot(snapshot['nested'],value['nested'])
+            value['nested'][0].update(v=0.0,flag=0)
+            return original_dumps(snapshot,**kwargs)
+        with patch.object(native.json,'dumps',side_effect=mutate_original_before_encoding):
+            self.assertEqual(native_digest(value,maximum_workspace_bytes=WORKSPACE),expected)
+        self.assertNotEqual(native_digest(value,maximum_workspace_bytes=WORKSPACE),expected)
+
     def test_three_holders_preserve_native_and_children_refs(self):
         coverage = {'observed': [{'security': '甲', 'value': -0.0}, {'value': None}], 'complete': True}
         for value, ref_key in ((raw(coverage), 'label_ref'), (label(coverage), 'metadata_ref'),

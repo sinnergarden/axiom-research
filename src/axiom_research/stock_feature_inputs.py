@@ -6,6 +6,7 @@ import errno
 import math
 import tempfile
 import time
+import sys
 
 from .stock_artifacts import digest, file_digest, _read, _verify_ref, write_json
 from .stock_fold_inputs import (require, ordered, read_parent, seal,
@@ -371,21 +372,55 @@ def _write_feature_matrix_block(target, *, rows, proof, spec, view, schema, inde
                                 metrics=None, descriptor_mapper=None, path_resolver=None):
     from .stock_matrix_storage import instant_us, write_buffer, write_part, write_partition
     from .stock_native_json import native_digest, make_native_carrier
-    from .stock_matrix_reader import _resident_size
+    from .stock_matrix_reader import _resident_size, _raw_snapshot_reservation, VerifiedMatrixStore
     maximum=options.get('maximum_resident_bytes',512*1024**2)
-    external=0 if caller_retained_bytes is None else caller_retained_bytes()
+    def external():
+        value=0 if caller_retained_bytes is None else caller_retained_bytes()
+        require(type(value) is int and value>=0,'nonnegative writer caller retained bytes required')
+        return value
+    # Cache only an owned snapshot. External callbacks cannot mutate its
+    # descendants; the pure assembly/validator phase never mutates them.
+    incoming=[rows,proof,spec,view,schema]
+    original_owned=_resident_size(incoming)
+    with VerifiedMatrixStore(maximum_matrix_bytes=maximum,_caller_retained_bytes=external) as owner:
+        reservation=_raw_snapshot_reservation(incoming,owner)
+        require(owner._native_caller_bytes(incoming)+reservation<=maximum,
+                'Feature writer private snapshot budget exceeded')
+        rows,proof,spec,view,schema=deepcopy(incoming)
+    del incoming
     days = [p['session'] for p in proof]
     # Core's rows may use its documented key order. Storage always keys them into
     # the one declared day-major grid, preserving every value/flag/reason.
     by_key = {(r['security_id'],r['session']):r for r in rows}
     require(len(by_key) == len(rows), 'duplicate matrix Feature row')
     rows = [by_key[s,d] for d in days for s in spec['universe']]
-    retained=external+_resident_size([rows,proof,spec,view,schema,days,by_key])
+    retained=original_owned+_resident_size([rows,proof,spec,view,schema,days,by_key])
+    memo={};memo_bytes=0
     def original_digest(value):
+        nonlocal memo_bytes
         tick = time.perf_counter_ns()
         try:
-            return native_digest(value,maximum_workspace_bytes=maximum,
-                caller_retained_bytes=lambda:retained,metrics=metrics,path_resolver=path_resolver)
+            require(retained+external()+memo_bytes+4096+
+                    (256*len(value) if type(value) in (dict,list) else 0)<=maximum,
+                    'Feature writer digest memo key budget exceeded')
+            # Shallow wrappers such as [proof_day] and metadata without its
+            # self ref may be rebuilt. Equal keys with the same private child
+            # objects describe exactly the same immutable canonical graph.
+            key=('dict',tuple((k,id(v)) for k,v in sorted(value.items()))) if type(value) is dict else (
+                ('list',tuple(id(v) for v in value)) if type(value) is list else None)
+            require(retained+external()+memo_bytes+4096<=maximum,'Feature writer digest memo budget exceeded')
+            if key is not None and key in memo:
+                if metrics is not None: metrics['feature_writer_digest_cache_hits']=metrics.get('feature_writer_digest_cache_hits',0)+1
+                return memo[key][1]
+            result=native_digest(value,maximum_workspace_bytes=maximum,
+                caller_retained_bytes=lambda:retained+external()+memo_bytes+4096,
+                metrics=metrics,path_resolver=path_resolver)
+            if key is not None:
+                charge=_resident_size([key,result])+sys.getsizeof(value)+512
+                require(retained+external()+memo_bytes+charge+4096<=maximum,'Feature writer digest memo budget exceeded')
+                memo[key]=(value,result) # strong ownership prevents id recycling
+                memo_bytes+=charge
+            return result
         finally:
             if metrics is not None:
                 metrics['feature_writer_digest_calls'] = metrics.get('feature_writer_digest_calls',0)+1
@@ -399,14 +434,17 @@ def _write_feature_matrix_block(target, *, rows, proof, spec, view, schema, inde
         'row_references':{day:{'feature_ref':_feature_wire([by_key[s,day] for s in spec['universe']],
                 [p],spec,view,digest_fn=original_digest)['feature_ref'],'qlib_view_ref':digest(view)} for day,p in zip(days,proof)},
         'input_evidence':proof,'original_feature_ref':original['feature_ref'],'contents':contents}
-    retained=external+_resident_size([rows,proof,spec,view,schema,days,by_key,original,
+    retained=original_owned+_resident_size([rows,proof,spec,view,schema,days,by_key,original,
                                       contents,feature_rows,metadata])
     metadata['metadata_ref']=original_digest(metadata)
     _validate_feature_matrix_block(metadata,rows,spec,view,universe_id=universe_id,
                                   digest_fn=original_digest,metrics=metrics)
+    # Carrier creation has external mapper/resolver hooks and independent
+    # restored/file checks. It never consumes the assembly-phase memo.
+    memo.clear();memo_bytes=0
     md=make_native_carrier(target,metadata,'metadata_ref',maximum_source_bytes=8*1024**3,
         maximum_parent_bytes=DEFAULT_LIMITS['maximum_parent_bytes'],maximum_workspace_bytes=maximum,
-        caller_retained_bytes=lambda:retained,metrics=metrics,
+        caller_retained_bytes=lambda:retained+external(),metrics=metrics,
         descriptor_mapper=descriptor_mapper,path_resolver=path_resolver)
     if md is None: md=write_part(target,metadata,'metadata_ref')
     _bounded(md['path'],DEFAULT_LIMITS); parts=[]

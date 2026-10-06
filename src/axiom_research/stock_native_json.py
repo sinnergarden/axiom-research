@@ -23,7 +23,7 @@ _SHA = re.compile(r'^sha256:[0-9a-f]{64}$')
 _SCALAR_COUNTERS = ('peak_workspace_bytes', 'peak_combined_workspace_bytes',
     'native_hash_calls', 'native_hash_bytes', 'carrier_hash_calls', 'carrier_hash_bytes',
     'coverage_replay_calls', 'coverage_replay_bytes', 'coverage_encode_calls',
-    'coverage_encode_bytes', 'created_coverage_source_bytes')
+    'coverage_encode_bytes', 'created_coverage_source_bytes', 'ordinary_encode_calls', 'ordinary_encode_bytes')
 _REF_COUNTERS = ('native_hash_calls_by_ref', 'carrier_hash_calls_by_ref')
 
 
@@ -255,8 +255,69 @@ def _registry(bindings, budget):
     return out
 
 
+def _ordinary_reservation(value, budget, registry, *, exclude=None):
+    """Bound a small ordinary subtree before invoking the stdlib C encoder.
+
+    No coverage binding can occur below it. Large/deep subtrees keep the
+    existing stream; this scan stops as soon as its bounded allowance is used.
+    """
+    limit=min(1024*1024,max(0,budget.room()))
+    encoded,controls=0,4096
+    def visit(item, depth=0, is_root=False):
+        nonlocal encoded,controls
+        budget.check(controls+512*(depth+1))
+        if depth>32 or encoded*9+controls>limit: return False
+        kind=type(item)
+        if kind is dict:
+            binding=registry.get(id(item))
+            if binding is not None:
+                _require(binding[0] is item,'coverage object identity mismatch')
+                return False
+            _require(all(type(key) is str for key in item),'native JSON object keys must be strings')
+            encoded+=2+2*len(item);controls+=256+128*len(item)
+            if encoded*9+controls>limit: return False
+            budget.check(controls+512*(depth+1))
+            snapshot={}
+            for key,child in item.items():
+                if is_root and key==exclude: continue
+                copied_key=visit(key,depth+1);copied_child=visit(child,depth+1)
+                if copied_key is False or copied_child is False: return False
+                snapshot[key]=copied_child[0]
+        elif kind in (list,tuple):
+            encoded+=2+len(item);controls+=256+32*len(item)
+            if encoded*9+controls>limit: return False
+            budget.check(controls+512*(depth+1))
+            snapshot=[]
+            for child in item:
+                copied=visit(child,depth+1)
+                if copied is False:return False
+                snapshot.append(copied[0])
+        elif kind is str: encoded+=2+6*len(item);snapshot=item
+        else:
+            _require(item is None or kind in (bool,int,float),'unsupported native JSON scalar')
+            _require(kind is not float or math.isfinite(item),'nonfinite native JSON scalar')
+            encoded+=item.bit_length()+3 if kind is int else 32
+            snapshot=item
+        return (snapshot,) if encoded*9+controls<=limit else False
+    result=visit(value,is_root=True)
+    if result is False: return None
+    return encoded*9+controls,result[0]
+
+
 def _json_chunks(value, *, budget, registry, path_resolver, exclude=None, root=True):
     with budget.hold(256):
+        reservation=_ordinary_reservation(value,budget,registry,exclude=exclude if root else None)
+        if reservation is not None:
+            # Unicode construction/join, UTF-8 bytes, sorted-key storage and
+            # encoder controls are reserved together. Holes never enter dumps.
+            amount,ordinary=reservation
+            with budget.hold(amount):
+                chunk=json.dumps(ordinary,sort_keys=True,separators=(',',':'),
+                                 ensure_ascii=False,allow_nan=False).encode('utf-8')
+                budget.increment('ordinary_encode_calls')
+                budget.increment('ordinary_encode_bytes',len(chunk))
+                yield chunk
+            return
         if type(value) is dict:
             _require(all(type(key) is str for key in value), 'native JSON object keys must be strings')
             binding = registry.get(id(value))

@@ -111,10 +111,60 @@ class MatrixStorageTests(unittest.TestCase):
                     for name in ('feature_plan_hash_ns','feature_writer_digest_ns','feature_writer_ns'):
                         self.assertGreater(stats[name],0)
                     self.assertGreater(stats['feature_writer_digest_calls'],0)
+                    self.assertGreater(stats['feature_writer_digest_cache_hits'],0)
                     self.assertGreater(stats['native_hash_calls'],0)
                 self.assertEqual(saved.row_metadata(list(range(9))),
                                  [r for d in fixture.days for r in fixture.day(d)[0]])
             finally: saved.close()
+
+    def test_writer_memo_owns_snapshot_and_is_not_reused_after_original_mutation(self):
+        from axiom_research import stock_feature_inputs as feature
+        with tempfile.TemporaryDirectory() as temp:
+            fixture=SyntheticWideInputs(Path(temp),6)
+            rows=[];proof=[]
+            for day in fixture.days[:2]:
+                day_rows,evidence=fixture.day(day)
+                next(iter(evidence['source_evidence'].values()))['query_context']['coverage']={'typed':[-0.0,False]}
+                rows.extend(day_rows);proof.append(evidence)
+            frozen=deepcopy(proof);expected=feature._feature_wire(rows,frozen,fixture.spec,fixture.view)['feature_ref']
+            schema=[{'name':c,'dtype':'float64','unit':'dimensionless','stage':'cross_sectional','missing':'preserve'} for c in fixture.columns]
+            def mutate_original_after_snapshot(value):
+                snapshot=deepcopy(value)
+                next(iter(proof[0]['source_evidence'].values()))['query_context']['coverage']['typed']=[0.0,0]
+                return snapshot
+            def write(destination,metrics):
+                destination.mkdir()
+                return feature._write_feature_matrix_block(destination,rows=rows,proof=proof,
+                    spec=fixture.spec,view=fixture.view,schema=schema,index_ref=digest('index'),
+                    row_offset=0,options={'maximum_resident_bytes':64*1024**2,'column_block':32},
+                    universe_id=fixture.universe_id,metrics=metrics)
+            metrics={}
+            with patch.object(feature,'deepcopy',side_effect=mutate_original_after_snapshot):
+                first,source_rows=write(Path(temp)/'first',metrics)
+            carrier=_read(first[0]['metadata']['path'])
+            self.assertEqual(carrier['skeleton']['original_feature_ref'],expected)
+            self.assertGreater(metrics['feature_writer_digest_cache_hits'],0)
+            # Original + restored checks remain real; assembly/validator share one.
+            self.assertEqual(metrics['native_hash_calls_by_ref'][first[0]['metadata']['metadata_ref']],3)
+            for row in source_rows:
+                self.assertEqual(metrics['native_hash_calls_by_ref'][row['selected_versions_ref']],2)
+            second,unused=write(Path(temp)/'second',{})
+            self.assertNotEqual(first[0]['metadata']['metadata_ref'],second[0]['metadata']['metadata_ref'])
+
+    def test_tuple_coverage_copy_budget_rejects_before_snapshot_allocation(self):
+        from axiom_research import stock_feature_inputs as feature
+        with tempfile.TemporaryDirectory() as temp:
+            fixture=SyntheticWideInputs(Path(temp),6)
+            rows,proof=fixture.day(fixture.days[0])
+            next(iter(proof['source_evidence'].values()))['query_context']['coverage']=(
+                [{'key':str(i),'children':[i,i+1]} for i in range(2000)],)
+            schema=[{'name':c,'dtype':'float64','unit':'dimensionless','stage':'cross_sectional','missing':'preserve'} for c in fixture.columns]
+            with patch.object(feature,'deepcopy',side_effect=AssertionError('overbudget private copy allocated')):
+                with self.assertRaisesRegex(ValueError,'workspace budget|snapshot budget'):
+                    feature._write_feature_matrix_block(Path(temp),rows=rows,proof=[proof],
+                        spec=fixture.spec,view=fixture.view,schema=schema,index_ref=digest('index'),row_offset=0,
+                        options={'maximum_resident_bytes':2*1024**2,'column_block':32},
+                        universe_id=fixture.universe_id)
 
     def test_same_day_plan_is_hashed_once_and_last_security_source_is_checked(self):
         from axiom_research import stock_feature_inputs as feature

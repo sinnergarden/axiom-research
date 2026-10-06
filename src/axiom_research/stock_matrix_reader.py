@@ -1328,7 +1328,7 @@ def _raw_snapshot_reservation(raw, store):
         if type(value) is dict:
             containers+=1
             stack.append(iter(value.keys())); stack.append(iter(value.values()))
-        elif type(value) is list:
+        elif type(value) in (list,tuple):
             containers+=1; stack.append(iter(value))
         maximum_depth=max(maximum_depth,len(stack))
     # Twice the original graph covers result/table growth; 256 per mutable
