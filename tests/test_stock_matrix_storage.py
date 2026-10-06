@@ -91,6 +91,61 @@ class MatrixStorageTests(unittest.TestCase):
             self.assertEqual(_read(desc['path']),part)
             self.assertNotEqual(desc['file_digest'],desc['metadata_ref'])
 
+    def test_block_progress_retains_writer_hash_stats_without_mutable_alias(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture=SyntheticWideInputs(Path(temp),6)
+            updates=[]
+            def progress(update):
+                if update['stage']=='feature_matrix_block':
+                    updates.append(deepcopy(update))
+                    update['producer_stats']['core_calls']=999
+            saved=fixture.matrix(progress=progress)
+            try:
+                self.assertEqual([u['completed_dates'] for u in updates],[2,3])
+                for block,update in enumerate(updates,1):
+                    stats=update['producer_stats']
+                    self.assertEqual(stats['core_calls'],update['completed_dates'])
+                    self.assertEqual(stats['feature_plan_hash_calls'],update['completed_dates'])
+                    self.assertEqual(stats['feature_writer_blocks'],block)
+                    self.assertEqual(stats['prepare_matrix_qlib_seconds'],0.0)
+                    for name in ('feature_plan_hash_ns','feature_writer_digest_ns','feature_writer_ns'):
+                        self.assertGreater(stats[name],0)
+                    self.assertGreater(stats['feature_writer_digest_calls'],0)
+                    self.assertGreater(stats['native_hash_calls'],0)
+                self.assertEqual(saved.row_metadata(list(range(9))),
+                                 [r for d in fixture.days for r in fixture.day(d)[0]])
+            finally: saved.close()
+
+    def test_same_day_plan_is_hashed_once_and_last_security_source_is_checked(self):
+        from axiom_research import stock_feature_inputs as feature
+        with tempfile.TemporaryDirectory() as temp:
+            fixture=SyntheticWideInputs(Path(temp),6)
+            saved=fixture.matrix()
+            try:
+                metadata=_read(saved.to_dict()['partitions'][0]['metadata']['path'])
+                days=metadata['sessions']
+                rows=[r for d in days for r in fixture.day(d)[0]]
+                plan_ids={id(p['core_plan']) for p in metadata['input_evidence']}
+                counted=[]
+                def counting_digest(value):
+                    if id(value) in plan_ids: counted.append(id(value))
+                    return digest(value)
+                with patch.object(feature,'digest',side_effect=counting_digest):
+                    feature._validate_feature_matrix_block(metadata,rows,fixture.spec,fixture.view,
+                                                          universe_id=fixture.universe_id)
+                self.assertEqual(sorted(counted),sorted(plan_ids))
+            finally: saved.close()
+        with tempfile.TemporaryDirectory() as temp:
+            fixture=SyntheticWideInputs(Path(temp),6)
+            original_day=fixture.day
+            def corrupt_last_security(day):
+                rows,proof=original_day(day)
+                rows[-1]['source_refs'][1]=digest('unrelated Core plan')
+                return rows,proof
+            fixture.day=corrupt_last_security
+            with self.assertRaisesRegex(ValueError,'Feature matrix Core source mismatch'):
+                fixture.matrix()
+
     def test_same_writer_route_at_six_158_and_300_columns(self):
         for width in (6,158,300):
             with self.subTest(width=width),tempfile.TemporaryDirectory() as temp:

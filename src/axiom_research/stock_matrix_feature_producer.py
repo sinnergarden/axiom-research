@@ -45,8 +45,13 @@ def _owned_bytes(value, seen=None):
     return amount
 
 
-def _batch_bytes(batch):
-    return int(batch.frame.memory_usage(deep=True).sum())+_owned_bytes([batch.field_meta, batch.context])
+def _batch_bytes(batch, *, stats=None):
+    tick = time.perf_counter_ns()
+    amount = int(batch.frame.memory_usage(deep=True).sum())+_owned_bytes([batch.field_meta, batch.context])
+    if stats is not None:
+        stats['reader_batch_size_measurements'] = stats.get('reader_batch_size_measurements',0)+1
+        stats['reader_batch_size_measurement_ns'] = stats.get('reader_batch_size_measurement_ns',0)+time.perf_counter_ns()-tick
+    return amount
 
 
 def _caller_bytes(getter):
@@ -129,7 +134,7 @@ class _NativeWindow:
         import pandas as pd
         from axiom_data import DataBatch
         # Reject a large coverage/source graph before to_json duplicates it.
-        reserve = self.bytes+retained_bytes+2*_batch_bytes(batch)+len(batch.frame)*len(FIELDS)*32
+        reserve = self.bytes+retained_bytes+2*_batch_bytes(batch,stats=stats)+len(batch.frame)*len(FIELDS)*32
         _guard_resident(reserve, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
             caller_retained_bytes=caller_retained_bytes, reason='Reader projection working set exceeds resident budget')
         begin = time.perf_counter_ns()
@@ -361,10 +366,33 @@ def _core_view_bounds(plan, facts, context):
         input_sources=input_sources, reference_sources={row['source'] for row in context['reference']})
 
 
+def _measure_owned_bytes(value, *, stats, kind):
+    tick = time.perf_counter_ns()
+    amount = _owned_bytes(value)
+    stats[kind+'_size_measurements'] = stats.get(kind+'_size_measurements', 0)+1
+    stats[kind+'_size_measurement_ns'] = stats.get(kind+'_size_measurement_ns', 0)+time.perf_counter_ns()-tick
+    return amount
+
+
+def _seal_pending_view(request, evidence, members, workspace, output_reserve, *, stats):
+    # These private objects have no caller alias. Documents are immutable and
+    # evidence/members remain read-only until this entry is removed at delivery.
+    # Cache only this owned lifetime, never an id/ref for an external graph.
+    view = (request, evidence, members, workspace, output_reserve)
+    amount = _measure_owned_bytes(view, stats=stats, kind='pending_view')
+    # Cover the extra tuple slot, cached integer and accounting scalar headers.
+    # Separate views are measured separately: shared children are overcounted.
+    return (*view, amount+512)
+
+
+def _pending_owned_bytes(pending):
+    return sys.getsizeof(pending)+sum(view[5] for view in pending if view is not None)
+
+
 def _pending_core_bytes(pending):
-    if not pending:
-        return 0
-    return _owned_bytes(pending)+max(view[3] for view in pending)+sum(view[4] for view in pending)
+    views = [view for view in pending if view is not None]
+    return (_pending_owned_bytes(pending)+max((view[3] for view in views), default=0)+
+            sum(view[4] for view in views)+sys.getsizeof(views))
 
 
 def _record_core_batch_stats(stats, actual):
@@ -393,7 +421,8 @@ def _iter_core_feature_batch(pending, *, resident_base, maximum_resident_bytes,
     from axiom_engine.core import execute_feature_plan_batch
     requests = tuple(view[0] for view in pending)
     # A fresh caller check immediately precedes every actual public execution.
-    reserve = resident_base+_pending_core_bytes(pending)+reuse_budget_bytes+_owned_bytes(requests)
+    # Documents/request tuples are already covered by the sealed view charges.
+    reserve = resident_base+_pending_core_bytes(pending)+reuse_budget_bytes+sys.getsizeof(requests)
     _guard_resident(reserve, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
         caller_retained_bytes=caller_retained_bytes, reason='Core batch snapshots/output working set exceeds resident budget')
     stats['core_calls'] += 1
@@ -410,16 +439,19 @@ def _iter_core_feature_batch(pending, *, resident_base, maximum_resident_bytes,
     _record_core_batch_stats(stats, result['stats'])
     frames = list(result['frames'])
     del result, requests
+    frame_charges = [_measure_owned_bytes(frame, stats=stats, kind='core_frame') for frame in frames]
+    remaining_bytes = _pending_owned_bytes(pending)+sys.getsizeof(frames)+sum(frame_charges)
+    charge_controls = _owned_bytes(frame_charges)+512
     stats['core_daily_frames'] += len(frames)
     stats['core_single_output_groups'] += len(frames)
     try:
         for index in range(len(frames)):
-            request, evidence, members, _, output_reserve = pending[index]
+            request, evidence, members, _, output_reserve, view_charge = pending[index]
             plan, facts, context = request
             frame = frames[index]
             # Retain all not-yet-yielded views/Frames in the accounting. Parsing
             # a Frame and building row/proof copies also needs its own reserve.
-            live = resident_base+_owned_bytes([pending, frames])+output_reserve
+            live = resident_base+remaining_bytes+charge_controls+output_reserve
             _guard_resident(live, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature output working graph exceeds resident budget')
             frame_wire = frame.to_dict()
@@ -430,12 +462,15 @@ def _iter_core_feature_batch(pending, *, resident_base, maximum_resident_bytes,
                 'source_refs': [frame.identity, plan.identity]} for row in frame_wire['rows']]
             evidence['core_frame_ref'] = frame.identity
             pending[index] = frames[index] = None
+            remaining_bytes -= view_charge+frame_charges[index]
             del request, plan, facts, context, frame, frame_wire, members
             completed += 1
             if progress is not None:
                 progress({'stage': 'matrix_features', 'completed': completed, 'total': total,
                           'session': day, 'seconds': time.perf_counter()-begin})
-            live = resident_base+_owned_bytes([pending, frames, rows, evidence])
+            # Delivered evidence was just mutated; account it and fresh rows
+            # normally. Only untouched, not-yet-delivered entries use charges.
+            live = resident_base+remaining_bytes+charge_controls+_owned_bytes([rows, evidence])
             _guard_resident(live, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature yield working graph exceeds resident budget')
             stats['yield_live_bytes'] = live
@@ -570,7 +605,7 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                     maximum_resident_bytes=maximum_resident_bytes, reuse_budget_bytes=reuse_budget_bytes,
                     stats=stats, caller_retained_bytes=caller_retained_bytes, progress=progress,
                     completed=completed, total=len(outputs), begin=begin)
-            retained_pending = base+previous_bytes+_owned_bytes(pending)+reuse_budget_bytes
+            retained_pending = base+previous_bytes+_pending_owned_bytes(pending)+reuse_budget_bytes
             _guard_resident(resident_base+_pending_core_bytes(pending)+read_estimate+reuse_budget_bytes,
                 maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='one Reader Feature view exceeds resident budget')
@@ -583,36 +618,43 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                 maximum_resident_bytes=maximum_resident_bytes, retained_bytes=retained_pending,
                 caller_retained_bytes=caller_retained_bytes)
             del source
-            _guard_resident(resident_base+_owned_bytes(pending)+reuse_budget_bytes+_batch_bytes(prices)+read_estimate,
+            prices_bytes = _batch_bytes(prices,stats=stats)
+            _guard_resident(resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes+prices_bytes+read_estimate,
                 maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='one Reader Feature view exceeds resident budget')
             stats['data_read_calls'] += 1
             tick = time.perf_counter_ns()
             source = data.read(snapshot=config['snapshot'], query=factor_query)
             stats['data_read_ns'] += time.perf_counter_ns()-tick
+            # A Data/public adjustment call may retain mutable metadata aliases.
+            # Re-measure after each such boundary; reuse only within this phase.
+            prices_bytes = _batch_bytes(prices,stats=stats)
             factors = window.project(source,
                 view_ref=qlib_inputs['view_reference']['view_id'], stats=stats,
-                maximum_resident_bytes=maximum_resident_bytes, retained_bytes=retained_pending+_batch_bytes(prices),
+                maximum_resident_bytes=maximum_resident_bytes, retained_bytes=retained_pending+prices_bytes,
                 caller_retained_bytes=caller_retained_bytes)
             del source
             # Public adjustment serializes source/derivation lineage. Reserve
             # those copies before calling it, rather than after large wires exist.
-            adjustment_reserve = resident_base+_owned_bytes(pending)+reuse_budget_bytes+24*sum(
-                _batch_bytes(batch) for batch in (prices, factors))
+            factors_bytes = _batch_bytes(factors,stats=stats)
+            adjustment_reserve = resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes+24*(prices_bytes+factors_bytes)
             _guard_resident(adjustment_reserve, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature adjustment/source working set exceeds resident budget')
             tick = time.perf_counter_ns()
             adjusted, adjusted_wire = _adjust_feature(prices, factors, day, _with_wire=True)
-            _guard_resident(resident_base+_owned_bytes(pending)+reuse_budget_bytes+
-                sum(_batch_bytes(batch) for batch in (prices, factors, adjusted))+_owned_bytes(adjusted_wire)+read_estimate,
+            reader_bytes = sum(_batch_bytes(batch,stats=stats) for batch in (prices,factors,adjusted))
+            _guard_resident(resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes+
+                reader_bytes+_owned_bytes(adjusted_wire)+read_estimate,
                 maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature membership/source working set exceeds resident budget')
             stats['data_read_calls'] += 1
             membership_tick = time.perf_counter_ns()
             membership = data.members(snapshot=config['snapshot'], query=member_query)
             stats['data_read_ns'] += time.perf_counter_ns()-membership_tick
-            retained = resident_base+_owned_bytes(pending)+reuse_budget_bytes+sum(_batch_bytes(batch) for batch in (prices, factors, adjusted))
-            reserve = retained+_owned_bytes(adjusted_wire)+2*_batch_bytes(membership)
+            reader_bytes = sum(_batch_bytes(batch,stats=stats) for batch in (prices,factors,adjusted))
+            membership_bytes = _batch_bytes(membership,stats=stats)
+            retained = resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes+reader_bytes
+            reserve = retained+_owned_bytes(adjusted_wire)+2*membership_bytes
             _guard_resident(reserve, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature membership/source working set exceeds resident budget')
             membership_wire = membership.to_json()
@@ -638,10 +680,8 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                 for reason in classification['reasons']:
                     counts[reason] = counts.get(reason, 0)+1
             previous = signature
-            owned = base+window.bytes+reuse_budget_bytes+sum(int(batch.frame.memory_usage(deep=True).sum())
-                for batch in (prices, factors, adjusted, membership))+_owned_bytes([
-                    *[[batch.field_meta, batch.context] for batch in (prices, factors, adjusted, membership)],
-                    pending, previous, adjusted_wire, membership_wire, signature, documents,
+            owned = base+window.bytes+reuse_budget_bytes+_pending_owned_bytes(pending)+reader_bytes+membership_bytes+_owned_bytes([
+                    previous, adjusted_wire, membership_wire, signature, documents,
                     adapted.plan, wires, adapted.source_evidence])
             _guard_resident(owned, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature input working graph exceeds resident budget')
@@ -654,13 +694,14 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                     'provenance_by_key_ref': digest(source['provenance_by_key'])}
                     for key, source in adapted.source_evidence.items()}}
             workspace, output_reserve = _core_view_bounds(*wires)
-            current_view = ((plan, adapted.facts, adapted.context), evidence, members, workspace, output_reserve)
+            current_view = _seal_pending_view((plan, adapted.facts, adapted.context),
+                evidence, members, workspace, output_reserve, stats=stats)
             # Only immutable original Documents and compact saved provenance
             # survive collection. No source DataFrames or full adapter graph do.
             del prices, factors, adjusted, adjusted_wire, membership, membership_wire, adapted, plan
             del wires, documents, evidence, members
             stats['feature_adaptation_ns'] += time.perf_counter_ns()-tick
-            read_estimate = max(read_estimate, owned-(resident_base+_owned_bytes(pending)+reuse_budget_bytes))
+            read_estimate = max(read_estimate, owned-(resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes))
             resident_base = base+window.bytes+_owned_bytes(previous)
             candidate = pending+[current_view]
             must_flush = pending and resident_base+_pending_core_bytes(candidate)+reuse_budget_bytes+_caller_bytes(caller_retained_bytes) > maximum_resident_bytes
@@ -670,13 +711,13 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                 # The just-prepared compact view remains live while older views
                 # execute/yield; charge it too. Recheck the caller after flushing.
                 completed = yield from _iter_core_feature_batch(pending,
-                    resident_base=resident_base+_owned_bytes(current_view),
+                    resident_base=resident_base+current_view[5],
                     maximum_resident_bytes=maximum_resident_bytes, reuse_budget_bytes=reuse_budget_bytes,
                     stats=stats, caller_retained_bytes=caller_retained_bytes, progress=progress,
                     completed=completed, total=len(outputs), begin=begin)
             pending.append(current_view)
             del current_view
-            stats['pending_view_peak_bytes'] = max(stats['pending_view_peak_bytes'], _owned_bytes(pending))
+            stats['pending_view_peak_bytes'] = max(stats['pending_view_peak_bytes'], _pending_owned_bytes(pending))
             _guard_resident(base+window.bytes+_owned_bytes(previous)+_pending_core_bytes(pending)+reuse_budget_bytes,
                 maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Core batch snapshots/output working set exceeds resident budget')

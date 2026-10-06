@@ -5,6 +5,7 @@ from pathlib import Path
 import errno
 import math
 import tempfile
+import time
 
 from .stock_artifacts import digest, file_digest, _read, _verify_ref, write_json
 from .stock_fold_inputs import (require, ordered, read_parent, seal,
@@ -298,7 +299,7 @@ def _feature_contents(proof, *, digest_fn=digest):
     return contents, feature_rows
 
 
-def _validate_feature_matrix_block(metadata, rows, spec, view, *, universe_id=None,digest_fn=digest):
+def _validate_feature_matrix_block(metadata, rows, spec, view, *, universe_id=None,digest_fn=digest,metrics=None):
     """Admit reconstructed original rows; no Core or storage-side mathematics."""
     from .stock_fold_inputs import grid
     require(type(metadata) is dict and set(metadata) == MATRIX_METADATA_FIELDS and
@@ -326,10 +327,16 @@ def _validate_feature_matrix_block(metadata, rows, spec, view, *, universe_id=No
     require(type(proof) is list and [p['session'] for p in proof] == days,
             'Feature matrix proof date coverage mismatch')
     by_day = {p['session']:p for p in proof}
+    plan_refs = {}
     for p in proof:
         if 'outputs' in p['core_plan']:
             require([output['column'] for output in p['core_plan']['outputs']] == metadata['schema'],
                     'Feature matrix schema differs from original Core output')
+        tick = time.perf_counter_ns()
+        plan_refs[p['session']] = digest(p['core_plan'])
+        if metrics is not None:
+            metrics['feature_plan_hash_calls'] = metrics.get('feature_plan_hash_calls',0)+1
+            metrics['feature_plan_hash_ns'] = metrics.get('feature_plan_hash_ns',0)+time.perf_counter_ns()-tick
     feature = _feature_wire(rows, proof, spec, view,digest_fn=digest_fn)
     require(feature['feature_ref'] == metadata['original_feature_ref'], 'Feature matrix original slice mismatch')
     require(metadata['row_references'] == {day:{'feature_ref':_feature_wire(
@@ -350,7 +357,7 @@ def _validate_feature_matrix_block(metadata, rows, spec, view, *, universe_id=No
                 all(a is None or _instant(a) <= _instant(row['knowledge_cutoff']) for a in row['availability']),
                 'original Feature clock conflict')
         p = by_day[row['session']]
-        require(row['source_refs'] == [p['core_frame_ref'],digest(p['core_plan'])],
+        require(row['source_refs'] == [p['core_frame_ref'],plan_refs[row['session']]],
                 'Feature matrix Core source mismatch')
     # The original exact Data source/anchor/window and member admission is shared
     # with v1, rather than a looser new packed-path validator.
@@ -375,8 +382,14 @@ def _write_feature_matrix_block(target, *, rows, proof, spec, view, schema, inde
     rows = [by_key[s,d] for d in days for s in spec['universe']]
     retained=external+_resident_size([rows,proof,spec,view,schema,days,by_key])
     def original_digest(value):
-        return native_digest(value,maximum_workspace_bytes=maximum,
-            caller_retained_bytes=lambda:retained,metrics=metrics,path_resolver=path_resolver)
+        tick = time.perf_counter_ns()
+        try:
+            return native_digest(value,maximum_workspace_bytes=maximum,
+                caller_retained_bytes=lambda:retained,metrics=metrics,path_resolver=path_resolver)
+        finally:
+            if metrics is not None:
+                metrics['feature_writer_digest_calls'] = metrics.get('feature_writer_digest_calls',0)+1
+                metrics['feature_writer_digest_ns'] = metrics.get('feature_writer_digest_ns',0)+time.perf_counter_ns()-tick
     original = _feature_wire(rows,proof,spec,view,digest_fn=original_digest)
     contents, feature_rows = _feature_contents(proof,digest_fn=original_digest)
     metadata = {'contract_version':'stock_matrix_feature_metadata_v1',
@@ -390,7 +403,7 @@ def _write_feature_matrix_block(target, *, rows, proof, spec, view, schema, inde
                                       contents,feature_rows,metadata])
     metadata['metadata_ref']=original_digest(metadata)
     _validate_feature_matrix_block(metadata,rows,spec,view,universe_id=universe_id,
-                                  digest_fn=original_digest)
+                                  digest_fn=original_digest,metrics=metrics)
     md=make_native_carrier(target,metadata,'metadata_ref',maximum_source_bytes=8*1024**3,
         maximum_parent_bytes=DEFAULT_LIMITS['maximum_parent_bytes'],maximum_workspace_bytes=maximum,
         caller_retained_bytes=lambda:retained,metrics=metrics,
@@ -491,7 +504,8 @@ def _build_feature_matrix(data, *, spec, destination, storage_options, progress)
         partitions=previous['partitions']; feature_rows=previous['feature_rows']
         require([v['session'] for v in feature_rows] == completed, 'matrix checkpoint source-selection mismatch')
     config['feature_sessions']=spec['feature_sessions'][len(completed):]
-    stats={'data_read_calls':0,'core_calls':0,'feature_core_calls':0}
+    stats={'data_read_calls':0,'core_calls':0,'feature_core_calls':0,
+           'prepare_matrix_qlib_seconds':prepared['seconds']}
     # row_block_sessions is a maximum. Large schemas use the same writer with
     # smaller blocks when metadata/encoder residency demands it, not a separate
     # six-column path. The public parent-byte admission stays meaningful.
@@ -513,18 +527,26 @@ def _build_feature_matrix(data, *, spec, destination, storage_options, progress)
             stats.get('combined_working_graph_peak_bytes',0),combined)
         require(combined <= options['maximum_resident_bytes'],
                 'Feature writer/producer combined working set exceeds resident budget')
+        tick=time.perf_counter_ns()
         new_parts,new_sources=_write_feature_matrix_block(target,rows=rows,proof=proof,spec=spec,view=view,
             schema=schema,index_ref=row_wire['row_index_ref'],row_offset=len(completed)*len(spec['universe']),
             options=options,universe_id=universe_id,caller_retained_bytes=lambda:combined,metrics=stats)
+        stats['feature_writer_blocks']=stats.get('feature_writer_blocks',0)+1
+        stats['feature_writer_ns']=stats.get('feature_writer_ns',0)+time.perf_counter_ns()-tick
         published_retained_bytes+=_object_upper_bytes(new_parts)+_object_upper_bytes(new_sources)
         partitions.extend(new_parts); feature_rows.extend(new_sources); completed.extend(p['session'] for p in proof)
         _atomic(checkpoint,seal({'contract_version':'stock_feature_inputs_checkpoint_v2','definition_ref':definition_ref,
             'qlib_manifest':qdesc,'schema':schema,'row_index':rid,'partitions':partitions,
             'feature_rows':feature_rows},'content_digest'))
         rows=[]; proof=[]; pending_bytes=0
-        if progress is not None: progress({'stage':'feature_matrix_block','completed_dates':len(completed),
-            'total_dates':len(spec['feature_sessions']),'core_calls':stats['core_calls'],
-            'partition_count':len(partitions)})
+        if progress is not None:
+            snapshot_reserve=caller_retained_bytes()+stats.get('yield_live_bytes',0)+2*_object_upper_bytes(stats)+1024
+            stats['combined_working_graph_peak_bytes']=max(stats['combined_working_graph_peak_bytes'],snapshot_reserve)
+            require(snapshot_reserve <= options['maximum_resident_bytes'],
+                    'Feature progress snapshot combined working set exceeds resident budget')
+            progress({'stage':'feature_matrix_block','completed_dates':len(completed),
+                'total_dates':len(spec['feature_sessions']),'core_calls':stats['core_calls'],
+                'partition_count':len(partitions),'producer_stats':deepcopy(stats)})
     for day_rows,evidence in iter_matrix_feature_days(data,config=config,catalog=catalog,chosen=chosen,
             qlib_inputs=prepared,stats=stats,history_sessions=history_length,
             output_block_sessions=options['row_block_sessions'],

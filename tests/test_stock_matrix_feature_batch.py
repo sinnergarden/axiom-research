@@ -35,6 +35,29 @@ def arguments(fixture, prepared, **options):
 
 
 class MatrixFeatureBatchTests(unittest.TestCase):
+    def test_sealed_private_view_charges_cover_shared_graphs_and_release_without_rescanning(self):
+        from axiom_research import stock_matrix_feature_producer as producer
+        stats = {}
+        shared = {'source': ['source-ref']*64}
+        pending = []
+        for index in range(16):
+            evidence = {'session': str(index), 'source_evidence': shared,
+                        'records': [{'value': value, 'sources': shared} for value in range(32)]}
+            pending.append(producer._seal_pending_view(
+                (shared, shared, shared), evidence, {'A': True}, 1024, 512, stats=stats))
+            self.assertGreaterEqual(producer._pending_owned_bytes(pending), producer._owned_bytes(pending))
+        self.assertEqual(stats['pending_view_size_measurements'], 16)
+        before = producer._pending_owned_bytes(pending)
+        released = pending[0][5]
+        pending[0] = None
+        self.assertEqual(producer._pending_owned_bytes(pending), before-released)
+        self.assertGreaterEqual(producer._pending_owned_bytes(pending), producer._owned_bytes(pending))
+        with patch.object(producer, '_owned_bytes', side_effect=AssertionError('sealed graph rescanned')):
+            for unused in range(100):
+                self.assertGreater(producer._pending_core_bytes(pending), before-released)
+            pending.clear()
+            self.assertEqual(producer._pending_owned_bytes(pending), sys.getsizeof(pending))
+
     def test_zero_and_positive_reuse_execute_actual_five_view_batches_exactly(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -88,6 +111,10 @@ class MatrixFeatureBatchTests(unittest.TestCase):
                 self.assertGreater(stats['native_value_reuses'], 0)
                 self.assertLessEqual(stats['combined_working_graph_peak_bytes'], LIMIT)
                 self.assertGreater(stats['pending_view_peak_bytes'], 0)
+                self.assertEqual(stats['pending_view_size_measurements'], 5)
+                self.assertEqual(stats['core_frame_size_measurements'], 5)
+                self.assertGreater(stats['pending_view_size_measurement_ns'], 0)
+                self.assertGreater(stats['core_frame_size_measurement_ns'], 0)
                 self.assertEqual(stats['yield_live_bytes'], 0)
                 if budget == 0:
                     self.assertEqual(stats['core_batch_key_attempts'], 0)
@@ -291,6 +318,35 @@ class MatrixFeatureBatchTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'Reader projection working set exceeds resident budget'):
                     next(iter_matrix_feature_days(fixture.data,
                         **arguments(fixture, prepared, reuse_budget_bytes=0)))
+
+    def test_metadata_alias_growth_at_next_data_call_invalidates_local_size_charge(self):
+        from axiom_data import DataBatch
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fixture = MemoryFeatureInputs(root)
+            prepared = prepared_inputs(fixture, root)
+            original_read, original_json = fixture.data.read, DataBatch.to_json
+            prices, forbidden = [], set()
+            def read(**kwargs):
+                value = original_read(**kwargs)
+                if kwargs['query'].domain == 'market_daily':
+                    prices.append(value)
+                else:
+                    prices[-1].field_meta['alias_growth'] = 'x'*LIMIT
+                    forbidden.add(id(value))
+                return value
+            def to_json(value):
+                if id(value) in forbidden:
+                    raise AssertionError('factor serialized before rechecking old price metadata')
+                return original_json(value)
+            with patch.object(fixture.data,'read',side_effect=read), \
+                 patch.object(DataBatch,'to_json',new=to_json), \
+                 patch('axiom_research.qlib_adapter.QlibView.read',
+                       lambda view, **kwargs: fixture.native_read(view, **kwargs)), \
+                 patch('axiom_engine.core.execute_feature_plan_batch',side_effect=AssertionError('Core called')):
+                with self.assertRaisesRegex(ValueError,'Reader projection working set exceeds resident budget'):
+                    next(iter_matrix_feature_days(fixture.data,
+                        **arguments(fixture,prepared,reuse_budget_bytes=0)))
 
 
 class CoreBudgetScopeTargetTests(unittest.TestCase):
