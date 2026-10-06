@@ -182,9 +182,12 @@ def _shard(admission, scope, day):
             prediction = deepcopy(item['rows'].get(key))
             if prediction is not None:
                 feature = item['prediction_features'][key]
-                clocks = [_instant(c) for c in feature['availability'] if c is not None]
                 prediction['feature_knowledge_cutoff'] = feature['knowledge_cutoff']
-                prediction['feature_available_at'] = (max(clocks).isoformat().replace('+00:00', 'Z') if clocks else None)
+                if 'feature_available_at' in feature:
+                    prediction['feature_available_at'] = feature['feature_available_at']
+                else:
+                    clocks = [_instant(c) for c in feature['availability'] if c is not None]
+                    prediction['feature_available_at'] = (max(clocks).isoformat().replace('+00:00', 'Z') if clocks else None)
                 prediction['feature_source_refs'] = deepcopy(feature['source_refs'])
             predictions[name] = prediction
         frozen_row = {'security_id': security, 'member': member,

@@ -2,10 +2,12 @@
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
+import gc
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
+import weakref
 from unittest.mock import patch
 
 from axiom_research import (save_stock_signal_evaluation_inputs, evaluate_stock_signal_inputs,
@@ -268,6 +270,105 @@ class MatrixPublicFrozenMockTests(unittest.TestCase):
                 save_stock_signal_evaluation_inputs(owner.inputs, batch=batch,
                     scope=owner.scope, destination=root/'frozen')
             self.assertFalse((root/'frozen').exists())
+
+    def test_narrow_features_preserve_aware_max_and_original_shard(self):
+        from axiom_research.stock_signal_evaluation_matrix import _compact_features
+        key = 'S00', '2024-01-01'
+        for availability, expected in (
+                ([None, '2024-01-01T23:00:00+14:00', '2024-01-01T10:30:00.123456Z'],
+                 '2024-01-01T10:30:00.123456Z'),
+                ([None, None], None)):
+            with self.subTest(availability=availability):
+                original = {'member': True, 'knowledge_cutoff': '2024-01-01T20:00:00Z',
+                    'availability': availability, 'values': [1.0]*len(availability),
+                    'validity': [True]*len(availability), 'reasons': [[]]*len(availability),
+                    'source_refs': [digest('original feature')]}
+                members, predictions = _compact_features({key: original})
+                self.assertEqual(members[key], {'member': True})
+                self.assertEqual(set(predictions[key]), {'knowledge_cutoff', 'feature_available_at', 'source_refs'})
+                self.assertEqual(predictions[key]['feature_available_at'], expected)
+                base = {'labels': {key: {'security_id': key[0], 'feature_session': key[1]}},
+                    'projected': {'a': {'rows': {key: {'score': 1.0}},
+                        'members': {key: original}, 'prediction_features': {key: original}}}}
+                before = frozen._shard(base, {'universe': [key[0]]}, key[1])
+                base['projected']['a'].update(members=members, prediction_features=predictions)
+                self.assertEqual(before, frozen._shard(base, {'universe': [key[0]]}, key[1]))
+                original['source_refs'].append(digest('later mutation'))
+                self.assertEqual(predictions[key]['source_refs'], [digest('original feature')])
+
+    def test_wide_rows_and_lease_released_before_next_fold_admission(self):
+        class WeakList(list): pass
+        class WeakDict(dict): pass
+        class Borrowed: pass
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); owner = MockOwner(root/'source', two_signals=True)
+            tracked, checked = [], []
+            def track(wire):
+                wire = WeakDict(wire); tracked.append(weakref.ref(wire))
+                rows = []
+                for original in wire['rows']:
+                    row = WeakDict(original); tracked.append(weakref.ref(row))
+                    for field in ('values', 'validity', 'availability', 'reasons'):
+                        if field not in row: continue
+                        row[field] = WeakList(row[field]); tracked.append(weakref.ref(row[field]))
+                    rows.append(row)
+                wire['rows'] = rows
+                return wire
+            original_read = frozen._read_checked
+            def read(path, *args, **kwargs):
+                wire, ref = original_read(path, *args, **kwargs)
+                return (track(wire), ref) if Path(path).name == 'feature-slice.json' else (wire, ref)
+            @contextmanager
+            def project(batch, inputs, spec):
+                view = Borrowed(); view.__dict__.update(vars(owner.views[digest(inputs), digest(spec)]))
+                view.features = track(deepcopy(view.features))
+                view.source_record_indices = tuple(range(len(owner.table)))
+                tracked.append(weakref.ref(view))
+                try: yield view
+                finally: view.__dict__.clear()
+            def load(path, *, batch):
+                if tracked:
+                    gc.collect()
+                    self.assertTrue(all(ref() is None for ref in tracked), 'previous fold retained a wide graph or lease')
+                    checked.append(str(path))
+                return owner.load_fold(path, batch=batch)
+            with owner.patch_owner(), owner.batch() as batch, \
+                 patch.object(StockMLBatchInputs, '_project_evaluation', new=project), \
+                 patch.object(frozen, '_read_checked', new=read), \
+                 patch('axiom_research.stock_fold_artifacts.load_stock_ml_fold', new=load):
+                save_stock_signal_evaluation_inputs(owner.inputs, batch=batch,
+                    scope=owner.scope, destination=root/'frozen')
+            gc.collect()
+            self.assertEqual(len(checked), 1)
+            self.assertTrue(all(ref() is None for ref in tracked))
+
+    def test_narrow_admission_exact_shards_refs_masks_and_reports(self):
+        from axiom_research import stock_signal_evaluation_matrix as matrix
+        from axiom_engine.core import evaluate_signal_statistics
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); owner = MockOwner(root/'source', two_signals=True)
+            captured = []; original_shard = frozen._shard
+            def shard(*args, **kwargs):
+                wire = original_shard(*args, **kwargs); captured.append(deepcopy(wire)); return wire
+            def wide(indexed): return dict(indexed), dict(indexed)
+            with owner.patch_owner(), owner.batch() as batch, patch.object(frozen, '_shard', new=shard):
+                with patch.object(matrix, '_compact_features', new=wide):
+                    before = save_stock_signal_evaluation_inputs(owner.inputs, batch=batch,
+                        scope=owner.scope, destination=root/'frozen')
+                old_shards = captured[:]; captured.clear()
+                after = save_stock_signal_evaluation_inputs(owner.inputs, batch=batch,
+                    scope=owner.scope, destination=root/'frozen')
+                self.assertEqual(captured, old_shards); self.assertEqual(after, before)
+            old_selected = frozen._load_inputs(before, owner.scope)[2]
+            new_selected = frozen._load_inputs(after, owner.scope)[2]
+            self.assertEqual(new_selected, old_selected)
+            with patch('axiom_engine.core.evaluate_signal_statistics', wraps=evaluate_signal_statistics) as core:
+                old_reports = evaluate_stock_signal_inputs(before, scope=owner.scope, destination=root/'old-reports')
+                new_reports = evaluate_stock_signal_inputs(after, scope=owner.scope, destination=root/'new-reports')
+                self.assertEqual([call.args for call in core.call_args_list[:2]],
+                    [call.args for call in core.call_args_list[2:]])
+            self.assertEqual({name: report.to_dict() for name, report in new_reports.items()},
+                {name: report.to_dict() for name, report in old_reports.items()})
 
 
 if __name__ == '__main__':

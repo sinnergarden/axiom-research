@@ -283,6 +283,18 @@ def _owner_targets(view):
     return view.evaluation, bindings, provenance
 
 
+def _compact_features(indexed):
+    """Retain only the already checked membership and frozen clock/ref fields."""
+    members, predictions = {}, {}
+    for key, row in indexed.items():
+        members[key] = {'member': row['member']}
+        available = max((_instant(clock) for clock in row['availability'] if clock is not None), default=None)
+        predictions[key] = {'knowledge_cutoff': row['knowledge_cutoff'],
+            'feature_available_at': available.isoformat().replace('+00:00', 'Z') if available is not None else None,
+            'source_refs': deepcopy(row['source_refs'])}
+    return members, predictions
+
+
 def _admit_matrix(signal_inputs, raw_label_input, scope, batch):
     from .stock_batch import _data
     from .stock_fold_artifacts import load_stock_ml_fold
@@ -370,10 +382,11 @@ def _admit_matrix(signal_inputs, raw_label_input, scope, batch):
                         _finite(prediction['score']) and prediction['invalid_reason'] is None, 'matrix valid Signal/Feature mismatch')
                 else:
                     _require(prediction['score'] is None and bool(prediction['invalid_reason']), 'matrix invalid Signal null/reason required')
-            for key, feature in feature_index.items():
-                _require(key not in members or members[key]['member'] is feature['member'], 'weekly historical membership conflict')
-                members[key] = feature
-            rows.update(indexed); prediction_features.update(feature_index)
+            fold_members, fold_predictions = _compact_features(feature_index)
+            for key, member in fold_members.items():
+                _require(key not in members or members[key]['member'] is member['member'], 'weekly historical membership conflict')
+                members[key] = member
+            rows.update(indexed); prediction_features.update(fold_predictions)
             for filename, file_ref in fold_manifest['files'].items():
                 source_path = str(path/filename)
                 _require(source_path not in records or records[source_path] == file_ref, 'conflicting matrix fold output pin')
@@ -389,6 +402,9 @@ def _admit_matrix(signal_inputs, raw_label_input, scope, batch):
                 'feature_contract_version': features['contract_version'], 'feature_ref': features['feature_ref'],
                 'snapshot': common['snapshot'], 'pit_policy': common['pit_policy'],
                 'evaluation_clock_floor': max(map(_instant, clocks)).isoformat().replace('+00:00', 'Z')})
+            # The next saved-fold admission must have no reference to this
+            # fold's wide rows, including the last loop row and closed lease.
+            del features, feature_index, original, view, fold_members, fold_predictions
         projected[name] = {'rows': rows, 'members': members, 'prediction_features': prediction_features}
     if raw_label_input is not None:
         raw_wire = _checked_descriptor(raw_label_input, 'label_ref', marks)

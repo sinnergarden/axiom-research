@@ -6,12 +6,14 @@ fold loading, leases, provenance, masks and statistics use their real interfaces
 from copy import deepcopy
 from pathlib import Path
 import builtins
+import gc
 import os
 import subprocess
 import sys
 import tempfile
 import types
 import unittest
+import weakref
 from unittest.mock import patch
 
 from axiom_engine.core import evaluate_signal_statistics
@@ -21,6 +23,8 @@ from axiom_research import (prepare_stock_ml_batch_inputs, load_stock_ml_batch_i
 from axiom_research.labels import build_forward_labels
 from axiom_research.stock_artifacts import _read, digest, file_digest, write_json
 from axiom_research.stock_batch import _data
+from axiom_research import stock_signal_evaluation_projection as frozen
+from axiom_research.stock_fold_artifacts import load_stock_ml_fold
 from axiom_research.stock_signal_evaluation_projection import _load_inputs
 from test_stock_matrix_prepare import PrepareFeatureFixture, PublicDataFixture, Query, Batch
 from test_stock_folds import backend
@@ -98,11 +102,36 @@ class MatrixFrozenRealOwnerTests(unittest.TestCase):
                 self.assertIs(source_table, batch._evaluation_source_records())
                 self.assertIsInstance(source_table, tuple)
                 state = _data(batch)['matrix_state']
+                class WeakDict(dict): pass
+                class WeakList(list): pass
+                tracked, checked = [], []
+                checked_read = frozen._read_checked
+                def read(path, *args, **kwargs):
+                    wire, ref = checked_read(path, *args, **kwargs)
+                    if Path(path).name == 'feature-slice.json':
+                        wire = WeakDict(wire); tracked.append(weakref.ref(wire)); wide_rows = []
+                        for original in wire['rows']:
+                            row = WeakDict(original); tracked.append(weakref.ref(row))
+                            for field in ('values', 'validity', 'availability', 'reasons'):
+                                row[field] = WeakList(row[field]); tracked.append(weakref.ref(row[field]))
+                            wide_rows.append(row)
+                        wire['rows'] = wide_rows
+                    return wire, ref
+                def load(path, *, batch):
+                    if tracked:
+                        gc.collect()
+                        self.assertTrue(all(ref() is None for ref in tracked), 'previous actual fold retained wide features')
+                        checked.append(str(path))
+                    return load_stock_ml_fold(path, batch=batch)
                 with patch.object(type(batch), '_matrix_project', side_effect=AssertionError('training projection')), \
                      patch('axiom_research.stock_matrix_reader._stream_ref', side_effect=AssertionError('training ref walk')), \
                      patch('axiom_research.stock_training.fit_predict_stock_model', side_effect=AssertionError('model executed')), \
                      patch('axiom_engine.core.evaluate_signal_statistics', side_effect=AssertionError('freeze statistics')):
-                    default = save_stock_signal_evaluation_inputs(inputs, batch=batch, scope=scope, destination=root/'default')
+                    with patch.object(frozen, '_read_checked', new=read), \
+                         patch('axiom_research.stock_fold_artifacts.load_stock_ml_fold', new=load):
+                        default = save_stock_signal_evaluation_inputs(inputs, batch=batch, scope=scope, destination=root/'default')
+                    gc.collect(); self.assertTrue(all(ref() is None for ref in tracked))
+                    self.assertEqual(len(checked), 6)
                     override = save_stock_signal_evaluation_inputs(inputs, batch=batch, raw_label_input=shared,
                         scope=scope, destination=root/'override')
                     t6 = save_stock_signal_evaluation_inputs(inputs, batch=batch, raw_label_input=independent,
