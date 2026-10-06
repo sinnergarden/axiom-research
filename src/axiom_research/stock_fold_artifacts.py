@@ -52,6 +52,9 @@ def _load_stock_ml_fold(path, *, projection=None, batch=None):
         require(projection is None, 'batch cannot accept a caller projection')
         batch._check_sources()
     path = Path(path); manifest = _read(path/'manifest.json')
+    if manifest.get('contract_version') == 'stock_ml_fold_manifest_v2':
+        from .stock_matrix_folds import load_matrix_fold
+        return load_matrix_fold(path,projection=projection,batch=batch)
     require(manifest.get('contract_version') == 'stock_ml_fold_manifest_v1' and
             set(manifest.get('files', {})) == {*OUTPUTS, 'fold.json', 'booster.txt'}, 'unexpected saved fold files')
     for name, reference in manifest['files'].items():

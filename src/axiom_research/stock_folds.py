@@ -48,6 +48,9 @@ def build_stock_ml_fold_from_saved_inputs(input_manifest, *, fold_spec, destinat
     """
     begin = time.perf_counter()
     inputs, spec = deepcopy(input_manifest), deepcopy(fold_spec)
+    if inputs.get('contract_version') == 'stock_ml_saved_inputs_v2':
+        from .stock_matrix_folds import build_matrix_fold
+        return build_matrix_fold(inputs,spec=spec,destination=destination,metrics=metrics,batch=batch)
     if batch is not None:
         from .stock_batch import _data
         _data(batch)  # Reject a caller-created object or a skip-validation flag.
