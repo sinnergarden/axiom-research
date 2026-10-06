@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from axiom_data import Data
-from axiom_engine.core import ExecutionContext, execute_feature_plan
+from axiom_engine.core import ExecutionContext, execute_feature_plan, execute_feature_plan_batch
 from axiom_research.data_adapter import _adapt_decision_wires
 from axiom_research.feature_catalog import load_feature_catalog, build_feature_plan
 from axiom_research.stock_artifacts import digest
@@ -218,23 +218,26 @@ class MatrixFeatureProducerTests(unittest.TestCase):
             def read(*, snapshot, query):
                 queries.append(query)
                 return original_read(snapshot=snapshot, query=query)
-            def execute(plan, facts, context):
-                result = execute_feature_plan(plan, facts, context)
-                day = result.to_dict()['rows'][0]['session']
-                executed[day] = result.identity, plan.identity, facts.identity, context.identity
+            def execute(requests, *, reuse_budget_bytes):
+                result = execute_feature_plan_batch(requests, reuse_budget_bytes=reuse_budget_bytes)
+                for (plan, facts, context), frame in zip(requests,result['frames']):
+                    day = frame.to_dict()['rows'][0]['session']
+                    executed[day] = frame.identity, plan.identity, facts.identity, context.identity
                 return result
             with patch('axiom_research.qlib_adapter.QlibView.read', lambda view, **kwargs: fixture.native_read(view, **kwargs)), \
                  patch.object(fixture.data, 'read', side_effect=read), \
-                 patch('axiom_engine.core.execute_feature_plan', side_effect=execute) as core, \
+                 patch('axiom_engine.core.execute_feature_plan_batch', side_effect=execute) as core, \
                  patch('axiom_research.stock_training.fit_predict_stock_model', side_effect=AssertionError('trained')):
                 actual = list(iter_matrix_feature_days(fixture.data, config=fixture.config, catalog=fixture.catalog,
                     chosen=fixture.chosen, qlib_inputs=prepared, history_sessions=fixture.history,
                     output_block_sessions=2, maximum_resident_bytes=64*1024**2, stats=stats))
-                self.assertEqual(core.call_count, 5)
+                self.assertEqual(core.call_count, 3)
             self.assertEqual(len(actual), 5)
             self.assertEqual(stats['native_window_reads'], 3)
             self.assertLess(stats['native_window_peak_sessions'], len(fixture.calendar))
             self.assertEqual(stats['core_single_output_groups'], 5)
+            self.assertEqual(stats['core_daily_frames'],5)
+            self.assertEqual(stats['actual_core_multi_view_batches'],2)
             self.assertEqual(stats['actual_core_multi_output_groups'], 0)
             self.assertEqual(stats['data_read_calls'], 15)
             self.assertGreater(stats['reader_projection_fallback_cells'], 0)
@@ -349,16 +352,17 @@ class MatrixFeatureProducerTests(unittest.TestCase):
             config = deepcopy(fixture.config); config['feature_sessions'] = fixture.outputs[:2]
             key = 'A', fixture.revised_day
             inputs = []
-            def capture(plan, facts, context):
-                fields = [column['name'] for column in facts.to_dict()['schema']]
-                row = next(row for row in facts.to_dict()['rows']
-                           if (row['security_id'], row['session']) == key)
-                i = fields.index('close')
-                inputs.append((row['values'][i], row['availability'][i], row['sources'][i]))
-                return execute_feature_plan(plan, facts, context)
+            def capture(requests, *, reuse_budget_bytes):
+                for plan,facts,context in requests:
+                    fields = [column['name'] for column in facts.to_dict()['schema']]
+                    row = next(row for row in facts.to_dict()['rows']
+                               if (row['security_id'], row['session']) == key)
+                    i = fields.index('close')
+                    inputs.append((row['values'][i], row['availability'][i], row['sources'][i]))
+                return execute_feature_plan_batch(requests,reuse_budget_bytes=reuse_budget_bytes)
             stats = {}
             with patch('axiom_research.qlib_adapter.QlibView.read', lambda view, **kwargs: fixture.native_read(view, **kwargs)), \
-                 patch('axiom_engine.core.execute_feature_plan', side_effect=capture):
+                 patch('axiom_engine.core.execute_feature_plan_batch', side_effect=capture):
                 list(iter_matrix_feature_days(fixture.data, config=config, catalog=fixture.catalog,
                     chosen=fixture.chosen, qlib_inputs=prepared, history_sessions=fixture.history,
                     output_block_sessions=2, maximum_resident_bytes=64*1024**2, stats=stats))
@@ -396,7 +400,7 @@ class MatrixFeatureProducerTests(unittest.TestCase):
             retained = [0]
             stats = {}
             with patch('axiom_research.qlib_adapter.QlibView.read', lambda view, **kwargs: fixture.native_read(view, **kwargs)), \
-                 patch('axiom_engine.core.execute_feature_plan', wraps=execute_feature_plan) as core:
+                 patch('axiom_engine.core.execute_feature_plan_batch', wraps=execute_feature_plan_batch) as core:
                 iterator = iter_matrix_feature_days(fixture.data, config=fixture.config, catalog=fixture.catalog,
                     chosen=fixture.chosen, qlib_inputs=prepared, history_sessions=fixture.history,
                     output_block_sessions=2, maximum_resident_bytes=budget, stats=stats,
@@ -434,7 +438,7 @@ class MatrixFeatureProducerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); fixture = MemoryFeatureInputs(root); prepared = self._prepared(fixture, root)
             with patch('axiom_research.qlib_adapter.QlibView.read', lambda view, **kwargs: fixture.native_read(view, **kwargs)), \
-                 patch('axiom_engine.core.execute_feature_plan', side_effect=AssertionError('Core on invalid window')):
+                 patch('axiom_engine.core.execute_feature_plan_batch', side_effect=AssertionError('Core on invalid window')):
                 with self.assertRaisesRegex(ValueError, 'one native Feature window exceeds resident budget'):
                     list(iter_matrix_feature_days(fixture.data, config=fixture.config, catalog=fixture.catalog,
                         chosen=fixture.chosen, qlib_inputs=prepared, history_sessions=fixture.history,

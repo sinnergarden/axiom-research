@@ -2,8 +2,8 @@
 
 Qlib supplies an immutable native projection, not revision selection. Every
 output still reads its original history at its declared cutoff and uses Core
-for the complete cross-section. Shared-panel classification is diagnostic
-until an explicit group execution/evidence contract is admitted.
+for the complete cross-section. The public Core batch receives independent
+original daily views; shared-panel classification remains diagnostic.
 """
 from __future__ import annotations
 
@@ -36,8 +36,12 @@ def _owned_bytes(value, seen=None):
     amount = sys.getsizeof(value)
     if isinstance(value, dict):
         amount += sum(_owned_bytes(k, seen)+_owned_bytes(v, seen) for k, v in value.items())
-    elif isinstance(value, (list, tuple)):
+    elif isinstance(value, (list, tuple, set, frozenset)):
         amount += sum(_owned_bytes(v, seen) for v in value)
+    elif type(getattr(value, 'payload', None)) is str:
+        # Core Documents own canonical JSON, rather than a numeric panel alone.
+        amount += _owned_bytes(value.payload, seen)
+        amount += sys.getsizeof(getattr(value, '__dict__', {}))
     return amount
 
 
@@ -56,6 +60,7 @@ def _caller_bytes(getter):
 
 def _guard_resident(owned, *, maximum_resident_bytes, stats, caller_retained_bytes, reason, owner_limit=None):
     """One combined owned-graph guard; neither counter is a RSS measurement."""
+    owned += _owned_bytes(stats)
     caller = _caller_bytes(caller_retained_bytes)
     combined = owned+caller
     stats['working_graph_peak_bytes'] = max(stats.get('working_graph_peak_bytes', 0), owned)
@@ -127,6 +132,7 @@ class _NativeWindow:
         reserve = self.bytes+retained_bytes+2*_batch_bytes(batch)+len(batch.frame)*len(FIELDS)*32
         _guard_resident(reserve, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
             caller_retained_bytes=caller_retained_bytes, reason='Reader projection working set exceeds resident budget')
+        begin = time.perf_counter_ns()
         wire = batch.to_json()
         query = wire['context']['query']
         fields = query['fields']
@@ -168,12 +174,14 @@ class _NativeWindow:
             'reader_batch_ref': digest(wire),
             'revision_admission': 'actual_reader_float32_with_native_value_reuse',
             'dtype': 'float32_values_promoted_to_float64'}}
-        return DataBatch(frame, batch.field_meta, context)
+        result = DataBatch(frame, batch.field_meta, context)
+        stats['native_projection_ns'] = stats.get('native_projection_ns', 0)+time.perf_counter_ns()-begin
+        return result
 
 
-def _view_signature(plan, facts, context, *, calendar=None):
+def _view_signature(plan, facts, context, *, calendar=None, _wires=None):
     """Compact exact input compatibility evidence, without a second executor."""
-    p, f, c = plan.to_dict(), facts.to_dict(), context.to_dict()
+    p, f, c = (plan.to_dict(), facts.to_dict(), context.to_dict()) if _wires is None else _wires
     bindings = {source['id']: source for source in p['sources']}
     calendar = c['sessions'] if calendar is None else list(calendar)
     _require(calendar == sorted(set(calendar)) and set(c['sessions']) <= set(calendar),
@@ -225,36 +233,266 @@ def classify_shared_feature_views(left, right):
             'reasons': reasons}
 
 
+_MEMORY_POINTWISE_OPS = frozenset(('constant', 'identity', 'add', 'sub', 'mul',
+    'divide', 'abs', 'log1p', 'gt', 'lt', 'eq', 'and', 'or', 'not', 'where',
+    'to_float', 'is_missing', 'fill', 'clip', 'calendar_age'))
+_MEMORY_CS_OPS = frozenset(('cs_rank', 'cs_zscore', 'cs_winsorize'))
+
+
+def _core_scope_counts(plan, history_count, symbol_count, *, output_position=None):
+    """Count cells from the admitted public DAG, without computing any values.
+
+    In this producer every output day requests the complete security cohort.
+    Therefore each node's temporal scope is uniform across securities; CS needs
+    the full cohort at its requested dates, including excluded members. The
+    temporal rules mirror Core 60df1fc's dependency admission walk. Unsupported
+    operations fail closed, rather than silently omitting their memory.
+    """
+    _positive(history_count, 'memory history_count')
+    _positive(symbol_count, 'memory symbol_count')
+    _require(not plan['event_schema'] and plan['observation_domain'] == 'sessions',
+             'memory scope requires original session-only Feature views')
+    position = history_count-1 if output_position is None else output_position
+    _require(type(position) is int and 0 <= position < history_count, 'covered memory output position required')
+    needed = {column['name']: set() for column in plan['input_schema']}
+    needed.update({node['name']: set() for node in plan['nodes']})
+    for output in plan['outputs']:
+        needed[output['node']].add(position)
+    for node in reversed(plan['nodes']):
+        op, params = node['op'], node['params']
+        _require(op in _MEMORY_POINTWISE_OPS | _MEMORY_CS_OPS | {'shift', 'pct_change', 'rolling'},
+                 'unsupported Core memory scope operator: '+op)
+        positions = needed[node['name']]
+        dependencies = set()
+        for index in positions:
+            if op in ('shift', 'pct_change'):
+                if index >= params['periods']:
+                    dependencies.add(index-params['periods'])
+                if op == 'pct_change':
+                    dependencies.add(index)
+            elif op == 'rolling':
+                end = index+int(params['inclusive_current'])
+                dependencies.update(range(max(0, end-params['window']), end))
+            else:
+                dependencies.add(index)
+        for parent in node['inputs']:
+            needed[parent].update(dependencies)
+    nodes = {node['name']: len(needed[node['name']])*symbol_count for node in plan['nodes']}
+    inputs = {column['name']: len(needed[column['name']])*symbol_count for column in plan['input_schema']}
+    return {'history_keys': history_count*symbol_count, 'input_cells': history_count*symbol_count*len(inputs),
+            'node_cells': sum(nodes.values()), 'nodes': nodes,
+            'dependency_entries': sum(nodes.values())+sum(inputs.values()),
+            'symbol_count': symbol_count, 'history_count': history_count}
+
+
+def _core_memory_bounds(plan, dimensions, *, snapshots, input_sources, reference_sources):
+    """Charge snapshots, scope maps, cells/refs, CS scratch and Frame copies.
+
+    The 2048-byte cell allowance includes Python Cell/dict/list/tuple backing,
+    values, clocks, reasons and mapping workspace. Its complete possible source
+    strings are additionally charged per cell. Parser and dependency/index
+    maps, full-union reduction/reference scratch and six output copies remain
+    separate. Core's call-local memo is reserved by the caller independently.
+    """
+    sources = {name: set(value) for name, value in input_sources.items()}
+    for node in plan['nodes']:
+        possible = set().union(*(sources[parent] for parent in node['inputs']))
+        if node['op'] in _MEMORY_CS_OPS:
+            possible.update(reference_sources)
+        sources[node['name']] = possible
+
+    def source_bytes(name):
+        return sum(sys.getsizeof(value)+32 for value in sources[name])
+
+    cells = dimensions['history_keys']*sum(2048+source_bytes(column['name']) for column in plan['input_schema'])
+    cells += sum(dimensions['nodes'][node['name']]*(2048+source_bytes(node['name'])) for node in plan['nodes'])
+    maps = dimensions['history_keys']*512+dimensions['dependency_entries']*192
+    scratch = max(dimensions['symbol_count'], dimensions['history_count'])*(
+        4096+max((source_bytes(node['name']) for node in plan['nodes']), default=0))
+    source_sets = 2*_owned_bytes([input_sources, reference_sources, sources])
+    workspace = 3*snapshots+cells+maps+scratch+source_sets
+    output = 6*(_owned_bytes([plan['sources'], plan['outputs']])+dimensions['symbol_count']*(256+
+        sum(1024+source_bytes(item['node']) for item in plan['outputs'])))
+    return workspace, output
+
+
+def _core_budget_plan(catalog, selection):
+    """Compile only the original selected DAG on a tiny neutral plan header."""
+    from axiom_engine.core import ABI, SEMANTICS, FeaturePlan
+    from .feature_catalog import build_feature_plan
+    binding = digest('memory-shape-only')
+    fields = FIELDS[:-1]
+    header = {'abi': ABI, 'semantics': SEMANTICS, 'recipe_ref': binding,
+        'calendar_ref': binding, 'reference_ref': binding,
+        'reference_members': {'2000-01-03': {'memory-shape': None}},
+        'input_schema': [{'name': field, 'dtype': 'float64', 'unit': 'CNY' if field == 'amount_cny' else 'CNY/share',
+                         'stage': 'fact', 'missing': 'preserve'} for field in fields],
+        'event_schema': {}, 'sources': [{'id': digest(['memory-shape', field]), 'data_ref': binding,
+            'view_ref': binding, 'revision_policy': 'memory_shape', 'qualification': 'synthetic',
+            'availability_basis': 'memory_shape'} for field in (*fields, 'is_member')],
+        'observation_domain': 'sessions', 'history_policy': 'partial', 'nodes': [], 'outputs': [], 'obligations': []}
+    return build_feature_plan(FeaturePlan.from_dict(header), selection, catalog=catalog, normalized=True).to_dict()
+
+
+def _core_preflight_bounds(plan, history_count, symbol_count):
+    """Initial shape estimate; actual source variants/graphs tighten it later."""
+    dimensions = _core_scope_counts(plan, history_count, symbol_count)
+    input_sources = {column['name']: {digest(['memory-shape', column['name']])} for column in plan['input_schema']}
+    snapshots = _owned_bytes(plan)+dimensions['history_keys']*6144
+    workspace, output = _core_memory_bounds(plan, dimensions, snapshots=snapshots,
+        input_sources=input_sources, reference_sources={digest(['memory-shape', 'is_member'])})
+    return workspace, output, dimensions
+
+
+def _core_view_bounds(plan, facts, context):
+    """Reserve one actual original view's precise dependency dimensions."""
+    symbols = {key[0] for key in context['history_keys']}
+    dates = context['sessions']
+    days = {key[1] for key in context['output_keys']}
+    _require(len(days) == 1 and len(context['history_keys']) == len(symbols)*len(dates) and
+             {tuple(key) for key in context['output_keys']} == {(symbol, next(iter(days))) for symbol in symbols},
+             'memory scope requires complete original daily cohort')
+    dimensions = _core_scope_counts(plan, len(dates), len(symbols), output_position=dates.index(next(iter(days))))
+    input_sources = {column['name']: set() for column in plan['input_schema']}
+    for row in facts['rows']:
+        for column, bindings in zip(plan['input_schema'], row['sources']):
+            input_sources[column['name']].update(bindings)
+    return _core_memory_bounds(plan, dimensions, snapshots=_owned_bytes([plan, facts, context]),
+        input_sources=input_sources, reference_sources={row['source'] for row in context['reference']})
+
+
+def _pending_core_bytes(pending):
+    if not pending:
+        return 0
+    return _owned_bytes(pending)+max(view[3] for view in pending)+sum(view[4] for view in pending)
+
+
+def _record_core_batch_stats(stats, actual):
+    stats['core_batch_views'] += actual['views']
+    for name in ('key_attempts', 'keys_built', 'key_charge_bytes', 'key_build_ns',
+                 'numeric_compute_ns', 'reuse_overhead_ns', 'budget_fallbacks',
+                 'evictions', 'numeric_ids_built', 'total_ns'):
+        key = 'core_batch_'+name
+        stats[key] = stats.get(key, 0)+actual[name]
+    stats['core_batch_peak_reuse_bytes'] = max(stats.get('core_batch_peak_reuse_bytes', 0),
+                                             actual['peak_reuse_bytes'])
+    stats['core_batch_retained_reuse_bytes'] = actual['retained_reuse_bytes']
+    for operation, counts in actual['helpers'].items():
+        combined = stats['core_batch_helpers'].setdefault(operation, {})
+        for name, value in counts.items():
+            combined[name] = combined.get(name, 0)+value
+    for operation, reason in actual['disabled_ops'].items():
+        counts = stats['core_batch_disabled_ops'].setdefault(operation, {})
+        counts[reason] = counts.get(reason, 0)+1
+    stats['core_batch_total_seconds'] = stats['core_batch_total_ns']/1_000_000_000
+
+
+def _iter_core_feature_batch(pending, *, resident_base, maximum_resident_bytes,
+                             reuse_budget_bytes, stats, caller_retained_bytes,
+                             progress, completed, total, begin):
+    from axiom_engine.core import execute_feature_plan_batch
+    requests = tuple(view[0] for view in pending)
+    # A fresh caller check immediately precedes every actual public execution.
+    reserve = resident_base+_pending_core_bytes(pending)+reuse_budget_bytes+_owned_bytes(requests)
+    _guard_resident(reserve, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
+        caller_retained_bytes=caller_retained_bytes, reason='Core batch snapshots/output working set exceeds resident budget')
+    stats['core_calls'] += 1
+    stats['feature_core_calls'] += 1
+    stats['core_batch_calls'] += 1
+    stats['actual_core_multi_view_batches'] += int(len(requests) > 1)
+    stats['core_batch_peak_views'] = max(stats['core_batch_peak_views'], len(requests))
+    tick = time.perf_counter_ns()
+    result = execute_feature_plan_batch(requests, reuse_budget_bytes=reuse_budget_bytes)
+    stats['core_batch_public_wall_ns'] += time.perf_counter_ns()-tick
+    _require(set(result) == {'frames', 'stats'} and type(result['frames']) is tuple and
+             len(result['frames']) == len(requests) and result['stats']['views'] == len(requests),
+             'complete original Core batch Frames required')
+    _record_core_batch_stats(stats, result['stats'])
+    frames = list(result['frames'])
+    del result, requests
+    stats['core_daily_frames'] += len(frames)
+    stats['core_single_output_groups'] += len(frames)
+    try:
+        for index in range(len(frames)):
+            request, evidence, members, _, output_reserve = pending[index]
+            plan, facts, context = request
+            frame = frames[index]
+            # Retain all not-yet-yielded views/Frames in the accounting. Parsing
+            # a Frame and building row/proof copies also needs its own reserve.
+            live = resident_base+_owned_bytes([pending, frames])+output_reserve
+            _guard_resident(live, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
+                caller_retained_bytes=caller_retained_bytes, reason='Feature output working graph exceeds resident budget')
+            frame_wire = frame.to_dict()
+            day = evidence['session']
+            rows = [{'security_id': row['security_id'], 'session': day, 'values': row['values'],
+                'availability': row['availability'], 'validity': row['valid'], 'reasons': row['reasons'],
+                'member': members[row['security_id']], 'knowledge_cutoff': evidence['cutoffs'][day],
+                'source_refs': [frame.identity, plan.identity]} for row in frame_wire['rows']]
+            evidence['core_frame_ref'] = frame.identity
+            pending[index] = frames[index] = None
+            del request, plan, facts, context, frame, frame_wire, members
+            completed += 1
+            if progress is not None:
+                progress({'stage': 'matrix_features', 'completed': completed, 'total': total,
+                          'session': day, 'seconds': time.perf_counter()-begin})
+            live = resident_base+_owned_bytes([pending, frames, rows, evidence])
+            _guard_resident(live, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
+                caller_retained_bytes=caller_retained_bytes, reason='Feature yield working graph exceeds resident budget')
+            stats['yield_live_bytes'] = live
+            try:
+                yield rows, evidence
+            finally:
+                stats['yield_live_bytes'] = 0
+            del rows, evidence
+    finally:
+        pending.clear()
+        frames.clear()
+    return completed
+
+
 def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                              history_sessions=21, output_block_sessions=64,
-                             maximum_resident_bytes, progress=None, stats=None, caller_retained_bytes=None):
-    """Yield original complete daily rows/evidence, with bounded native reads.
+                             maximum_resident_bytes, progress=None, stats=None,
+                             caller_retained_bytes=None, reuse_budget_bytes=None):
+    """Yield original daily rows/proofs from bounded public multi-view calls.
 
-    Actual multi-output execution is deliberately zero until its evidence
-    bridge is frozen. Each current execution is a genuine existing Core call.
+    Reuse defaults to one eighth of the existing resident budget. This internal
+    option adds no public storage definition fields. Its cache allowance is
+    separate from pending original documents, Core workspace and returned Frames.
     """
     from .data_adapter import _adapt_decision_wires
     from .feature_catalog import build_feature_plan
     from .stock_ml import _adjust_feature
-    from axiom_engine.core import execute_feature_plan
     for value, name in [(history_sessions, 'history_sessions'), (output_block_sessions, 'output_block_sessions'),
                         (maximum_resident_bytes, 'maximum_resident_bytes')]:
         _positive(value, name)
     _require(history_sessions == max(entry['lookback'] for entry in chosen),
              'Feature history differs from selected catalog lookback')
+    if reuse_budget_bytes is None:
+        reuse_budget_bytes = maximum_resident_bytes//8
+    _require(type(reuse_budget_bytes) is int and reuse_budget_bytes >= 0,
+             'nonnegative integer reuse_budget_bytes required')
+    _require(reuse_budget_bytes <= maximum_resident_bytes, 'reuse budget exceeds resident budget')
     stats = {} if stats is None else stats
     for name in ('data_read_calls', 'core_calls', 'feature_core_calls', 'native_window_reads',
                  'native_window_peak_rows', 'native_window_peak_sessions', 'native_window_peak_bytes',
                  'working_graph_peak_bytes', 'combined_working_graph_peak_bytes', 'yield_live_bytes',
                  'native_value_reuses', 'reader_projection_fallback_cells',
                  'reader_projection_fallback_null_cells', 'core_single_output_groups',
-                 'actual_core_multi_output_groups'):
+                 'actual_core_multi_output_groups', 'actual_core_multi_view_batches',
+                 'core_batch_calls', 'core_batch_views', 'core_batch_peak_views', 'core_daily_frames',
+                 'core_batch_public_wall_ns', 'native_window_read_ns', 'native_projection_ns',
+                 'data_read_ns', 'feature_adaptation_ns', 'pending_view_peak_bytes', 'batch_budget_flushes'):
         stats.setdefault(name, 0)
+    stats.setdefault('core_batch_helpers', {})
+    stats.setdefault('core_batch_disabled_ops', {})
     stats.setdefault('classifier_status_counts', {})
     stats.setdefault('classifier_reason_counts', {})
-    stats['group_execution_status'] = 'ORIGINAL_DAILY_CORE_PENDING_GROUP_EVIDENCE'
+    stats['group_execution_status'] = 'ORIGINAL_DAILY_VIEWS_PUBLIC_CORE_BATCH'
+    stats['core_call_counter_basis'] = 'public_execute_feature_plan_batch_invocations'
+    stats['core_reuse_budget_bytes'] = reuse_budget_bytes
     _guard_resident(0, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
-                    caller_retained_bytes=caller_retained_bytes, reason='caller working set exceeds resident budget')
+                    caller_retained_bytes=caller_retained_bytes, reason='one native Feature window exceeds resident budget')
     symbols = tuple(config['symbols'])
     sessions = tuple(config['read_sessions'])
     outputs = list(config['feature_sessions'])
@@ -263,8 +501,27 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
              'ordered covered matrix Feature outputs required')
     _require(all(positions[day]+1 >= history_sessions for day in outputs), 'Feature lookback incomplete')
     begin = time.perf_counter()
+    begin_ns = time.perf_counter_ns()
     start = 0
     completed = 0
+    base = _owned_bytes([config, chosen, catalog.payload, qlib_inputs['view_reference']])
+    # Before reading, reserve metadata/wires and possible Core cells as well as
+    # native numbers. Later guards replace these coarse dimensions with actual
+    # Python graphs and exact Plan node/source dimensions.
+    daily_keys = history_sessions*len(symbols)
+    read_estimate = daily_keys*(8192+1024*len(FIELDS))
+    pending_estimate = daily_keys*(2048+256*len(FIELDS))
+    _guard_resident(base+reuse_budget_bytes+12*_owned_bytes(chosen)+3*_owned_bytes(catalog.payload),
+        maximum_resident_bytes=maximum_resident_bytes, stats=stats,
+        caller_retained_bytes=caller_retained_bytes, reason='Feature scope plan compilation exceeds resident budget')
+    budget_plan = _core_budget_plan(catalog, config['feature_selection'])
+    core_estimate, output_estimate, dimensions = _core_preflight_bounds(budget_plan, history_sessions, len(symbols))
+    stats['core_preflight_input_cells'] = dimensions['input_cells']
+    stats['core_preflight_node_cells'] = dimensions['node_cells']
+    stats['core_preflight_workspace_bytes'] = core_estimate
+    stats['core_preflight_output_bytes'] = output_estimate
+    base += _owned_bytes(budget_plan)
+    del dimensions
     while start < len(outputs):
         count = min(output_block_sessions, len(outputs)-start)
         while True:
@@ -272,17 +529,23 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
             history = sessions[positions[block[0]]-history_sessions+1:positions[block[-1]]+1]
             # Reserve room for Reader, derived wires and Core snapshots too.
             estimate = len(history)*len(symbols)*(512+32*len(FIELDS))
-            if estimate <= maximum_resident_bytes//3 or count == 1:
+            combined = base+estimate+reuse_budget_bytes+read_estimate+core_estimate+count*(pending_estimate+output_estimate)
+            if (estimate <= maximum_resident_bytes//3 and
+                    combined+_caller_bytes(caller_retained_bytes) <= maximum_resident_bytes) or count == 1:
                 break
             count = max(1, count//2)
         _guard_resident(estimate, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
             caller_retained_bytes=caller_retained_bytes, owner_limit=maximum_resident_bytes//3,
             reason='one native Feature window exceeds resident budget')
+        _guard_resident(combined, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
+            caller_retained_bytes=caller_retained_bytes, reason='one native Feature window exceeds resident budget')
         stats['native_window_reads'] += 1
+        tick = time.perf_counter_ns()
         native = qlib_inputs['view'].read(fields=FIELDS, symbols=symbols, start=history[0], end=history[-1])
         window = _NativeWindow(native, sessions=history, symbols=symbols,
                                instrument_map=qlib_inputs['view_reference']['instrument_map'])
         del native
+        stats['native_window_read_ns'] += time.perf_counter_ns()-tick
         _guard_resident(window.bytes, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
             caller_retained_bytes=caller_retained_bytes, owner_limit=maximum_resident_bytes//3,
             reason='native Feature window exceeds resident budget')
@@ -290,6 +553,7 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
         stats['native_window_peak_sessions'] = max(stats['native_window_peak_sessions'], len(history))
         stats['native_window_peak_bytes'] = max(stats['native_window_peak_bytes'], window.bytes)
         previous = None
+        pending = []
         for day in block:
             position = positions[day]
             history = sessions[position-history_sessions+1:position+1]
@@ -298,29 +562,73 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
             factor_query = replace(qlib_inputs['factor_query'], sessions=history, cutoff_by_session=cutoffs)
             member_query = replace(qlib_inputs['member_query'], sessions=history, cutoff_by_session=cutoffs)
             previous_bytes = _owned_bytes(previous)
+            resident_base = base+window.bytes+previous_bytes
+            before_read = resident_base+_pending_core_bytes(pending)+read_estimate+core_estimate+reuse_budget_bytes
+            if pending and before_read+_caller_bytes(caller_retained_bytes) > maximum_resident_bytes:
+                stats['batch_budget_flushes'] += 1
+                completed = yield from _iter_core_feature_batch(pending, resident_base=resident_base,
+                    maximum_resident_bytes=maximum_resident_bytes, reuse_budget_bytes=reuse_budget_bytes,
+                    stats=stats, caller_retained_bytes=caller_retained_bytes, progress=progress,
+                    completed=completed, total=len(outputs), begin=begin)
+            retained_pending = base+previous_bytes+_owned_bytes(pending)+reuse_budget_bytes
+            _guard_resident(resident_base+_pending_core_bytes(pending)+read_estimate+reuse_budget_bytes,
+                maximum_resident_bytes=maximum_resident_bytes, stats=stats,
+                caller_retained_bytes=caller_retained_bytes, reason='one Reader Feature view exceeds resident budget')
             stats['data_read_calls'] += 1
-            prices = window.project(data.read(snapshot=config['snapshot'], query=price_query),
+            tick = time.perf_counter_ns()
+            source = data.read(snapshot=config['snapshot'], query=price_query)
+            stats['data_read_ns'] += time.perf_counter_ns()-tick
+            prices = window.project(source,
                 view_ref=qlib_inputs['view_reference']['view_id'], stats=stats,
-                maximum_resident_bytes=maximum_resident_bytes, retained_bytes=previous_bytes,
+                maximum_resident_bytes=maximum_resident_bytes, retained_bytes=retained_pending,
                 caller_retained_bytes=caller_retained_bytes)
+            del source
+            _guard_resident(resident_base+_owned_bytes(pending)+reuse_budget_bytes+_batch_bytes(prices)+read_estimate,
+                maximum_resident_bytes=maximum_resident_bytes, stats=stats,
+                caller_retained_bytes=caller_retained_bytes, reason='one Reader Feature view exceeds resident budget')
             stats['data_read_calls'] += 1
-            factors = window.project(data.read(snapshot=config['snapshot'], query=factor_query),
+            tick = time.perf_counter_ns()
+            source = data.read(snapshot=config['snapshot'], query=factor_query)
+            stats['data_read_ns'] += time.perf_counter_ns()-tick
+            factors = window.project(source,
                 view_ref=qlib_inputs['view_reference']['view_id'], stats=stats,
-                maximum_resident_bytes=maximum_resident_bytes, retained_bytes=previous_bytes+_batch_bytes(prices),
+                maximum_resident_bytes=maximum_resident_bytes, retained_bytes=retained_pending+_batch_bytes(prices),
                 caller_retained_bytes=caller_retained_bytes)
+            del source
+            # Public adjustment serializes source/derivation lineage. Reserve
+            # those copies before calling it, rather than after large wires exist.
+            adjustment_reserve = resident_base+_owned_bytes(pending)+reuse_budget_bytes+24*sum(
+                _batch_bytes(batch) for batch in (prices, factors))
+            _guard_resident(adjustment_reserve, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
+                caller_retained_bytes=caller_retained_bytes, reason='Feature adjustment/source working set exceeds resident budget')
+            tick = time.perf_counter_ns()
             adjusted, adjusted_wire = _adjust_feature(prices, factors, day, _with_wire=True)
+            _guard_resident(resident_base+_owned_bytes(pending)+reuse_budget_bytes+
+                sum(_batch_bytes(batch) for batch in (prices, factors, adjusted))+_owned_bytes(adjusted_wire)+read_estimate,
+                maximum_resident_bytes=maximum_resident_bytes, stats=stats,
+                caller_retained_bytes=caller_retained_bytes, reason='Feature membership/source working set exceeds resident budget')
             stats['data_read_calls'] += 1
+            membership_tick = time.perf_counter_ns()
             membership = data.members(snapshot=config['snapshot'], query=member_query)
-            retained = window.bytes+previous_bytes+sum(_batch_bytes(batch) for batch in (prices, factors, adjusted))
+            stats['data_read_ns'] += time.perf_counter_ns()-membership_tick
+            retained = resident_base+_owned_bytes(pending)+reuse_budget_bytes+sum(_batch_bytes(batch) for batch in (prices, factors, adjusted))
             reserve = retained+_owned_bytes(adjusted_wire)+2*_batch_bytes(membership)
             _guard_resident(reserve, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature membership/source working set exceeds resident budget')
             membership_wire = membership.to_json()
+            _guard_resident(retained+12*_owned_bytes([adjusted_wire, membership_wire]),
+                maximum_resident_bytes=maximum_resident_bytes, stats=stats,
+                caller_retained_bytes=caller_retained_bytes, reason='Feature adapter/wire copies exceed resident budget')
             adapted = _adapt_decision_wires(adjusted_wire, membership_wire,
                 recipe_ref=catalog.recipe_ref(config['feature_selection'], normalized=True),
                 output_keys=tuple((security, day) for security in symbols), source_granularity='batch_field')
             plan = build_feature_plan(adapted.plan, config['feature_selection'], catalog=catalog, normalized=True)
-            signature = _view_signature(plan, adapted.facts, adapted.context, calendar=sessions)
+            documents = [plan, adapted.facts, adapted.context]
+            _guard_resident(retained+_owned_bytes([adjusted_wire, membership_wire, adapted.source_evidence])+
+                12*_owned_bytes(documents), maximum_resident_bytes=maximum_resident_bytes, stats=stats,
+                caller_retained_bytes=caller_retained_bytes, reason='Feature Core snapshot copies exceed resident budget')
+            wires = plan.to_dict(), adapted.facts.to_dict(), adapted.context.to_dict()
+            signature = _view_signature(plan, adapted.facts, adapted.context, calendar=sessions, _wires=wires)
             if previous is not None:
                 classification = classify_shared_feature_views(previous, signature)
                 counts = stats['classifier_status_counts']
@@ -330,48 +638,53 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                 for reason in classification['reasons']:
                     counts[reason] = counts.get(reason, 0)+1
             previous = signature
-            owned = window.bytes+sum(int(batch.frame.memory_usage(deep=True).sum())
+            owned = base+window.bytes+reuse_budget_bytes+sum(int(batch.frame.memory_usage(deep=True).sum())
                 for batch in (prices, factors, adjusted, membership))+_owned_bytes([
                     *[[batch.field_meta, batch.context] for batch in (prices, factors, adjusted, membership)],
-                    adjusted_wire, membership_wire, signature, plan.payload, adapted.facts.payload,
-                    adapted.context.payload, adapted.plan.payload, plan.to_dict(), adapted.facts.to_dict(),
-                    adapted.context.to_dict(), adapted.source_evidence])
+                    pending, previous, adjusted_wire, membership_wire, signature, documents,
+                    adapted.plan, wires, adapted.source_evidence])
             _guard_resident(owned, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature input working graph exceeds resident budget')
-            frame = execute_feature_plan(plan, adapted.facts, adapted.context)
-            stats['core_calls'] += 1
-            stats['feature_core_calls'] += 1
-            stats['core_single_output_groups'] += 1
-            frame_wire = frame.to_dict()
             members = {row['security_id']: row['is_member'] for row in membership_wire['records'] if row['session'] == day}
-            rows = [{'security_id': row['security_id'], 'session': day, 'values': row['values'],
-                'availability': row['availability'], 'validity': row['valid'], 'reasons': row['reasons'],
-                'member': members[row['security_id']], 'knowledge_cutoff': config['cutoff_by_session'][day],
-                'source_refs': [frame.identity, plan.identity]} for row in frame_wire['rows']]
-            evidence = {'session': day, 'core_frame_ref': frame.identity, 'core_plan': plan.to_dict(),
+            evidence = {'session': day, 'core_plan': wires[0],
                 'fact_ref': adapted.facts.identity, 'context_ref': adapted.context.identity,
                 'sessions': list(history), 'cutoffs': cutoffs, 'adjusted_input_ref': digest(adjusted_wire),
                 'membership_ref': digest(membership_wire), 'source_evidence': {key: {
                     **{name: value for name, value in source.items() if name != 'provenance_by_key'},
                     'provenance_by_key_ref': digest(source['provenance_by_key'])}
                     for key, source in adapted.source_evidence.items()}}
-            owned += _owned_bytes([frame.payload, frame_wire, rows, evidence])
-            _guard_resident(owned, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
-                caller_retained_bytes=caller_retained_bytes, reason='Feature output working graph exceeds resident budget')
-            # Release all temporary source/panel/Core carriers before yielding.
-            del prices, factors, adjusted, adjusted_wire, membership, membership_wire, adapted, plan, frame, frame_wire
-            completed += 1
-            if progress is not None:
-                progress({'stage': 'matrix_features', 'completed': completed, 'total': len(outputs),
-                          'session': day, 'seconds': time.perf_counter()-begin})
-            live = window.bytes+_owned_bytes([signature, rows, evidence])
-            _guard_resident(live, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
-                caller_retained_bytes=caller_retained_bytes, reason='Feature yield working graph exceeds resident budget')
-            stats['yield_live_bytes'] = live
-            try:
-                yield rows, evidence
-            finally:
-                stats['yield_live_bytes'] = 0
-            del rows, evidence
-        del window, previous
+            workspace, output_reserve = _core_view_bounds(*wires)
+            current_view = ((plan, adapted.facts, adapted.context), evidence, members, workspace, output_reserve)
+            # Only immutable original Documents and compact saved provenance
+            # survive collection. No source DataFrames or full adapter graph do.
+            del prices, factors, adjusted, adjusted_wire, membership, membership_wire, adapted, plan
+            del wires, documents, evidence, members
+            stats['feature_adaptation_ns'] += time.perf_counter_ns()-tick
+            read_estimate = max(read_estimate, owned-(resident_base+_owned_bytes(pending)+reuse_budget_bytes))
+            resident_base = base+window.bytes+_owned_bytes(previous)
+            candidate = pending+[current_view]
+            must_flush = pending and resident_base+_pending_core_bytes(candidate)+reuse_budget_bytes+_caller_bytes(caller_retained_bytes) > maximum_resident_bytes
+            del candidate
+            if must_flush:
+                stats['batch_budget_flushes'] += 1
+                # The just-prepared compact view remains live while older views
+                # execute/yield; charge it too. Recheck the caller after flushing.
+                completed = yield from _iter_core_feature_batch(pending,
+                    resident_base=resident_base+_owned_bytes(current_view),
+                    maximum_resident_bytes=maximum_resident_bytes, reuse_budget_bytes=reuse_budget_bytes,
+                    stats=stats, caller_retained_bytes=caller_retained_bytes, progress=progress,
+                    completed=completed, total=len(outputs), begin=begin)
+            pending.append(current_view)
+            del current_view
+            stats['pending_view_peak_bytes'] = max(stats['pending_view_peak_bytes'], _owned_bytes(pending))
+            _guard_resident(base+window.bytes+_owned_bytes(previous)+_pending_core_bytes(pending)+reuse_budget_bytes,
+                maximum_resident_bytes=maximum_resident_bytes, stats=stats,
+                caller_retained_bytes=caller_retained_bytes, reason='Core batch snapshots/output working set exceeds resident budget')
+        completed = yield from _iter_core_feature_batch(pending,
+            resident_base=base+window.bytes+_owned_bytes(previous), maximum_resident_bytes=maximum_resident_bytes,
+            reuse_budget_bytes=reuse_budget_bytes, stats=stats, caller_retained_bytes=caller_retained_bytes,
+            progress=progress, completed=completed, total=len(outputs), begin=begin)
+        del window, previous, signature, pending
         start += count
+    stats['feature_pipeline_total_ns'] = time.perf_counter_ns()-begin_ns
+    stats['feature_pipeline_clock_basis'] = 'elapsed_generator_lifetime_including_caller_pauses'
