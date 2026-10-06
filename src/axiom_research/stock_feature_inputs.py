@@ -275,13 +275,13 @@ def _storage_options(options):
     return value
 
 
-def _feature_wire(rows, proof, spec, view):
+def _feature_wire(rows, proof, spec, view, *, digest_fn=digest):
     return seal({'contract_version':'stock_feature_build_v1','catalog_ref':spec['catalog_ref'],
         'selection':spec['feature_selection'],'ordered_features':spec['ordered_features'],
-        'qlib_view':view,'input_evidence_ref':digest(proof),'rows':rows}, 'feature_ref')
+        'qlib_view':view,'input_evidence_ref':digest_fn(proof),'rows':rows}, 'feature_ref')
 
 
-def _feature_contents(proof):
+def _feature_contents(proof, *, digest_fn=digest):
     """Keep Query/version claims reachable in the same admitted metadata."""
     contents = {}; feature_rows = []
     for p in proof:
@@ -290,7 +290,7 @@ def _feature_contents(proof):
             query = source['query_context']['query']; ref = digest(query)
             contents[ref] = query
             if ref not in queries: queries.append(ref)
-        versions = p['source_evidence']; selected = digest(versions)
+        versions = p['source_evidence']; selected = digest_fn(versions)
         contents[selected] = versions
         feature_rows.append({'session':p['session'], 'cutoff':p['cutoffs'][p['session']],
             'history_sessions':p['sessions'], 'adjustment_anchor':p['session'],
@@ -298,13 +298,14 @@ def _feature_contents(proof):
     return contents, feature_rows
 
 
-def _validate_feature_matrix_block(metadata, rows, spec, view, *, universe_id=None):
+def _validate_feature_matrix_block(metadata, rows, spec, view, *, universe_id=None,digest_fn=digest):
     """Admit reconstructed original rows; no Core or storage-side mathematics."""
     from .stock_fold_inputs import grid
     require(type(metadata) is dict and set(metadata) == MATRIX_METADATA_FIELDS and
             metadata['contract_version'] == 'stock_matrix_feature_metadata_v1',
             'exact Feature matrix metadata required')
-    _verify_ref(metadata, 'metadata_ref')
+    require(metadata['metadata_ref']==digest_fn({k:v for k,v in metadata.items() if k!='metadata_ref'}),
+            'Feature matrix original metadata identity mismatch')
     days = ordered(metadata['sessions'], 'matrix Feature block sessions')
     columns = spec['ordered_features']; width = len(columns)
     require(metadata['ordered_features'] == columns and metadata['catalog_ref'] == spec['catalog_ref'] and
@@ -329,12 +330,12 @@ def _validate_feature_matrix_block(metadata, rows, spec, view, *, universe_id=No
         if 'outputs' in p['core_plan']:
             require([output['column'] for output in p['core_plan']['outputs']] == metadata['schema'],
                     'Feature matrix schema differs from original Core output')
-    feature = _feature_wire(rows, proof, spec, view)
+    feature = _feature_wire(rows, proof, spec, view,digest_fn=digest_fn)
     require(feature['feature_ref'] == metadata['original_feature_ref'], 'Feature matrix original slice mismatch')
     require(metadata['row_references'] == {day:{'feature_ref':_feature_wire(
-            [indexed[s,day] for s in spec['universe']], [by_day[day]], spec, view)['feature_ref'],
+            [indexed[s,day] for s in spec['universe']], [by_day[day]], spec, view,digest_fn=digest_fn)['feature_ref'],
             'qlib_view_ref':digest(view)} for day in days}, 'Feature matrix day slice ref mismatch')
-    contents, unused = _feature_contents(proof)
+    contents, unused = _feature_contents(proof,digest_fn=digest_fn)
     require(contents == metadata['contents'], 'Feature matrix reachable source evidence mismatch')
     for row in rows:
         require(type(row['member']) is bool and len(row['values']) == len(row['validity']) ==
@@ -359,25 +360,43 @@ def _validate_feature_matrix_block(metadata, rows, spec, view, *, universe_id=No
 
 
 def _write_feature_matrix_block(target, *, rows, proof, spec, view, schema, index_ref,
-                                row_offset, options, universe_id=None):
+                                row_offset, options, universe_id=None, caller_retained_bytes=None,
+                                metrics=None, descriptor_mapper=None, path_resolver=None):
     from .stock_matrix_storage import instant_us, write_buffer, write_part, write_partition
+    from .stock_native_json import native_digest, make_native_carrier
+    from .stock_matrix_reader import _resident_size
+    maximum=options.get('maximum_resident_bytes',512*1024**2)
+    external=0 if caller_retained_bytes is None else caller_retained_bytes()
     days = [p['session'] for p in proof]
     # Core's rows may use its documented key order. Storage always keys them into
     # the one declared day-major grid, preserving every value/flag/reason.
     by_key = {(r['security_id'],r['session']):r for r in rows}
     require(len(by_key) == len(rows), 'duplicate matrix Feature row')
     rows = [by_key[s,d] for d in days for s in spec['universe']]
-    original = _feature_wire(rows,proof,spec,view)
-    contents, feature_rows = _feature_contents(proof)
-    metadata = seal({'contract_version':'stock_matrix_feature_metadata_v1',
+    retained=external+_resident_size([rows,proof,spec,view,schema,days,by_key])
+    def original_digest(value):
+        return native_digest(value,maximum_workspace_bytes=maximum,
+            caller_retained_bytes=lambda:retained,metrics=metrics,path_resolver=path_resolver)
+    original = _feature_wire(rows,proof,spec,view,digest_fn=original_digest)
+    contents, feature_rows = _feature_contents(proof,digest_fn=original_digest)
+    metadata = {'contract_version':'stock_matrix_feature_metadata_v1',
         'sessions':days,'ordered_features':spec['ordered_features'],'catalog_ref':spec['catalog_ref'],
         'selection':spec['feature_selection'],'qlib_view':view,'schema':schema,
         'rows':[{k:v for k,v in r.items() if k != 'values'} for r in rows],
         'row_references':{day:{'feature_ref':_feature_wire([by_key[s,day] for s in spec['universe']],
-                [p],spec,view)['feature_ref'],'qlib_view_ref':digest(view)} for day,p in zip(days,proof)},
-        'input_evidence':proof,'original_feature_ref':original['feature_ref'],'contents':contents}, 'metadata_ref')
-    _validate_feature_matrix_block(metadata,rows,spec,view,universe_id=universe_id)
-    md = write_part(target,metadata,'metadata_ref'); _bounded(md['path'],DEFAULT_LIMITS); parts=[]
+                [p],spec,view,digest_fn=original_digest)['feature_ref'],'qlib_view_ref':digest(view)} for day,p in zip(days,proof)},
+        'input_evidence':proof,'original_feature_ref':original['feature_ref'],'contents':contents}
+    retained=external+_resident_size([rows,proof,spec,view,schema,days,by_key,original,
+                                      contents,feature_rows,metadata])
+    metadata['metadata_ref']=original_digest(metadata)
+    _validate_feature_matrix_block(metadata,rows,spec,view,universe_id=universe_id,
+                                  digest_fn=original_digest)
+    md=make_native_carrier(target,metadata,'metadata_ref',maximum_source_bytes=8*1024**3,
+        maximum_parent_bytes=DEFAULT_LIMITS['maximum_parent_bytes'],maximum_workspace_bytes=maximum,
+        caller_retained_bytes=lambda:retained,metrics=metrics,
+        descriptor_mapper=descriptor_mapper,path_resolver=path_resolver)
+    if md is None: md=write_part(target,metadata,'metadata_ref')
+    _bounded(md['path'],DEFAULT_LIMITS); parts=[]
     for start in range(0,len(schema),options['column_block']):
         stop=min(start+options['column_block'],len(schema)); shape=[len(rows),stop-start]
         buffers = {
@@ -496,7 +515,7 @@ def _build_feature_matrix(data, *, spec, destination, storage_options, progress)
                 'Feature writer/producer combined working set exceeds resident budget')
         new_parts,new_sources=_write_feature_matrix_block(target,rows=rows,proof=proof,spec=spec,view=view,
             schema=schema,index_ref=row_wire['row_index_ref'],row_offset=len(completed)*len(spec['universe']),
-            options=options,universe_id=universe_id)
+            options=options,universe_id=universe_id,caller_retained_bytes=lambda:combined,metrics=stats)
         published_retained_bytes+=_object_upper_bytes(new_parts)+_object_upper_bytes(new_sources)
         partitions.extend(new_parts); feature_rows.extend(new_sources); completed.extend(p['session'] for p in proof)
         _atomic(checkpoint,seal({'contract_version':'stock_feature_inputs_checkpoint_v2','definition_ref':definition_ref,

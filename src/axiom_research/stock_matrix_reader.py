@@ -8,6 +8,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 import math
+import os
 import sys
 import json
 from hashlib import sha256
@@ -49,17 +50,21 @@ def _fields(value, fields, message):
 class VerifiedMatrixStore:
     """One admission, one file hash/decode, and readonly mmap ownership."""
     def __init__(self, *, maximum_source_bytes=8*1024**3, maximum_matrix_bytes=512*1024**2,
-                 maximum_parent_bytes=64*1024**2, _path_resolver=None):
-        import numpy as np
-        self.np = np
+                 maximum_parent_bytes=64*1024**2, _path_resolver=None,_caller_retained_bytes=None):
+        self._np = None
         for value in (maximum_source_bytes, maximum_matrix_bytes, maximum_parent_bytes):
             require(type(value) is int and value > 0, 'positive matrix byte budget required')
         self.maximum_source_bytes = maximum_source_bytes
         self.maximum_matrix_bytes = maximum_matrix_bytes
         self.maximum_parent_bytes = maximum_parent_bytes
         self._resolve = _path_resolver or (lambda p:Path(p))
+        require(_caller_retained_bytes is None or callable(_caller_retained_bytes),
+                'caller_retained_bytes must be callable')
+        self._caller_retained_bytes=_caller_retained_bytes
         self.descriptors = {}; self.fingerprints = {}; self.json = {}; self.arrays = {}
         self._hashes={}; self._decoded={}
+        self._native_bindings={}; self._carrier_files={}; self._carrier_storage={}
+        self._coverage_verified={}; self._native_verified=set()
         self.content = {}; self.closed = False; self.borrowers = 0; self.resident_bytes = 0; self.lease_bytes=0
         self.metrics = {'unique_descriptor_admissions': 0, 'file_hash_calls': 0,
             'json_decode_calls': 0, 'mmap_opens': 0, 'source_bytes': 0,
@@ -67,6 +72,120 @@ class VerifiedMatrixStore:
             'evaluation_projection_calls': 0,
             'projection_bytes': 0, 'data_read_calls': 0, 'core_calls': 0,
             'train_calls': 0, 'predict_calls': 0, 'account_calls': 0}
+
+    @property
+    def np(self):
+        # Raw-only storage admission must not initialize numerical libraries.
+        if self._np is None:
+            import numpy as np
+            self._np = np
+        return self._np
+
+    def _native_caller_bytes(self, value=None):
+        caller=0 if self._caller_retained_bytes is None else self._caller_retained_bytes()
+        require(type(caller) is int and caller>=0,'nonnegative caller retained byte count required')
+        return caller+self.resident_bytes+self.lease_bytes+_resident_size([
+            self.descriptors,self.fingerprints,self.json,self.arrays,self._hashes,
+            self._decoded,self.content,self._native_bindings,self._carrier_files,
+            self._carrier_storage,self._coverage_verified,self._native_verified,self.metrics,value])
+
+    def native_digest(self, value, *, exclude_ref_key=None):
+        from .stock_native_json import native_digest
+        bindings=tuple(pair for pairs in self._native_bindings.values() for pair in pairs)
+        base=self._native_caller_bytes(value)+sys.getsizeof(bindings)
+        self.check()
+        result=native_digest(value,coverage_bindings=bindings,exclude_ref_key=exclude_ref_key,
+            maximum_workspace_bytes=self.maximum_matrix_bytes,caller_retained_bytes=lambda:base,
+            path_resolver=self._resolve,metrics=self.metrics)
+        self.check()
+        return result
+
+    def _admit_coverage(self, descriptor, *, parent):
+        from .stock_canonical_json import validate_canonical_chunks
+        _fields(descriptor,BUFFER_FIELDS,'exact coverage BufferDesc required')
+        require(descriptor['dtype']=='uint8' and type(descriptor['shape']) is list and
+                len(descriptor['shape'])==1 and type(descriptor['shape'][0]) is int and
+                descriptor['shape'][0]>0 and _ref(descriptor['file_digest']) and
+                descriptor['buffer_digest']==descriptor['file_digest'],'positive uint8 coverage bytes required')
+        path=descriptor['path']; physical=self._resolve(path)
+        require(type(path) is str and Path(path).is_absolute() and not physical.is_symlink(),
+                'fixed coverage file required')
+        mark=file_fingerprint(physical)
+        require(mark[2]==descriptor['shape'][0],'coverage byte length mismatch')
+        old=self.descriptors.get(path)
+        require(old is None or old==descriptor or (set(old)==BUFFER_FIELDS and
+                old['file_digest']==descriptor['file_digest'] and old['buffer_digest']==descriptor['buffer_digest']),
+                'conflicting coverage descriptor')
+        if path in self._coverage_verified:
+            require(self._coverage_verified[path]==(descriptor['file_digest'],mark[2],mark) and
+                    self.fingerprints[path]==mark,'saved coverage source changed')
+            return
+        if path not in self._hashes:
+            require(self.metrics['source_bytes']+mark[2]<=self.maximum_source_bytes,
+                    'matrix source byte budget exceeded')
+        else:
+            require(self._hashes[path]==descriptor['file_digest'] and self.fingerprints[path]==mark,
+                    'saved coverage source changed')
+        base=self._native_caller_bytes(parent)
+        remaining=self.maximum_matrix_bytes-base
+        require(remaining>0,'coverage validation workspace budget exceeded')
+        block_size=max(1,min(65536,remaining//16))
+        def chunks():
+            with physical.open('rb') as stream:
+                before=os.fstat(stream.fileno())
+                require((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,
+                         before.st_ctime_ns)==mark,'coverage changed before validation')
+                while chunk:=stream.read(block_size):
+                    yield chunk
+                after=os.fstat(stream.fileno())
+                require((after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,
+                         after.st_ctime_ns)==mark and file_fingerprint(physical)==mark,
+                        'coverage changed during validation')
+        result=validate_canonical_chunks(chunks(),maximum_workspace_bytes=self.maximum_matrix_bytes,
+                                        caller_retained_bytes=lambda:base)
+        require(result['digest']==descriptor['file_digest'] and result['size']==mark[2] and
+                file_fingerprint(physical)==mark,'coverage identity mismatch')
+        # Only successful syntax/hash/mutation checks enter this Store's cache.
+        if path not in self._hashes:
+            self.metrics['source_bytes']+=mark[2]; self.metrics['unique_descriptor_admissions']+=1
+        self.metrics['file_hash_calls']+=1; self.metrics['hash_bytes']+=result['size']
+        self.metrics['coverage_validation_calls']=self.metrics.get('coverage_validation_calls',0)+1
+        self.metrics['coverage_validation_bytes']=self.metrics.get('coverage_validation_bytes',0)+result['size']
+        self.metrics['coverage_workspace_peak_bytes']=max(self.metrics.get('coverage_workspace_peak_bytes',0),
+                                                        result['peak_workspace_bytes'])
+        self._hashes[path]=result['digest']; self.fingerprints[path]=mark
+        self.descriptors.setdefault(path,deepcopy(descriptor))
+        self._coverage_verified[path]=(result['digest'],result['size'],mark)
+        require(self._native_caller_bytes(parent)<=self.maximum_matrix_bytes,
+                'coverage admission metadata budget exceeded')
+
+    def source_paths(self, descriptor):
+        path=descriptor['path']
+        return (path,*self._carrier_files.get(path,()))
+
+    def storage_binding(self, descriptor):
+        return deepcopy(self._carrier_storage.get(descriptor['path']))
+
+    def coverage_identity(self, context):
+        for pairs in self._native_bindings.values():
+            for original,descriptor in pairs:
+                if original is context:
+                    return True,descriptor['buffer_digest']
+        if 'coverage' in context:
+            return True,self.native_digest(context['coverage'])
+        return False,None
+
+    def context_equal(self, left, right, *, right_coverage_identity=None):
+        left_bound=any(original is left for pairs in self._native_bindings.values()
+                       for original,_ in pairs)
+        right_bound=any(original is right for pairs in self._native_bindings.values()
+                       for original,_ in pairs)
+        if not left_bound and not right_bound and right_coverage_identity is None:
+            return left==right
+        return ({k:v for k,v in left.items() if k!='coverage'}==
+                {k:v for k,v in right.items() if k!='coverage'} and
+                self.coverage_identity(left)==(self.coverage_identity(right) if
+                    right_coverage_identity is None else right_coverage_identity))
 
     def _register(self, descriptor):
         require(not self.closed, 'matrix store is closed')
@@ -109,28 +228,71 @@ class VerifiedMatrixStore:
         path=str(Path(path).absolute()); physical=self._resolve(path)
         require(physical.stat().st_size<=self.maximum_parent_bytes,'matrix parent byte budget exceeded')
         if path not in self._decoded:
+            # Parent headers still use the existing stdlib decoder. Reserve
+            # a conservative token/container/pairs/UTF-8 conversion envelope
+            # before it allocates; large coverage never enters this decoder.
+            require(self._native_caller_bytes()+max(4096,128*physical.stat().st_size)
+                    <=self.maximum_matrix_bytes,'matrix parent decode workspace budget exceeded')
             self._decoded[path]=_read(physical); self.metrics['json_decode_calls']+=1
+            require(self._native_caller_bytes()<=self.maximum_matrix_bytes,
+                    'decoded matrix parent resident budget exceeded')
         return self._decoded[path]
 
-    def read_json(self, descriptor, ref_key):
+    def read_json(self, descriptor, ref_key, *, _revisit=False,_raw_bundle=False):
         _fields(descriptor, {'path', 'file_digest', ref_key}, 'exact matrix parent descriptor required')
         require(_ref(descriptor[ref_key]), 'matrix parent content ref required')
         fresh = self._register(descriptor); path = descriptor['path']
-        if fresh:
+        if fresh or (_revisit and path not in self.json):
             require(self.fingerprints[path][2] <= self.maximum_parent_bytes, 'matrix parent byte budget exceeded')
             value = self._decode_once(path)
             require(file_fingerprint(self._resolve(path)) == self.fingerprints[path], 'matrix parent changed during decode')
-            _verify_ref(value, ref_key)
-            require(value[ref_key] == descriptor[ref_key], 'matrix parent content mismatch')
+            carried=(type(value) is dict and value.get('contract_version')=='stock_native_json_carrier_v1')
+            if carried:
+                from .stock_native_json import validate_carrier_shape,verify_carrier_native
+                base=self._native_caller_bytes(value)
+                bindings=validate_carrier_shape(value,ref_key,maximum_workspace_bytes=self.maximum_matrix_bytes,
+                    caller_retained_bytes=lambda:base,metrics=self.metrics)
+                require(descriptor[ref_key]==value['native_ref']==value['skeleton'][ref_key],
+                        'matrix carrier original content mismatch')
+                for _,blob in bindings: self._admit_coverage(blob,parent=value)
+                self._native_bindings[path]=tuple(bindings)
+                base=self._native_caller_bytes(value)
+                self.check()
+                if path not in self._native_verified:
+                    verify_carrier_native(value,ref_key,coverage_bindings=bindings,
+                        maximum_workspace_bytes=self.maximum_matrix_bytes,caller_retained_bytes=lambda:base,
+                        path_resolver=self._resolve,metrics=self.metrics)
+                    self._native_verified.add(path)
+                self.check()
+                self._carrier_files[path]=tuple(sorted({blob['path'] for _,blob in bindings}))
+                self._carrier_storage[path]={'representation':'stock_native_json_carrier_v1',
+                                             'carrier':deepcopy(descriptor)}
+                value=value['skeleton']
+            else:
+                if _raw_bundle and ref_key=='label_ref' and value.get('contract_version')=='stock_label_bundle_v1':
+                    _verify_ref(value,'label_ref')
+                    choices=[value[name] for name in ('training','evaluation')
+                             if value[name].get('label_ref')==descriptor['label_ref']]
+                    require(len(choices)==1,'missing/ambiguous original Raw bundle build')
+                    value=choices[0]
+                _verify_ref(value, ref_key)
+                require(value[ref_key] == descriptor[ref_key], 'matrix parent content mismatch')
             # Two exact canonical contents may share the decoded object.
             content_key = ref_key, descriptor[ref_key]
-            if content_key in self.content:
+            if carried:
+                # Representation and hole bindings are explicit; native SHA
+                # equality does not make an inline graph a small skeleton.
+                pass
+            elif content_key in self.content:
                 require(self.content[content_key] == value, 'conflicting canonical matrix content')
                 value = self.content[content_key]
             else:
                 self.content[content_key] = value
             self.json[path] = value
         require(path in self.json, 'released matrix proof cannot be readmitted inside a batch')
+        require(all(file_fingerprint(self._resolve(blob))==self.fingerprints[blob]
+                    for blob in self._carrier_files.get(path,())),
+                'saved coverage source changed')
         return self.json[path]
 
     def drop_json(self, descriptor, ref_key):
@@ -138,6 +300,7 @@ class VerifiedMatrixStore:
         self.json.pop(descriptor['path'], None)
         self._decoded.pop(descriptor['path'],None)
         self.content.pop((ref_key, descriptor[ref_key]), None)
+        self._native_bindings.pop(descriptor['path'],None)
 
     def buffer(self, descriptor):
         _fields(descriptor, BUFFER_FIELDS, 'exact matrix buffer descriptor required')
@@ -173,6 +336,8 @@ class VerifiedMatrixStore:
         for array in self.arrays.values():
             if hasattr(array, '_mmap'): array._mmap.close()
         self.arrays.clear(); self.json.clear(); self.content.clear(); self._decoded.clear(); self.closed = True
+        self._native_bindings.clear(); self._carrier_files.clear(); self._carrier_storage.clear()
+        self._coverage_verified.clear(); self._native_verified.clear()
 
     def __enter__(self): self.check(); return self
     def __exit__(self,*args): self.close()
@@ -372,15 +537,15 @@ def admit_feature_matrix_parts(store, *, spec,view,schema,row_index,partitions,c
                     require(row['validity'][k] is valid,'Feature binary validity mismatch')
                     at=row['availability'][k]; present=bool(arrays['available_at_validity'][i,j])
                     require(present is (at is not None) and (not present or int(arrays['available_at_utc_us'][i,j])==_us(at)), 'Feature binary clock mismatch')
-        _validate_feature_matrix_block(metadata,rows,spec,view,universe_id=universe_id)
+        _validate_feature_matrix_block(metadata,rows,spec,view,universe_id=universe_id,digest_fn=store.native_digest)
         compact=_CompactRows(rows,len(spec['ordered_features']),store.np); compact_bytes+=compact.bytes
         require(compact_bytes<=store.maximum_matrix_bytes,'Feature compact metadata budget exceeded')
         blocks.append({'start':start,'count':count,'parts':parts, 'rows':compact,
             'row_references':deepcopy(metadata['row_references']),
-            '_source_selection_rows':deepcopy(_feature_contents(metadata['input_evidence'])[1]),
+            '_source_selection_rows':deepcopy(_feature_contents(metadata['input_evidence'],digest_fn=store.native_digest)[1]),
             '_original_feature_ref':metadata['original_feature_ref'],'_sessions':list(metadata['sessions'])})
         for ref,content in metadata['contents'].items():
-            require(_ref(ref) and digest(content)==ref,'Feature source evidence content hash mismatch')
+            require(_ref(ref) and store.native_digest(content)==ref,'Feature source evidence content hash mismatch')
             reachable.add(ref)
         parentrefs.update(metadata['row_references'])
         store.drop_json(parts[0][0]['metadata'],'metadata_ref')
@@ -714,16 +879,18 @@ def _raw_row_types(row):
 
 class _RawAdmission:
     """Compact once-validated Raw rows; never retain the selected price graph."""
-    def __init__(self,descriptor,raw,indexed,common,np):
+    def __init__(self,descriptor,raw,indexed,common,np,*,store=None):
         for row in raw['rows']: _raw_row_types(row)
         self.provenance={'raw_build':deepcopy(descriptor),**{k:deepcopy(raw[k]) for k in
             ('contract_version','label_spec','calendar_ref','source_ref','source_evidence','label_ref')}}
+        self.coverage_identity=(store.coverage_identity(raw['source_evidence']['context'])
+                                if store is not None and store.storage_binding(descriptor) is not None else None)
         self.days=sorted({d for _,d in indexed}); self.securities=list(common['universe'])
         self.day_positions={d:i for i,d in enumerate(self.days)}
         self.security_positions={s:i for i,s in enumerate(self.securities)}
         rows=[indexed[s,d] for d in self.days for s in self.securities]
         self.rows=_TargetBlock(rows,start=0,table='raw_admission',np=np)
-        self.bytes=self.rows.bytes+_resident_size([self.provenance,self.days,self.securities,
+        self.bytes=self.rows.bytes+_resident_size([self.provenance,self.coverage_identity,self.days,self.securities,
             self.day_positions,self.security_positions])
 
     def __contains__(self,key):
@@ -857,6 +1024,7 @@ def _label_admission(partitions, *, view,feature,store,row_index,core_wrappers,c
             fold_paths[fold_ref].add(p['metadata']['path'])
             fold_paths[fold_ref].update(d['path'] for d in p['buffers'].values())
             metadata=store.read_json(p['metadata'],'metadata_ref')
+            fold_paths[fold_ref].update(store.source_paths(p['metadata']))
             _fields(metadata,{'contract_version','role','fold_spec_ref','cutoff','rows','raw_build','core_result_refs','contents','metadata_ref'},
                     'exact matrix Target metadata required')
             role='evaluation' if p['table']=='evaluation_raw_labels' else 'training'
@@ -871,7 +1039,7 @@ def _label_admission(partitions, *, view,feature,store,row_index,core_wrappers,c
             fold_paths[fold_ref].add(raw_desc['path'])
             if raw_key not in raw_cache:
                 raw=store.read_json(raw_desc,'label_ref'); indexed=validate_raw(raw,common,cutoff)
-                admission=_RawAdmission(raw_desc,raw,indexed,common,np)
+                admission=_RawAdmission(raw_desc,raw,indexed,common,np,store=store)
                 store.resident_bytes+=admission.bytes
                 require(store.resident_bytes<=store.maximum_matrix_bytes,'Raw compact metadata budget exceeded')
                 raw_cache[raw_key]=admission; raw_provenance[raw_key]=admission.provenance
@@ -882,6 +1050,7 @@ def _label_admission(partitions, *, view,feature,store,row_index,core_wrappers,c
                 store.drop_json(raw_desc,'label_ref'); del raw,indexed
             else:
                 store._register(raw_desc)
+            fold_paths[fold_ref].update(store.source_paths(raw_desc))
             raw_index=raw_cache[raw_key]; raw=raw_index.provenance
             query,_,anchor,native_cutoff=_outcome_query(raw['source_evidence']['context'],common['calendar'])
             require(native_cutoff==_instant(cutoff),'Target original Query current cutoff mismatch')
@@ -891,12 +1060,13 @@ def _label_admission(partitions, *, view,feature,store,row_index,core_wrappers,c
                 require(bool(refs),'normalized Target requires saved Core result')
             else: require(not refs,'raw Target cannot claim normalization output')
             for ref,content in metadata['contents'].items():
-                require(_ref(ref) and digest(content)==ref,'Target source evidence content hash mismatch'); reachable.add(ref)
+                require(_ref(ref) and store.native_digest(content)==ref,'Target source evidence content hash mismatch'); reachable.add(ref)
             selected=[(ref,content) for ref,content in metadata['contents'].items() if type(content) is dict and
-                      set(content)=={'context','records','field_meta'} and content['context']==raw['source_evidence']['context']]
+                      set(content)=={'context','records','field_meta'} and store.context_equal(content['context'],
+                        raw['source_evidence']['context'],right_coverage_identity=raw_index.coverage_identity)]
             require(len(selected)==1,'Target actual selected-version evidence missing or ambiguous')
             selected_ref,selected_wire=selected[0]
-            require(digest(selected_wire)==raw['source_ref'] and digest(selected_wire['records'])==raw['source_evidence']['records_ref'] and
+            require(store.native_digest(selected_wire)==raw['source_ref'] and digest(selected_wire['records'])==raw['source_evidence']['records_ref'] and
                     digest(selected_wire['field_meta'])==raw['source_evidence']['field_meta_ref'], 'Target source evidence/raw original refs mismatch')
             qref=digest(query); require(metadata['contents'].get(qref)==query,'Target original logical Query not reachable')
             cohorts=[(ref,c) for ref,c in metadata['contents'].items() if type(c) is dict and
@@ -1049,25 +1219,79 @@ def _target_row(targets,table,fold_ref,offset,key):
 
 class MatrixFoldProjection:
     """One active fold lease; closing the owning batch while borrowed fails."""
+    # Fixed small lease object/dict, readonly array headers, weakref/finalizer
+    # registry insertion and callback/keyword construction workspace. Payload
+    # graphs/native matrices are charged separately, and the same reserve is
+    # returned by explicit close and GC.
+    HEADER_RESERVE_BYTES=4096
     def __init__(self,store,**values):
         self._store=store; self._closed=False; self.__dict__.update(values); store.borrowers+=1
-        self._finalizer=weakref.finalize(self,MatrixFoldProjection._release,weakref.ref(store),getattr(self,'_lease_bytes',0))
+        owner=store if values.get('_close_store_on_release',False) else None
+        self._finalizer=weakref.finalize(self,MatrixFoldProjection._release,weakref.ref(store),getattr(self,'_lease_bytes',0),owner)
     @staticmethod
-    def _release(reference,lease_bytes):
+    def _release(reference,lease_bytes,owner=None):
         store=reference()
         if store is not None:
             store.borrowers-=1; store.lease_bytes-=lease_bytes
+        if owner is not None and not owner.closed: owner.close()
     def close(self):
         if not self._closed:
             owned_state=getattr(self,'_owned_state',None)
             self._closed=True; self._finalizer()
             for name in ('X','y','P','features','labels','common','feature_rows','training_keys',
                          'candidate_keys','evaluation','excluded','raw_refs','raw_provenance',
-                         'label_leaf_bindings','fold_binding','source_record_indices','_owned_state'):
+                         'label_leaf_bindings','fold_binding','source_record_indices','_owned_state',
+                         'raw','storage_binding','source_records','source_fingerprints'):
                 setattr(self,name,None)
             if owned_state is not None: owned_state.close()
     def __enter__(self): require(not self._closed,'matrix fold projection is closed'); return self
     def __exit__(self,*args): self.close()
+
+
+def _admit_raw_label(descriptor, *, store=None, limits=None):
+    """Borrow one fully admitted Raw source, including an external override.
+
+    Carrier/native/physical closure admission is shared with matrix loading.
+    The consumer retains its existing Raw scope/PIT/row validation. This entry
+    does not require the source to belong to any batch's source-index table.
+    """
+    own=store is None
+    if own:
+        budgets={'maximum_source_bytes':8*1024**3,'maximum_matrix_bytes':512*1024**2} if limits is None else deepcopy(limits)
+        _fields(budgets,{'maximum_source_bytes','maximum_matrix_bytes'},'exact matrix byte limits required')
+        store=VerifiedMatrixStore(**budgets)
+    else:
+        require(limits is None,'existing Store owns Raw admission limits')
+    controls=lambda:_resident_size([store.descriptors,store.fingerprints,store._hashes,
+        store._carrier_files,store._carrier_storage,store._coverage_verified,store._native_verified,store.metrics])
+    before=controls(); controls_recorded=False
+    try:
+        store.check()
+        raw=store.read_json(descriptor,'label_ref',_revisit=True,_raw_bundle=True)
+        require(raw.get('contract_version')=='stock_label_build_v1' and type(raw.get('rows')) is list and
+                type(raw.get('source_evidence')) is dict and type(raw['source_evidence'].get('context')) is dict,
+                'saved original Raw Label build required')
+        binding=store.storage_binding(descriptor)
+        paths=store.source_paths(descriptor)
+        records=tuple((path,store._hashes[path]) for path in sorted(paths))
+        marks={path:store.fingerprints[path] for path in paths}
+        store.drop_json(descriptor,'label_ref')
+        # Persistent ingress marks/cache are separate from the borrowed Raw
+        # graph, and belong to this Store after the lease is returned.
+        store.resident_bytes+=max(0,controls()-before)
+        controls_recorded=True
+        size=_resident_size([raw,binding,records,marks])+MatrixFoldProjection.HEADER_RESERVE_BYTES
+        require(store.resident_bytes+store.lease_bytes+size<=store.maximum_matrix_bytes,
+                'Raw override lease resident budget exceeded')
+        store.check(); store.lease_bytes+=size
+        return MatrixFoldProjection(store,raw=raw,storage_binding=binding,source_records=records,
+            source_fingerprints=marks,_lease_bytes=size,_close_store_on_release=own)
+    except BaseException:
+        store.drop_json(descriptor,'label_ref')
+        if not controls_recorded:
+            store.resident_bytes+=max(0,controls()-before)
+        if own and not store.closed: store.close()
+        raise
 
 
 def _saved_inputs(inputs,spec,view):
@@ -1210,6 +1434,15 @@ class MatrixBatchState:
             'label_leaf_rows':leaves,'label_leaf_contents':{ref:deepcopy(self.leaf_contents[ref]) for ref in sorted(leaf_refs)},
             'saved_fold_binding':self._saved_fold_binding(inputs,spec,features),
             'source_records_ref':self.source_records_ref}
+        storage={}
+        for raw in value['raw_provenance']+value['training_raw_provenance']:
+            binding=self.store.storage_binding(raw['raw_build'])
+            if binding is not None:
+                ref=raw['label_ref']
+                require(binding['carrier']==raw['raw_build'] and binding['carrier']['label_ref']==ref and
+                        (ref not in storage or storage[ref]==binding),'conflicting Raw storage binding')
+                storage[ref]=binding
+        if storage: value['saved_fold_binding']['raw_provenance_storage']=storage
         require(self.store.resident_bytes+self.store.lease_bytes+_resident_size(value)<=self.store.maximum_matrix_bytes,
                 'OOS evaluation resident byte budget exceeded')
         value['source_records']=self.source_records
@@ -1229,7 +1462,8 @@ class MatrixBatchState:
             'label_leaf_bindings':{'rows':value['label_leaf_rows'],'contents':value['label_leaf_contents']},
             'fold_binding':{**value['saved_fold_binding'],'training_raw_provenance':value['training_raw_provenance']},
             'source_record_indices':self.source_record_indices[digest(spec)]}
-        lease_bytes=_resident_size({k:v for k,v in payload.items() if k!='source_record_indices'})
+        lease_bytes=(_resident_size({k:v for k,v in payload.items() if k!='source_record_indices'})+
+                     MatrixFoldProjection.HEADER_RESERVE_BYTES)
         require(self.store.resident_bytes+self.store.lease_bytes+lease_bytes<=self.store.maximum_matrix_bytes,
                 'OOS evaluation lease resident byte budget exceeded')
         self.store.check(); self.store.lease_bytes+=lease_bytes
@@ -1287,7 +1521,8 @@ class MatrixBatchState:
         require(training_rows_ref==self.training_bindings[fold_ref]['training_rows_ref'],
                 'admitted training row binding differs from fold projection')
         raw_refs=sorted(self.raw_refs[fold_ref])
-        lease_bytes=X.nbytes+y.nbytes+P.nbytes+_resident_size([features,labels,common,keys,candidate_keys,evaluation,excluded,raw_refs])
+        lease_bytes=(X.nbytes+y.nbytes+P.nbytes+_resident_size([features,labels,common,keys,candidate_keys,
+                     evaluation,excluded,raw_refs])+MatrixFoldProjection.HEADER_RESERVE_BYTES)
         require(self.store.resident_bytes+self.store.lease_bytes+lease_bytes<=self.store.maximum_matrix_bytes,
                 'active fold resident byte budget exceeded')
         self.store.check()

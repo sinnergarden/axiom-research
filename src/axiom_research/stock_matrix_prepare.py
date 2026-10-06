@@ -45,12 +45,65 @@ def _options(value):
 
 class _Publisher:
     """Write staging bytes with immutable final paths before one directory rename."""
-    def __init__(self, stage, target): self.stage,self.target=Path(stage),Path(target)
+    def __init__(self, stage, target, *, maximum_resident_bytes=512*1024**2, metrics=None):
+        from .stock_matrix_reader import VerifiedMatrixStore
+        self.stage,self.target=Path(stage),Path(target)
+        self.maximum=maximum_resident_bytes; self.metrics={} if metrics is None else metrics
+        self.live_bytes=0
+        self.store=VerifiedMatrixStore(maximum_matrix_bytes=self.maximum,_path_resolver=self.resolve,
+                                      _caller_retained_bytes=lambda:self.live_bytes)
     def _desc(self, desc):
         desc=deepcopy(desc)
         desc['path']=str((self.target/Path(desc['path']).relative_to(self.stage.resolve())).resolve())
         return desc
-    def part(self, value, key): return self._desc(write_part(self.stage,value,key))
+    def resolve(self,path):
+        path=Path(path)
+        try: return self.stage/path.relative_to(self.target.resolve())
+        except ValueError: return path
+    def _bindings(self):
+        return tuple(pair for pairs in self.store._native_bindings.values() for pair in pairs)
+    def _retained(self,value):
+        return self.store._native_caller_bytes(value)
+    def native_digest(self,value,*,exclude_ref_key=None):
+        from .stock_native_json import native_digest
+        bindings=self._bindings(); retained=self._retained(value)+sys.getsizeof(bindings)
+        self.store.check()
+        result=native_digest(value,coverage_bindings=bindings,exclude_ref_key=exclude_ref_key,
+            maximum_workspace_bytes=self.maximum,caller_retained_bytes=lambda:retained,
+            metrics=self.metrics,path_resolver=self.resolve)
+        self.store.check(); return result
+    def seal(self,value,key):
+        value=dict(value); value[key]=self.native_digest(value,exclude_ref_key=key)
+        return value
+    def part(self, value, key):
+        from .stock_native_json import REFS,make_native_carrier
+        descriptor=None
+        if REFS.get(value.get('contract_version'))==key:
+            bindings=self._bindings(); retained=self._retained(value)+sys.getsizeof(bindings)
+            descriptor=make_native_carrier(self.stage,value,key,maximum_source_bytes=self.store.maximum_source_bytes,
+                maximum_parent_bytes=self.store.maximum_parent_bytes,maximum_workspace_bytes=self.maximum,
+                caller_retained_bytes=lambda:retained,metrics=self.metrics,
+                descriptor_mapper=self._desc,path_resolver=self.resolve,coverage_bindings=bindings)
+        return self._desc(write_part(self.stage,value,key) if descriptor is None else descriptor)
+    def read_part(self,descriptor,key):
+        require(self.store._native_caller_bytes()<=self.maximum,
+                'prepared source admission resident budget exceeded')
+        value=self.store.read_json(descriptor,key,_revisit=True)
+        require(self.store._native_caller_bytes()<=self.maximum,
+                'prepared source admission resident budget exceeded')
+        return value
+    def release_part(self,descriptor,key): self.store.drop_json(descriptor,key)
+    def finish(self):
+        self.store.check()
+        for key,value in self.store.metrics.items():
+            if key.startswith(('native_','carrier_','coverage_','peak_workspace','peak_combined_workspace')):
+                if isinstance(value,dict):
+                    counts=self.metrics.setdefault(key,{})
+                    for ref,count in value.items(): counts[ref]=counts.get(ref,0)+count
+                elif 'peak' in key: self.metrics[key]=max(self.metrics.get(key,0),value)
+                else: self.metrics[key]=self.metrics.get(key,0)+value
+        self.metrics['carrier_builder_source_bytes']=self.store.metrics['source_bytes']
+        self.store.close()
     def buffer(self, values, *, dtype, shape):
         return self._desc(write_buffer(self.stage,values,dtype=dtype,shape=shape))
     def actual(self, desc): return self.stage/Path(desc['path']).relative_to(self.target.resolve())
@@ -103,7 +156,9 @@ def _v1_partitions(feature, publisher, options):
         offset=spec['feature_sessions'].index(parent['sessions'][0])*width
         chunks,selection=_write_feature_matrix_block(publisher.stage,rows=original['rows'],proof=proof,
             spec=spec,view=index['qlib_view'],schema=schema,index_ref=feature._row_index['row_index_ref'],
-            row_offset=offset,options={'column_block':options['column_block']})
+            row_offset=offset,options=options,caller_retained_bytes=lambda:
+                _graph_bytes([original,proof,index,spec,schema,partitions,selections]),
+            metrics=publisher.metrics,descriptor_mapper=publisher._desc,path_resolver=publisher.resolve)
         for chunk in chunks:
             chunk={k:v for k,v in chunk.items() if k!='partition_ref'}
             chunk['buffers']={k:publisher._desc(v) for k,v in chunk['buffers'].items()}
@@ -172,7 +227,7 @@ def _label_partition(publisher, *, table, spec_ref, index_ref, offset, rows,
     value_key='normalized_return' if normalized else 'return'
     valid_key='normalized_valid' if normalized else 'valid'
     clock_key='normalized_available_at' if normalized else 'label_available_at'
-    metadata=seal({'contract_version':'stock_matrix_label_metadata_v1',
+    metadata=publisher.seal({'contract_version':'stock_matrix_label_metadata_v1',
         'role':'evaluation' if table=='evaluation_raw_labels' else 'training',
         'fold_spec_ref':spec_ref,'cutoff':cutoff,'rows':rows,'raw_build':raw_desc,
         'core_result_refs':list(core_refs),'contents':contents},'metadata_ref')
@@ -204,14 +259,15 @@ def _query_for(spec, cutoff, days):
         spec['pit_policy'],{d:cutoff for d in sessions},purpose='label_outcomes'),anchor
 
 
-def _source_contents(wire, raw, cohort=None):
+def _source_contents(wire, raw, cohort=None, *, digest_fn=digest):
     # Actual adjusted Query/selected endpoint provenance is retained, rather
     # than claiming a logical whole-window DataBatch that was never queried.
     query=wire['context']['query']; selected={'context':wire['context'],
         'records':wire['records'],'field_meta':wire['field_meta']}
-    contents={digest(query):query,digest(selected):selected}
+    query_ref=digest(query); selected_ref=digest_fn(selected)
+    contents={query_ref:query,selected_ref:selected}
     if cohort is not None: contents[digest(cohort)]=cohort
-    return contents,digest(query),digest(selected),digest(cohort) if cohort is not None else None
+    return contents,query_ref,selected_ref,digest(cohort) if cohort is not None else None
 
 
 def _selector_payload(publisher, *, row_index, offsets):
@@ -254,7 +310,7 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
     from .labels import build_forward_labels
     from axiom_data import adjust_prices
     from axiom_engine.core import execute_cs_zscore_batch
-    begin=time.perf_counter(); options=_options(preparation_options); read_work=False
+    begin=time.perf_counter(); options=_options(preparation_options); read_work=False; publisher=None
     path=feature_inputs.path if hasattr(feature_inputs,'path') else Path(feature_inputs)
     # A public object is a locator, never a trusted skip-validation marker.
     locator=_read(Path(path)/'index.json')
@@ -305,7 +361,8 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
             'physical_partition_reads':None,'physical_index_hits':None,
             'physical_metrics_reason':'public Data API does not expose physical Reader counters'}
         with tempfile.TemporaryDirectory(prefix='.stock-matrix-',dir=target.parent) as temporary:
-            stage=Path(temporary)/'complete'; stage.mkdir(); publisher=_Publisher(stage,target)
+            stage=Path(temporary)/'complete'; stage.mkdir()
+            publisher=_Publisher(stage,target,maximum_resident_bytes=options['maximum_resident_bytes'],metrics=stats)
             if index['contract_version']=='stock_feature_inputs_v2':
                 partitions=list(index['partitions']); feature_selection=_read(index['source_selection']['path'])['feature_rows']
                 feature_schema=index['schema']; row_desc=index['row_index']
@@ -342,6 +399,10 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                         wire=adjusted.to_json(); raw=build_forward_labels(adjusted,calendar=spec['calendar'],feature_sessions=days)
                         require(retained+_graph_bytes(wire)+_graph_bytes(raw)<=options['maximum_resident_bytes'],
                                 'adjusted Label working set resident byte budget exceeded')
+                        publisher.live_bytes=retained+retained_fit_bytes(ref)+_graph_bytes([
+                            wire,raw,factors.field_meta,factors.context,adjusted.field_meta,adjusted.context])
+                        publisher.live_bytes+=int(factors.frame.memory_usage(deep=True).sum())+int(
+                            adjusted.frame.memory_usage(deep=True).sum())
                         raw_desc=publisher.part(raw,'label_ref'); rows=raw['rows']; offset=positions[days[0]]*width
                         cohort=None
                         if role=='training':
@@ -356,7 +417,8 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                                 'sessions':days,'keys':[[r['security_id'],r['feature_session']] for r in rows],
                                 'eligibility_reasons':reasons,'eligible_keys':[[r['security_id'],r['feature_session']]
                                     for r,reason in zip(rows,reasons) if reason is None]}
-                        contents,qref,vref,cref=_source_contents(wire,raw,cohort)
+                        publisher.live_bytes+=_graph_bytes(cohort)
+                        contents,qref,vref,cref=_source_contents(wire,raw,cohort,digest_fn=publisher.native_digest)
                         raw_partition=_label_partition(publisher,table='training_raw_labels' if role=='training'
                             else 'evaluation_raw_labels',spec_ref=ref,index_ref=row_index['row_index_ref'],offset=offset,
                             rows=rows,raw_desc=raw_desc,cutoff=cutoff,contents=contents)
@@ -371,6 +433,7 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                         require(retained+_graph_bytes(wire)+_graph_bytes(raw)+retained_states<=options['maximum_resident_bytes'],
                                 'retained fit states exceed resident byte budget')
                         del wire,raw,rows,contents,adjusted,factors,price
+                        publisher.live_bytes=0
                     group.clear()
                 if progress is not None: progress({'stage':'raw_labels','completed':min(start+len(working),len(needed)),
                     'total':len(needed),'logical_query_count':stats['data_read_calls'],'seconds':time.perf_counter()-begin})
@@ -379,7 +442,8 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                 # Rehydrate only this fit's packed input. All other fit source
                 # graphs remain on disk; no fold-count multiplier of raw panels.
                 for offset,count,raw_desc,cutoff,metadata_desc in state['chunks']:
-                    raw=_read(publisher.actual(raw_desc)); metadata=_read(publisher.actual(metadata_desc))
+                    publisher.live_bytes=retained_fit_bytes(ref)
+                    raw=publisher.read_part(raw_desc,'label_ref'); metadata=publisher.read_part(metadata_desc,'metadata_ref')
                     cohort=next(v for v in metadata['contents'].values() if type(v) is dict and
                                 v.get('contract_version')=='stock_matrix_label_cohort_v1')
                     cohort_ref=digest(cohort)
@@ -408,7 +472,9 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                     stats['peak_retained_fit_state_bytes']=max(stats.get('peak_retained_fit_state_bytes',0),retained_states)
                     require(retained_states+_graph_bytes(raw)+_graph_bytes(metadata)<=options['maximum_resident_bytes'],
                             'Core input resident byte budget exceeded')
+                    publisher.release_part(raw_desc,'label_ref'); publisher.release_part(metadata_desc,'metadata_ref')
                     del raw,metadata,cohort
+                    publisher.live_bytes=0
                 reasons=[None,*sorted({r for r in state['reasons'] if r is not None})]
                 codes={r:i for i,r in enumerate(reasons)}
                 arrays['value_reason_codes']=array('i',(codes[r] for r in state['reasons']))
@@ -438,7 +504,9 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                 core_wrappers.append(publisher.part(wrapper,'core_result_artifact_ref'))
                 core_ref=result['metadata']['result_ref']; state['core_refs']=[core_ref]
                 for offset,count,raw_desc,cutoff,metadata_desc,core_start in normalized_chunks:
-                    raw=_read(publisher.actual(raw_desc)); metadata=_read(publisher.actual(metadata_desc))
+                    publisher.live_bytes=retained_fit_bytes(ref)+_graph_bytes([carrier,result,normalized_chunks,
+                        canonical,physical,wrapper,core_input,reasons,codes])
+                    raw=publisher.read_part(raw_desc,'label_ref'); metadata=publisher.read_part(metadata_desc,'metadata_ref')
                     contents=metadata['contents']; normalized=[]
                     for local,row in enumerate(raw['rows']):
                         i=core_start+local; valid=bool(result['value_validity'][i]); reason=state['reasons'][i]
@@ -449,10 +517,13 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                                 state['sources'][row['feature_session']]['bindings'][0]['view_ref'],core_ref]))})
                         if valid: state['training_offsets'].append(offset+local)
                     contents={**contents,digest(core_input):core_input}
+                    publisher.live_bytes+=_graph_bytes(normalized)
                     partitions.append(_label_partition(publisher,table='training_normalized_labels',spec_ref=ref,
                         index_ref=row_index['row_index_ref'],offset=offset,rows=normalized,raw_desc=raw_desc,
                         cutoff=cutoff,contents=contents,core_refs=[core_ref]))
+                    publisher.release_part(raw_desc,'label_ref'); publisher.release_part(metadata_desc,'metadata_ref')
                     del raw,metadata,contents,normalized
+                    publisher.live_bytes=0
                 # Write selector bytes now; only their small descriptors wait
                 # for the prepared view identity. Do not retain prior fits'
                 # Python offset lists, sources or chunk graphs.
@@ -493,6 +564,7 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
             from .stock_matrix_reader import _validate_staged_matrix_batch
             stats['staged_validation']=_validate_staged_matrix_batch(batch,stage=stage,target=target)
             feature._store.check()
+            publisher.finish()
             try: stage.rename(target)
             except OSError as exc:
                 if exc.errno not in (errno.EEXIST,errno.ENOTEMPTY): raise
@@ -511,5 +583,6 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
         if metrics is not None: metrics.update(stats)
         return batch
     finally:
+        if publisher is not None and not publisher.store.closed: publisher.store.close()
         feature.close()
         if read_work and callable(getattr(data,'clear_cache',None)): data.clear_cache()
