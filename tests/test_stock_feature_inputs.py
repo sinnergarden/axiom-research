@@ -131,20 +131,29 @@ class SyntheticInputs:
                                 sessions=history, cutoff=cutoff)
         adjusted_ref = digest({'synthetic_adjusted': price})
         membership_ref = digest({'synthetic_membership': membership})
-        plan = {'synthetic_session': day, 'reference_members': {day: ['A', 'B']}}
+        evidence = {}; bindings = []
+        for field in ['open','high','low','close','amount_cny','is_member']:
+            is_member = field == 'is_member'
+            query = membership if is_member else price
+            batch_ref = membership_ref if is_member else adjusted_ref
+            context = {'snapshot_id':self.snapshot,'domain':'universe_membership' if is_member else 'market_daily',
+                       'query':query,'reader_version':'synthetic/1'}
+            basis = 'synthetic_storage_only'; qualification = 'synthetic'
+            source_id = digest({'field':field,'batch_ref':batch_ref,'qualification':qualification,'basis':basis})
+            reference = digest({'snapshot_id':self.snapshot,'query':query,'reader_version':'synthetic/1'})
+            bindings.append({'id':source_id,'data_ref':reference if is_member else digest({
+                'snapshot_id':self.snapshot,'domain':'market_daily'}),'view_ref':reference if is_member else digest({
+                'snapshot_id':self.snapshot,'query':query,'reader_version':'synthetic/1','derivation':None}),
+                'revision_policy':self.pit,'qualification':qualification,'availability_basis':basis})
+            evidence[source_id] = {'field':field,'batch_ref':batch_ref,'query_context':context}
+        plan = {'synthetic_session': day, 'reference_members': {day: ['A', 'B']},'sources':bindings,
+                'input_schema':[{'name':field} for field in ['open','high','low','close','amount_cny']]}
         frame_ref = digest(['synthetic frame', day])
         proof = {'session': day, 'sessions': history,
                  'cutoffs': {d: cutoff for d in history},
                  'core_plan': plan, 'core_frame_ref': frame_ref,
                  'adjusted_input_ref': adjusted_ref, 'membership_ref': membership_ref,
-                 'source_evidence': {
-                     'price': {'field': 'close', 'batch_ref': adjusted_ref,
-                               'query_context': {'snapshot_id': self.snapshot,
-                                                 'domain': 'market_daily', 'query': price}},
-                     'membership': {'field': 'is_member', 'batch_ref': membership_ref,
-                                    'query_context': {'snapshot_id': self.snapshot,
-                                                      'domain': 'universe_membership',
-                                                      'query': membership}}}}
+                 'source_evidence': evidence}
         rows = [{'security_id': security, 'session': day,
                  'values': [float(100*i+j)], 'validity': [True],
                  'availability': [day+'T20:00:00+08:00'], 'reasons': [[]],
@@ -190,6 +199,10 @@ def reseal_first_parent_proof(saved, original, proof):
     feature = _read(parent['features']['path'])
     feature.pop('feature_ref')
     feature['input_evidence_ref'] = digest(proof)
+    by_day={p['session']:p for p in proof}
+    for row in feature['rows']:
+        p=by_day[row['session']]
+        row['source_refs']=[p['core_frame_ref'],digest(p['core_plan'])]
     feature = seal(feature, 'feature_ref')
     write_json(parent['features']['path'], feature)
     parent['input_evidence'].update(file_digest=file_digest(parent['input_evidence']['path']),
@@ -390,7 +403,8 @@ class StockFeatureInputTests(unittest.TestCase):
                     proof = deepcopy(original_proof)
                     day = proof[0]['session']
                     if change == 'source_clock':
-                        source_query = proof[0]['source_evidence']['price']['query_context']['query']
+                        source_query = next(s for s in proof[0]['source_evidence'].values()
+                                            if s['field']=='close')['query_context']['query']
                         source_query['cutoff_by_session'][day] = day+'T21:00:00+08:00'
                     elif change == 'window':
                         proof[0]['sessions'].pop(0)
@@ -437,13 +451,36 @@ class StockFeatureInputTests(unittest.TestCase):
             for source_name, field, value, reason in cases:
                 with self.subTest(source=source_name, field=field):
                     proof = deepcopy(original_proof)
-                    source = proof[0]['source_evidence'][source_name]
-                    source['query_context']['query'][field] = value
-                    # Preserve the within-proof batch-ref equality as well.
-                    source['batch_ref'] = digest(source['query_context'])
+                    group = [s for s in proof[0]['source_evidence'].values()
+                             if (s['field']=='is_member') == (source_name=='membership')]
+                    for source in group:
+                        source['query_context']['query'][field] = value
+                        # Preserve the entire same-batch group's within-proof refs.
+                        source['batch_ref'] = digest(source['query_context'])
                     proof[0]['membership_ref' if source_name == 'membership' else 'adjusted_input_ref'] = source['batch_ref']
                     reseal_first_parent_proof(saved, original, proof)
                     with self.assertRaisesRegex(ValueError, reason): load_stock_feature_inputs(saved.path)
+
+    def test_resealed_evidence_ids_fields_and_context_must_match_core_sources(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = SyntheticInputs(Path(temp)); saved = fixture.build(); original = saved.to_dict()
+            baseline = _read(original['feature_parents'][0]['input_evidence']['path'])
+            for change,reason in (('missing','source IDs'),('extra','source IDs'),
+                                  ('wrong_field','field coverage'),('swapped_fields','field/source binding'),
+                                  ('wrong_context_binding','context binding')):
+                with self.subTest(change=change):
+                    proof = deepcopy(baseline); sources=proof[0]['source_evidence']
+                    close_id=next(k for k,s in sources.items() if s['field']=='close')
+                    if change=='missing':sources.pop(close_id)
+                    elif change=='extra':sources[digest('extra')]=deepcopy(sources[close_id])
+                    elif change=='wrong_field':sources[close_id]['field']='open'
+                    elif change=='swapped_fields':
+                        open_id=next(k for k,s in sources.items() if s['field']=='open')
+                        sources[close_id]['field']='open';sources[open_id]['field']='close'
+                    else:
+                        next(b for b in proof[0]['core_plan']['sources'] if b['id']==close_id)['view_ref']=digest('unrelated')
+                    reseal_first_parent_proof(saved,original,proof)
+                    with self.assertRaisesRegex(ValueError,reason):load_stock_feature_inputs(saved.path)
 
     def test_corrupt_partial_parent_cannot_resume_or_publish_complete_index(self):
         with tempfile.TemporaryDirectory() as temp:

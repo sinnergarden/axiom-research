@@ -139,9 +139,18 @@ def _parents(parents, spec, view, universe_id, limits, *, complete, expected_dat
                 require(row['member'] is (security in members[day]) and len(row['reasons']) == len(spec['ordered_features']) and
                         all(v is None or type(v) in (int,float) and math.isfinite(v) for v in row['values']),
                         'Feature original member/value schema mismatch')
-            sources = p['source_evidence']; require(bool(sources), 'Feature source proof required')
+            sources = p['source_evidence']; bindings = p['core_plan'].get('sources')
+            require(type(sources) is dict and bool(sources) and type(bindings) is list and
+                    all(type(b) is dict and type(b.get('id')) is str for b in bindings) and
+                    len({b['id'] for b in bindings}) == len(bindings) and
+                    set(sources) == {b['id'] for b in bindings}, 'Feature evidence/Core source IDs mismatch')
+            bound = {b['id']:b for b in bindings}
+            fields = ['open','high','low','close','amount_cny']
+            require([c['name'] for c in p['core_plan'].get('input_schema',[])] == fields and
+                    {s['field'] for s in sources.values()} == set(fields+['is_member']),
+                    'Feature original source field coverage mismatch')
             membership = False
-            for source in sources.values():
+            for source_id,source in sources.items():
                 context = source['query_context']; query = context['query']
                 require(context['snapshot_id'] == spec['snapshot'] and query['sessions'] == history and
                         query['symbols'] == spec['universe'] and query['pit_policy'] == spec['pit_policy'] and
@@ -161,6 +170,19 @@ def _parents(parents, spec, view, universe_id, limits, *, complete, expected_dat
                             source['field'] in query['fields'] and query.get('universe_id') is None and
                             query['adjustment_anchor'] == day and source['batch_ref'] == p['adjusted_input_ref'],
                             'Feature original adjusted ref mismatch')
+                binding = bound[source_id]
+                require(source_id == digest({'field':source['field'],'batch_ref':source['batch_ref'],
+                    'qualification':binding['qualification'],'basis':binding['availability_basis']}) and
+                    binding['revision_policy'] == query['pit_policy'], 'Feature original field/source binding mismatch')
+                reference = digest({'snapshot_id':context['snapshot_id'],'query':query,
+                                    'reader_version':context['reader_version']})
+                data_ref = reference if source['field'] == 'is_member' else digest({
+                    'snapshot_id':context['snapshot_id'],'domain':context['domain']})
+                view_ref = reference if source['field'] == 'is_member' else digest({
+                    'snapshot_id':context['snapshot_id'],'query':query,
+                    'reader_version':context['reader_version'],'derivation':context.get('derivation')})
+                require(binding['data_ref'] == data_ref and binding['view_ref'] == view_ref,
+                        'Feature original source context binding mismatch')
             require(membership, 'Feature membership source missing')
         covered.extend(desc['sessions'])
         del feature, indexed, proof

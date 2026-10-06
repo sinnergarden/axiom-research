@@ -63,6 +63,28 @@ def decision_fixture():
 
 
 class PreparationReuseTests(unittest.TestCase):
+    def test_actual_core_proof_matches_new_index_source_closure(self):
+        from axiom_research.stock_feature_inputs import _parents,DEFAULT_LIMITS
+        data,config,catalog,chosen,prepared=decision_fixture()
+        with patch('axiom_research.stock_ml._prepare_stock_qlib',return_value=prepared):
+            feature,proof,_=_prepare_stock_features(data,config=config,destination='unused',catalog=catalog,chosen=chosen,progress=None)
+        spec={'calendar':config['calendar'],'universe':config['symbols'],'snapshot':config['snapshot'],
+            'pit_policy':config['pit_policy'],'ordered_features':feature['ordered_features'],
+            'catalog_ref':catalog.identity,'feature_selection':config['feature_selection'],
+            'read_sessions':config['read_sessions'],'feature_sessions':config['feature_sessions'],
+            'cutoff_by_session':config['cutoff_by_session']}
+        view={**feature['qlib_view'],'snapshot_id':config['snapshot'],'queries':[
+            {'pit_policy':config['pit_policy'],'symbols':config['symbols']}],
+            'universe_query':{'pit_policy':config['pit_policy'],'symbols':config['symbols']}}
+        feature=seal({**{k:v for k,v in feature.items() if k!='feature_ref'},'qlib_view':view},'feature_ref')
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);write_json(root/'feature.json',feature);write_json(root/'proof.json',proof)
+            descriptor={'sessions':config['feature_sessions'],
+                'features':{'path':str(root/'feature.json'),'file_digest':file_digest(root/'feature.json'),'feature_ref':feature['feature_ref']},
+                'input_evidence':{'path':str(root/'proof.json'),'file_digest':file_digest(root/'proof.json'),'input_evidence_ref':feature['input_evidence_ref']}}
+            covered,_=_parents([descriptor],spec,view,config['universe_id'],DEFAULT_LIMITS,complete=True)
+        self.assertEqual(covered,config['feature_sessions'])
+
     def test_complete_day_wire_count_and_old_collector_identity(self):
         from axiom_data import DataBatch
         data,config,catalog,chosen,prepared = decision_fixture()
