@@ -95,17 +95,32 @@ def _project_qlib(batch, values, view_ref):
     return DataBatch(frame, batch.field_meta, context)
 
 
-def _adjust_feature(prices, factors, session):
+def _adjust_feature(prices, factors, session, *, _with_wire=False):
     from axiom_data import DataBatch, adjust_prices
     adjusted = adjust_prices(prices,factors,fields=('open','high','low','close'),
                              factor_field='factor',anchor_session=session,decision_session=session)
     frame = adjusted.frame.merge(prices.frame[['security_id','session','amount_cny']],
                                 on=['security_id','session'],validate='one_to_one')
+    adjusted_wire = adjusted.to_json(); native_wire = prices.to_json()
+    projection = {'operation':'keyed_join_native_amount','adjusted_ref':digest(adjusted_wire),
+                  'native_ref':digest(native_wire), 'native_fields':['amount_cny']}
     context = {**adjusted.context, 'query':{**adjusted.context['query'],
         'fields':['open','high','low','close','amount_cny']}, 'research_projection':{
-        'operation':'keyed_join_native_amount','adjusted_ref':digest(adjusted.to_json()),
-        'native_ref':digest(prices.to_json()), 'native_fields':['amount_cny']}}
-    return DataBatch(frame,{**adjusted.field_meta,'amount_cny':prices.field_meta['amount_cny']},context)
+        **projection}}
+    batch = DataBatch(frame,{**adjusted.field_meta,'amount_cny':prices.field_meta['amount_cny']},context)
+    if not _with_wire:
+        return batch
+    # Public adjust_prices and the one-to-one frame join have already admitted
+    # the full grid. Reuse this call's strict JSON fields/provenance rather than
+    # serializing the same four adjusted columns after joining native amount.
+    amounts = {(r['security_id'],r['session']):r['amount_cny'] for r in native_wire['records']}
+    wire = {'records':[{**r,'amount_cny':amounts[r['security_id'],r['session']]}
+                       for r in adjusted_wire['records']],
+        'field_meta':{**adjusted_wire['field_meta'],'amount_cny':native_wire['field_meta']['amount_cny']},
+        'context':{**adjusted_wire['context'], 'query':{**adjusted_wire['context']['query'],
+            'fields':['open','high','low','close','amount_cny']}, 'research_projection':{
+                **projection,'native_fields':list(projection['native_fields'])}}}
+    return batch,wire
 
 
 def _validate_config(config):
@@ -228,11 +243,11 @@ def _iter_stock_feature_days(data, *, config, catalog, chosen, qlib_inputs, prog
         stats['data_read_calls']+=3
         price=_project_qlib(data.read(snapshot=config['snapshot'],query=pq),values,view_id)
         factor=_project_qlib(data.read(snapshot=config['snapshot'],query=fq),values,view_id)
-        adjusted=_adjust_feature(price,factor,session)
+        adjusted,adjusted_wire=_adjust_feature(price,factor,session,_with_wire=True)
         membership=data.members(snapshot=config['snapshot'],query=rq)
         # Complete local wires are revalidated by the same adapter. They are
         # consumed read-only and discarded with this date, never a global cache.
-        adjusted_wire=adjusted.to_json(); membership_wire=membership.to_json()
+        membership_wire=membership.to_json()
         adapted=_adapt_decision_wires(adjusted_wire,membership_wire,recipe_ref=catalog.recipe_ref(
             config['feature_selection'],normalized=True),output_keys=tuple((s,session) for s in symbols),
             source_granularity='batch_field')

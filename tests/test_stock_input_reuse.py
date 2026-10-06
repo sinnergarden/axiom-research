@@ -88,7 +88,7 @@ class StockInputReuseTests(unittest.TestCase):
                     "sessions": list(batch.query.sessions), "cutoffs": dict(batch.query.cutoff_by_session)}
         with patch("axiom_research.qlib_adapter.QlibView", View), \
              patch("axiom_research.stock_ml._project_qlib", side_effect=lambda batch, values, ref: batch) as project, \
-             patch("axiom_research.stock_ml._adjust_feature", side_effect=lambda price, factor, session: price), \
+             patch("axiom_research.stock_ml._adjust_feature", side_effect=lambda price, factor, session, **kw: (price,price.to_json())), \
              patch("axiom_research.data_adapter._adapt_decision_wires", side_effect=adapt), \
              patch("axiom_research.feature_catalog.build_feature_plan", side_effect=lambda plan, *args, **kwargs: plan), \
              patch("axiom_engine.core.execute_feature_plan", side_effect=execute), \
