@@ -409,13 +409,16 @@ def _object_upper_bytes(value):
     if type(value) is dict:
         return own+sum(_object_upper_bytes(k)+_object_upper_bytes(v) for k,v in value.items())
     if type(value) in (list,tuple): return own+sum(_object_upper_bytes(v) for v in value)
-    if type(value) is str: return max(own,len(value.encode('utf-8'))+2)
+    # JSON control characters can expand to six bytes; reserve encoder space
+    # without allocating a second serialized string just to measure it.
+    if type(value) is str: return max(own,6*len(value.encode('utf-8'))+2)
     return own
 
 
 def _build_feature_matrix(data, *, spec, destination, storage_options, progress):
     from .feature_catalog import load_feature_catalog
-    from .stock_ml import _implementation, _environment, _prepare_stock_qlib, _iter_stock_feature_days
+    from .stock_ml import _implementation, _environment
+    from .stock_matrix_feature_producer import prepare_matrix_qlib, iter_matrix_feature_days
     from .stock_matrix_storage import row_index, write_part
     options = _storage_options(storage_options); spec = deepcopy(spec)
     source_marks={spec['scope']['path']:file_fingerprint(spec['scope']['path'])}
@@ -444,7 +447,7 @@ def _build_feature_matrix(data, *, spec, destination, storage_options, progress)
         'universe_id':universe_id,'calendar':calendar,'read_sessions':spec['read_sessions'],
         'feature_sessions':spec['feature_sessions'],'cutoff_by_session':spec['cutoff_by_session'],
         'feature_selection':spec['feature_selection'],'scope_ref':spec['scope']['scope_bundle_ref']}
-    prepared=_prepare_stock_qlib(data,config=config,destination=target); view=prepared['view_reference']
+    prepared=prepare_matrix_qlib(data,config=config,destination=target); view=prepared['view_reference']
     _qlib_scope(view,spec,universe_id); qpath=prepared['qlib_path']/'axiom-qlib.json'
     qdesc={'path':str(qpath.resolve()),'file_digest':file_digest(qpath),'view_id':view['view_id']}
     require(_qlib(qdesc,DEFAULT_LIMITS,fingerprints=source_marks) == view, 'prepared Qlib reference mismatch')
@@ -473,12 +476,28 @@ def _build_feature_matrix(data, *, spec, destination, storage_options, progress)
     # row_block_sessions is a maximum. Large schemas use the same writer with
     # smaller blocks when metadata/encoder residency demands it, not a separate
     # six-column path. The public parent-byte admission stays meaningful.
-    block_budget=min(DEFAULT_LIMITS['maximum_parent_bytes'],options['maximum_resident_bytes']//3)
+    block_budget=min(DEFAULT_LIMITS['maximum_parent_bytes'],options['maximum_resident_bytes']//12)
+    fixed_retained_bytes=_object_upper_bytes([row_wire,schema,source_marks,qdesc,
+        definition,spec,config,view])
+    published_retained_bytes=_object_upper_bytes([partitions,feature_rows])
+    def caller_retained_bytes():
+        return pending_bytes+fixed_retained_bytes+published_retained_bytes
     def publish_block():
-        nonlocal rows, proof, pending_bytes
+        nonlocal rows, proof, pending_bytes, published_retained_bytes
+        # The producer is suspended at yield and still owns its native window
+        # and compatibility signature. Reserve the writer's proof/metadata,
+        # encoder copies and one column buffer before publishing any child.
+        retained=caller_retained_bytes()+stats.get('yield_live_bytes',0)
+        scratch=4*pending_bytes+len(rows)*min(len(schema),options['column_block'])*18
+        combined=retained+scratch
+        stats['combined_working_graph_peak_bytes']=max(
+            stats.get('combined_working_graph_peak_bytes',0),combined)
+        require(combined <= options['maximum_resident_bytes'],
+                'Feature writer/producer combined working set exceeds resident budget')
         new_parts,new_sources=_write_feature_matrix_block(target,rows=rows,proof=proof,spec=spec,view=view,
             schema=schema,index_ref=row_wire['row_index_ref'],row_offset=len(completed)*len(spec['universe']),
             options=options,universe_id=universe_id)
+        published_retained_bytes+=_object_upper_bytes(new_parts)+_object_upper_bytes(new_sources)
         partitions.extend(new_parts); feature_rows.extend(new_sources); completed.extend(p['session'] for p in proof)
         _atomic(checkpoint,seal({'contract_version':'stock_feature_inputs_checkpoint_v2','definition_ref':definition_ref,
             'qlib_manifest':qdesc,'schema':schema,'row_index':rid,'partitions':partitions,
@@ -487,8 +506,11 @@ def _build_feature_matrix(data, *, spec, destination, storage_options, progress)
         if progress is not None: progress({'stage':'feature_matrix_block','completed_dates':len(completed),
             'total_dates':len(spec['feature_sessions']),'core_calls':stats['core_calls'],
             'partition_count':len(partitions)})
-    for day_rows,evidence in _iter_stock_feature_days(data,config=config,catalog=catalog,chosen=chosen,
-            qlib_inputs=prepared,stats=stats,history_sessions=history_length):
+    for day_rows,evidence in iter_matrix_feature_days(data,config=config,catalog=catalog,chosen=chosen,
+            qlib_inputs=prepared,stats=stats,history_sessions=history_length,
+            output_block_sessions=options['row_block_sessions'],
+            maximum_resident_bytes=options['maximum_resident_bytes'],
+            caller_retained_bytes=caller_retained_bytes):
         day_bytes=_object_upper_bytes(day_rows)+_object_upper_bytes(evidence)
         require(day_bytes <= block_budget, 'one Feature date exceeds matrix storage resident/metadata budget')
         if proof and pending_bytes+day_bytes > block_budget: publish_block()
@@ -525,6 +547,9 @@ def _build_feature_matrix(data, *, spec, destination, storage_options, progress)
     value['feature_inputs_ref']=digest({k:value[k] for k in ('contract_version','definition_ref',
         'qlib_manifest','schema_digest','row_index','source_selection','partitions')})
     _atomic(target/'index.json',seal(value,'content_digest'))
+    if progress is not None:
+        progress({'stage':'feature_producer_complete','completed_dates':len(completed),
+                  'total_dates':len(spec['feature_sessions']),**deepcopy(stats)})
     return load_stock_feature_inputs(target)
 
 
