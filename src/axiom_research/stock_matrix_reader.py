@@ -16,7 +16,8 @@ import weakref
 
 from .stock_artifacts import digest, file_digest, _read, _verify_ref
 from .stock_fold_inputs import require, ordered, file_fingerprint, validate_spec
-from .stock_label_contracts import _instant, _session, _eligible_reason, NORMALIZATION_SPEC
+from .stock_label_contracts import (_instant, _session, _eligible_reason, NORMALIZATION_SPEC,
+                                    RAW_TARGET_SCHEMA, NORMALIZED_TARGET_SCHEMA)
 
 DTYPES = {'float64_le': '<f8', 'bool_u8': 'u1', 'int64_le': '<i8',
           'uint64_le': '<u8', 'int32_le': '<i4', 'uint8': 'u1'}
@@ -506,6 +507,7 @@ def validate_saved_core_result(wrapper, store, *, core_input):
     require(result['contract_version']=='core_cs_zscore_batch_result_v1','unsupported canonical Core output')
     days=ordered(result['sessions'],'Core result sessions'); securities=ordered(result['security_ids'],'Core result securities')
     count=len(days)*len(securities); _schema(result['schema'])
+    require(result['schema']==NORMALIZED_TARGET_SCHEMA,'fixed normalized Target output schema required')
     outputs=_core_buffers(result,wrapper['buffers'],_CORE_OUT_BUFFERS,store,count,len(days))
     _fields(meta,{'input_ref','numeric_input_ref','spec_ref','keys_ref','schema_ref','source_ref','context_ref',
                  'values_digest','flags_digest','clocks_digest','implementation_ref','result_ref'},'exact Core output metadata required')
@@ -520,9 +522,8 @@ def validate_saved_core_result(wrapper, store, *, core_input):
     require(inp['contract_version']=='core_cs_zscore_batch_input_v1' and inp['sessions']==days and
             inp['security_ids']==securities and inp['output_schema']==result['schema'],'Core input/output grid/schema mismatch')
     _schema(inp['schema']); _schema(inp['output_schema'])
-    require(len(inp['schema'])==len(inp['output_schema'])==1 and inp['schema'][0]['stage']=='fact' and
-            inp['output_schema'][0]['stage']=='cross_sectional' and inp['output_schema'][0]['unit']=='dimensionless' and
-            inp['output_schema'][0]['missing']=='preserve','Core input/output column admission mismatch')
+    require(inp['schema']==RAW_TARGET_SCHEMA and inp['output_schema']==NORMALIZED_TARGET_SCHEMA,
+            'fixed Target Core input/output schemas required')
     inputs=_core_buffers(inp,core_input['buffers'],_CORE_IN_BUFFERS,store,count,len(days))
     reasons=inp['reason_dictionary']; require(type(reasons) is list and reasons and reasons[0] is None and
         reasons[1:]==sorted(set(reasons[1:])) and all(type(v) is str and v for v in reasons[1:]),'Core input reasons invalid')
@@ -969,8 +970,9 @@ def _admit_matrix_view(descriptor,folds,*,limits=None,_store=None):
         require(definition['implementation_ref']==digest(definition['implementation_sources']),'prepared matrix implementation mismatch')
         _fields(view['schema'],{'features','training_raw_labels','training_normalized_labels','evaluation_raw_labels'},'exact prepared table schema required')
         _schema(view['schema']['features'],definition['ordered_features'])
-        for table in ('training_raw_labels','training_normalized_labels','evaluation_raw_labels'):
-            names=_schema(view['schema'][table]); require(len(names)==1,'one-column Target table required')
+        for table,expected_schema in (('training_raw_labels',RAW_TARGET_SCHEMA),
+            ('training_normalized_labels',NORMALIZED_TARGET_SCHEMA),('evaluation_raw_labels',RAW_TARGET_SCHEMA)):
+            require(view['schema'][table]==expected_schema,'fixed Target table schema required: '+table)
         row_index=_row_index(store.read_json(view['row_index'],'row_index_ref'))
         feature_desc=definition['feature_inputs']; _fields(feature_desc,{'path','file_digest','feature_inputs_ref'},'explicit Feature index descriptor required')
         # Feature identity has its own projection formula; do not apply the

@@ -2,6 +2,8 @@
 from copy import deepcopy
 from pathlib import Path
 import builtins
+import errno
+import shutil
 import sys
 import tempfile
 import types
@@ -132,6 +134,29 @@ class CompactFoldTests(unittest.TestCase):
                     build_stock_ml_fold_from_saved_inputs(fold['input_manifest'],fold_spec=fold['fold_spec'],
                         destination=root/'folds')
             self.assertEqual(list((root/'folds').iterdir()),[])
+
+    def test_equal_concurrent_manifest_does_not_hide_corrupt_children(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); fixture=PrepareFeatureFixture(root); saved=fixture.matrix()
+            data=PublicDataFixture(fixture.spec); module=types.ModuleType('axiom_data')
+            module.QuerySpec=Query; module.adjust_prices=data.adjust; original=Path.rename
+            def raced(stage,target):
+                if stage.name!='complete' or not (stage/'batch.json').exists(): return original(stage,target)
+                shutil.copytree(stage,target)
+                batch=_read(target/'batch.json'); view=_read(batch['prepared_view']['path'])
+                part=next(p for p in view['partitions'] if p['table']=='training_raw_labels')
+                source=Path(part['buffers']['values']['path']); raw=source.read_bytes()
+                source.write_bytes(bytes([raw[0]^1])+raw[1:])
+                raise FileExistsError(errno.EEXIST,'synthetic concurrent publisher')
+            with patch.dict(sys.modules,{'axiom_data':module}), \
+                 patch('axiom_research.stock_ml._implementation',return_value=fixture.implementation), \
+                 patch('axiom_research.stock_ml._environment',return_value=fixture.environment), \
+                 patch.object(Path,'rename',raced):
+                with self.assertRaisesRegex(ValueError,'digest mismatch'):
+                    prepare_stock_ml_batch_inputs(data,feature_inputs=saved,fold_specs=fixture.folds(),
+                        destination=root/'prepared',preparation_options={'row_block_sessions':32,'column_block':32,
+                            'maximum_resident_bytes':64*1024**2,'normalization_backend':'core_cs_batch_v1'})
+            saved.close()
 
     def test_transplanted_selector_and_saved_prediction_clock_rejected(self):
         with tempfile.TemporaryDirectory() as temp:

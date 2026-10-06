@@ -177,6 +177,57 @@ class MatrixReaderTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'eligibility source differs from current cohort'):
                 load_stock_ml_batch_inputs(rebatch(manifest))
 
+    def test_resealed_target_schema_names_and_units_rejected(self):
+        for table in ('training_raw_labels','training_normalized_labels','evaluation_raw_labels'):
+            for field,value in (('name','unapproved_target'),('unit','CNY/share')):
+                with self.subTest(table=table,field=field),tempfile.TemporaryDirectory() as temp:
+                    manifest=deepcopy(self.manifest); view=_read(manifest['prepared_view']['path'])
+                    view['schema'][table][0][field]=value; view['schema_digest']=digest(view['schema'])
+                    for p in view['partitions']:
+                        if p['table']!=table: continue
+                        p['schema_digest']=digest(view['schema'][table])
+                        p['columns']=[view['schema'][table][0]['name']]
+                        p.update(partition_ref=digest({k:v for k,v in p.items() if k!='partition_ref'}))
+                    descriptor=write_part(temp,sealed(view,'prepared_view_ref'),'prepared_view_ref')
+                    manifest['prepared_view']=descriptor
+                    for f in manifest['folds']:
+                        inputs=f['input_manifest']; inputs['prepared_view']=descriptor
+                        for role,desc in inputs['selectors'].items():
+                            if desc is None: continue
+                            selector=_read(desc['path']); selector['prepared_view_ref']=descriptor['prepared_view_ref']
+                            selector['schema_digest']=view['schema_digest']
+                            inputs['selectors'][role]=write_part(temp,sealed(selector,'selector_ref'),'selector_ref')
+                        f['input_manifest']=sealed(inputs,'input_ref')
+                    bad=rebatch(manifest)
+                    # Every affected partition, view, selector, input and batch
+                    # identity is valid; this fails at the fixed profile boundary.
+                    with self.assertRaisesRegex(ValueError,'fixed Target table schema required: '+table):
+                        load_stock_ml_batch_inputs(bad)
+
+    def test_resealed_saved_core_target_schema_names_and_units_rejected(self):
+        from axiom_research.stock_matrix_reader import validate_saved_core_result
+        view=_read(self.manifest['prepared_view']['path'])
+        part=next(p for p in view['partitions'] if p['table']=='training_normalized_labels')
+        metadata=_read(part['metadata']['path']); ref=metadata['core_result_refs'][0]
+        original=_read(next(d['path'] for d in view['core_results'] if _read(d['path'])['result']['metadata']['result_ref']==ref))
+        saved_input=next(v for v in metadata['contents'].values() if type(v) is dict and set(v)=={'input','buffers'})
+        for column in ('schema','output_schema'):
+            for field,value in (('name','unapproved_target'),('unit','CNY/share')):
+                with self.subTest(column=column,field=field):
+                    wrapper=deepcopy(original); core_input=deepcopy(saved_input); inp=core_input['input']
+                    inp[column][0][field]=value; result=wrapper['result']; meta=result['metadata']
+                    result['schema']=deepcopy(inp['output_schema'])
+                    meta['input_ref']=digest(inp)
+                    meta['schema_ref']=digest({'schema':inp['schema'],'output_schema':inp['output_schema']})
+                    meta['numeric_input_ref']=digest({'keys_ref':meta['keys_ref'],'schema_ref':meta['schema_ref'],
+                        'spec_ref':meta['spec_ref'],'reason_dictionary':inp['reason_dictionary'],
+                        **{k:inp[k] for k in ('values','value_validity','value_reason_codes','reference_member')}})
+                    output=deepcopy(result); output['metadata'].pop('result_ref'); meta['result_ref']=digest(output)
+                    wrapper=sealed(wrapper,'core_result_artifact_ref')
+                    with VerifiedMatrixStore() as store:
+                        with self.assertRaisesRegex(ValueError,'fixed (Target Core input/output schemas|normalized Target output schema) required'):
+                            validate_saved_core_result(wrapper,store,core_input=core_input)
+
     def test_global_budget_includes_resident_metadata_before_projection(self):
         with load_stock_ml_batch_inputs(self.manifest) as batch:
             state=__import__('axiom_research.stock_batch',fromlist=['_data'])._data(batch)['matrix_state']

@@ -16,14 +16,11 @@ import time
 
 from .stock_artifacts import digest, file_digest, write_json, _read
 from .stock_fold_inputs import require, seal, validate_spec, file_fingerprint, read_parent
-from .stock_label_contracts import _eligible_reason, _instant, NORMALIZATION_SPEC
+from .stock_label_contracts import (_eligible_reason, _instant, NORMALIZATION_SPEC,
+    RAW_TARGET_SCHEMA as RAW_SCHEMA, NORMALIZED_TARGET_SCHEMA as NORMALIZED_SCHEMA)
 from .stock_matrix_storage import (write_buffer, write_part, write_partition,
                                    instant_us)
 
-RAW_SCHEMA = [{'name':'raw_return','dtype':'float64','unit':'dimensionless',
-               'stage':'fact','missing':'preserve'}]
-NORMALIZED_SCHEMA = [{'name':'normalized_target','dtype':'float64','unit':'dimensionless',
-                      'stage':'cross_sectional','missing':'preserve'}]
 CORE_TYPES = {'values':('float64','float64_le','d'),
     'value_validity':('bool','bool_u8','?'), 'value_reason_codes':('int32','int32_le','i'),
     'fact_available_at_utc_us':('int64','int64_le','q'),
@@ -456,6 +453,11 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
             except OSError as exc:
                 if exc.errno not in (errno.EEXIST,errno.ENOTEMPTY): raise
                 require(_read(target/'batch.json')==batch,'concurrent prepared batch conflict')
+                # Equal manifest bytes do not prove a concurrent publisher's
+                # children exist or retain their digests. This uncommon path
+                # must admit the actual winner, rather than trust our stage.
+                from .stock_batch import load_stock_ml_batch_inputs
+                with load_stock_ml_batch_inputs(batch): pass
         # The complete closure was admitted before rename. Only exact staged
         # bytes are published; repeat full disk admission belongs to the next
         # explicit public batch load or to a future HIT.
