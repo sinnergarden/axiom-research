@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from axiom_research import (evaluate_stock_signal, evaluate_stock_signals,
     save_stock_signal_evaluation, load_stock_signal_evaluation)
@@ -161,6 +162,72 @@ def raw_variant(root, descriptor, change):
 
 
 class SavedSignalEvaluationTests(unittest.TestCase):
+    def test_saved_evaluation_hit_never_reexecutes_statistics_and_scope_change_reuses_sources(self):
+        from axiom_engine.core import evaluate_signal_statistics
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); signal, label, scope = fixture(root/'sources')
+            with patch('axiom_engine.core.evaluate_signal_statistics', wraps=evaluate_signal_statistics) as stats:
+                report = evaluate_stock_signal(signal, raw_label_input=label, scope=scope)
+                self.assertEqual(stats.call_count, 2)
+            saved = save_stock_signal_evaluation(report, destination=root/'reports')
+            marks = {p: (file_digest(p), p.stat().st_mtime_ns) for p in saved.path.iterdir()}
+            with patch('axiom_engine.core.evaluate_signal_statistics',
+                       side_effect=AssertionError('saved HIT recomputed statistics')), \
+                 patch('axiom_research.stock_signal_evaluation_inputs.file_digest', wraps=file_digest) as reads:
+                hit = save_stock_signal_evaluation(report, destination=root/'reports')
+                loaded = load_stock_signal_evaluation(saved.path)
+                self.assertTrue(hit.reused)
+                self.assertEqual(hit.identity, saved.identity)
+                self.assertEqual(loaded.to_dict(), report)
+                self.assertGreater(reads.call_count, 0)  # HIT verifies sources, it is not zero-I/O.
+            self.assertEqual({p: (file_digest(p), p.stat().st_mtime_ns) for p in marks}, marks)
+            shorter = {**scope, 'sessions': scope['sessions'][:3]}
+            with patch('axiom_engine.core.evaluate_signal_statistics', wraps=evaluate_signal_statistics) as stats:
+                changed = evaluate_stock_signal(signal, raw_label_input=label, scope=shorter)
+                self.assertEqual(stats.call_count, 2)
+            self.assertEqual(changed['input_signal_refs'], report['input_signal_refs'])
+            self.assertEqual(changed['label_ref'], report['label_ref'])
+            self.assertNotEqual(changed['evidence_ref'], report['evidence_ref'])
+            self.assertEqual(changed['coverage']['valid_pair_count'], 72)
+
+    def test_source_record_hashes_unique_paths_once_and_rejects_conflicting_refs(self):
+        from collections import Counter
+        from axiom_research.stock_signal_evaluation_inputs import _source_records
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); parent = root/'raw.json'; write_json(parent, {'synthetic': True})
+            descriptor = {'path': str(parent), 'file_digest': file_digest(parent)}
+            write_json(root/'manifest.json', {'files': {'fold.json': 'unused'}})
+            definition = {'repeated_raw': [deepcopy(descriptor) for _ in range(40)]}
+            write_json(root/'fold.json', {'definition': {'input_manifest': definition}})
+            with patch('axiom_research.stock_signal_evaluation_inputs.file_digest', wraps=file_digest) as hashes:
+                records = _source_records(root)
+            counts = Counter(str(c.args[0]) for c in hashes.call_args_list)
+            self.assertEqual(counts[str(parent)], 1)
+            self.assertEqual(records, [{'path': str(p), 'file_digest': file_digest(p)}
+                                       for p in sorted((parent, root/'manifest.json', root/'fold.json'), key=str)])
+            definition['repeated_raw'][1]['file_digest'] = digest('conflicting source')
+            write_json(root/'fold.json', {'definition': {'input_manifest': definition}})
+            with self.assertRaisesRegex(ValueError, 'conflicting saved source'):
+                _source_records(root)
+
+    def test_source_record_rejects_mutation_during_unique_hash(self):
+        from axiom_research.stock_signal_evaluation_inputs import _source_records
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); parent = root/'aaa-raw.json'; write_json(parent, {'synthetic': True})
+            desc = {'path': str(parent), 'file_digest': file_digest(parent)}
+            write_json(root/'manifest.json', {'files': {'fold.json': 'unused'}})
+            write_json(root/'fold.json', {'definition': {'input_manifest': {'raw': desc}}})
+            def altered(path):
+                value = file_digest(path)
+                # The parent was already hashed: a later file changes it.
+                # This must be caught by the global post-fingerprint guard.
+                if Path(path) == root/'fold.json':
+                    with parent.open('a') as stream: stream.write(' ')
+                return value
+            with patch('axiom_research.stock_signal_evaluation_inputs.file_digest', side_effect=altered):
+                with self.assertRaisesRegex(ValueError, 'changed during hashing'):
+                    _source_records(root)
+
     def test_single_common_native_save_exact_hit_and_stdlib_fresh_load(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); signal,label,scope = fixture(root/'input')
@@ -471,6 +538,23 @@ print(result.identity)
             proof_by_day={p['session']:p for p in proof}
             for row in feature['rows']:
                 row['source_refs'][1]=digest(proof_by_day[row['session']]['core_plan'])
+            future_proof=[p for p in proof if p['session']==future]
+            future_feature={k:deepcopy(v) for k,v in feature.items() if k!='feature_ref'}
+            future_feature.update(rows=[r for r in future_feature['rows'] if r['session']==future],
+                                  input_evidence_ref=digest(future_proof))
+            future_feature=seal(future_feature,'feature_ref')
+            write_json(parents/'future-feature.json',future_feature)
+            write_json(parents/'future-proof.json',future_proof)
+            proof=[p for p in proof if p['session']!=future]
+            write_json(parents/'proof.json',proof)
+            feature['rows']=[r for r in feature['rows'] if r['session']!=future]
+            feature['input_evidence_ref']=digest(proof)
+            manifest['feature_parents'][0]['sessions'].remove(future)
+            manifest['feature_parents'].append({'features':{'path':str(parents/'future-feature.json'),
+                'file_digest':file_digest(parents/'future-feature.json'),'feature_ref':future_feature['feature_ref']},
+                'input_evidence':{'path':str(parents/'future-proof.json'),
+                    'file_digest':file_digest(parents/'future-proof.json'),'input_evidence_ref':digest(future_proof)},
+                'sessions':[future]})
             feature=seal({k:v for k,v in feature.items() if k!='feature_ref'},'feature_ref')
             write_json(parents/'features.json',feature)
             normalized=normalize_forward_labels(_read(parents/'raw.json'),features=feature,cutoff=spec['fit_cutoff'])
@@ -508,10 +592,43 @@ print(result.identity)
                 'signal_run_ref':signal['signal_run_ref']}
             scope={'sessions':sorted({r['session'] for r in signal['rows']}),'universe':manifest['universe'],
                 'calendar':calendar,'evaluation_cutoff':spec['evaluation_cutoff']}
-            report=evaluate_stock_signal(descriptor,raw_label_input=manifest['evaluation_labels'],scope=scope)
+            with patch('axiom_research.stock_signal_evaluation_inputs._read',wraps=_read) as reads:
+                report=evaluate_stock_signal(descriptor,raw_label_input=manifest['evaluation_labels'],scope=scope)
+            self.assertNotIn(str(parents/'future-proof.json'),[str(c.args[0]) for c in reads.call_args_list])
             self.assertEqual(report['coverage']['reference_key_count'],4)
             self.assertEqual(report['coverage']['excluded_counts']['NOT_MEMBER'],2)
             saved=save_stock_signal_evaluation(report,destination=root/'reports')
+            from axiom_research import load_stock_ml_batch_inputs, load_stock_ml_fold
+            batch_definition={'contract_version':'stock_ml_batch_inputs_v1',
+                'folds':[{'input_manifest':manifest,'fold_spec':spec}]}
+            with load_stock_ml_batch_inputs(batch_definition) as batch:
+                with patch('axiom_research.stock_fold_inputs.load_saved_feature_inputs',
+                           side_effect=AssertionError('reader reloaded common Feature')), \
+                     patch('axiom_research.stock_fold_inputs._admit_saved_fold_labels',
+                           side_effect=AssertionError('reader readmitted Label')):
+                    self.assertEqual(load_stock_ml_fold(fold.path,batch=batch).identity,fold.identity)
+                    loaded=load_stock_signal_evaluation(saved.path,batch=batch)
+                    self.assertEqual(loaded.to_dict(),report)
+                self.assertEqual(batch.metrics['fold_projection_calls'],2)
+            with self.assertRaisesRegex(ValueError,'closed'):
+                load_stock_signal_evaluation(saved.path,batch=batch)
+            with self.assertRaisesRegex(ValueError,'validated saved batch'):
+                load_stock_signal_evaluation(saved.path,batch=True)
+            write_json(root/'reader-batch.json',batch_definition)
+            batch_script='''import builtins,json,sys
+original=builtins.__import__
+def guard(name,*a,**kw):
+    if name.split('.')[0] in {'axiom_data','axiom_engine','qlib','lightgbm','pandas','pyarrow'}:
+        raise AssertionError('reader imported runtime '+name)
+    return original(name,*a,**kw)
+builtins.__import__=guard
+from axiom_research import load_stock_ml_batch_inputs,load_stock_signal_evaluation
+with load_stock_ml_batch_inputs(json.load(open(sys.argv[1]))) as batch:
+    print(load_stock_signal_evaluation(sys.argv[2],batch=batch).identity)
+'''
+            fresh_batch=subprocess.run([sys.executable,'-c',batch_script,str(root/'reader-batch.json'),str(saved.path)],
+                env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'},capture_output=True,text=True,check=True,timeout=15)
+            self.assertEqual(fresh_batch.stdout.strip(),report['evidence_ref'])
             script='''import builtins,sys
 original=builtins.__import__
 def guarded(name,*args,**kwargs):
@@ -524,6 +641,11 @@ print(load_stock_signal_evaluation(sys.argv[1]).identity)
 '''
             completed=subprocess.run([sys.executable,'-c',script,str(saved.path)],env=os.environ,capture_output=True,text=True,check=True)
             self.assertEqual(completed.stdout.strip(),report['evidence_ref'])
+            unused_bytes=(parents/'future-proof.json').read_bytes()
+            (parents/'future-proof.json').write_text('[]')
+            with self.assertRaisesRegex(ValueError,'Feature input evidence mismatch'):
+                load_stock_signal_evaluation(saved.path)
+            (parents/'future-proof.json').write_bytes(unused_bytes)
             # An unused parent date after evaluation is admitted above; a
             # source query after a selected Feature's knowledge still fails.
             day=scope['sessions'][0]

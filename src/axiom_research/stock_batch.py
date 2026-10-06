@@ -49,8 +49,9 @@ class StockMLBatchInputs:
 
     Instances are created only by load_stock_ml_batch_inputs. Public metadata is
     copied. No mutable parent, matrix or validation flag is exposed to callers.
-    Source fingerprints are checked on every fold use; a fresh public saved-fold
-    loader always rechecks source bytes and complete parent closure.
+    Source fingerprints are checked on every fold use. Public saved-fold
+    loading admits disk parents by default, or reuses this process's full
+    admission while retaining every saved output check.
     """
     __slots__ = ('__weakref__',)
 

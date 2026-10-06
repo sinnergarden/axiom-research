@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .stock_artifacts import digest, file_digest, _read, _verify_ref
 from .stock_label_contracts import _instant, _session, _finite
+from .stock_fold_inputs import file_fingerprint
 
 
 def _require(ok, message):
@@ -54,23 +55,36 @@ def _descriptor(value, ref_key):
 def _source_records(root):
     """Freeze the existing record files, including original fold parent paths."""
     manifest = _read(root/'manifest.json')
-    files = [root/'manifest.json'] + [root/name for name in sorted(manifest['files'])]
+    files = {root/'manifest.json', *(root/name for name in manifest['files'])}
+    expected = {}
     # A fold's input manifest already holds every external parent descriptor.
     if (root/'fold.json').is_file():
         definition = _read(root/'fold.json')['definition']['input_manifest']
         def visit(item):
             if type(item) is dict:
                 if {'path', 'file_digest'} <= set(item):
-                    _require(file_digest(item['path']) == item['file_digest'], 'saved source parent mismatch')
-                    files.append(Path(item['path']))
+                    path = Path(item['path'])
+                    _require(path not in expected or expected[path] == item['file_digest'],
+                             'conflicting saved source parent descriptor')
+                    expected[path] = item['file_digest']
+                    files.add(path)
                 for child in item.values():
                     visit(child)
             elif type(item) is list:
                 for child in item:
                     visit(child)
         visit(definition)
-    return [{'path': str(path), 'file_digest': file_digest(path)}
-            for path in sorted(set(files), key=str)]
+    # A Raw descriptor repeats in every normalized shard. Hash each unique
+    # path once in this call, reject conflicting refs, and check the entire
+    # source set before/after hashing. No admission survives this call.
+    marks = {path: file_fingerprint(path) for path in files}
+    records = [{'path': str(path), 'file_digest': file_digest(path)}
+               for path in sorted(files, key=str)]
+    observed = {Path(row['path']): row['file_digest'] for row in records}
+    _require(all(observed[path] == ref for path, ref in expected.items()), 'saved source parent mismatch')
+    _require(all(file_fingerprint(path) == mark for path, mark in marks.items()),
+             'saved source changed during hashing')
+    return records
 
 
 def _grid(rows, universe, dates, date_key, label):
@@ -119,12 +133,13 @@ def _feature_proof(evidence, snapshot, pit, universe, cutoff):
     _require(bool(members), 'Feature historical membership source required')
 
 
-def _saved_signal(descriptor, scope):
+def _saved_signal(descriptor, scope, *, batch=None):
     signal = _descriptor(descriptor, 'signal_run_ref')
     root = Path(descriptor['path']).parent
     _require(Path(descriptor['path']).name == 'predictions.json', 'existing saved predictions.json required')
     version = signal.get('contract_version')
     if version == 'stock_prediction_run_v1':
+        _require(batch is None, 'saved batch requires fold Signals')
         from .stock_artifacts import load_stock_ml_experiment
         load_stock_ml_experiment(root)
         record = _read(root/'experiment.json')
@@ -138,7 +153,7 @@ def _saved_signal(descriptor, scope):
         dates = config['prediction_sessions']
     elif version == 'stock_prediction_run_v2':
         from .stock_fold_artifacts import load_stock_ml_fold
-        load_stock_ml_fold(root)
+        load_stock_ml_fold(root, batch=batch)
         record = _read(root/'fold.json')
         config = record['definition']['input_manifest']
         feature = _read(root/'feature-slice.json')
@@ -179,6 +194,8 @@ def _saved_signal(descriptor, scope):
         by_day = {}
         wanted = set(feature_dates)
         for parent in config['feature_parents']:
+            if not wanted.intersection(parent['sessions']):
+                continue  # Complete parent dates/proofs were admitted by the fold loader.
             for evidence in _read(parent['input_evidence']['path']):
                 if evidence['session'] not in wanted:
                     continue
@@ -296,7 +313,7 @@ def _raw_labels(descriptor, scope, snapshot, pit):
     return raw, indexed
 
 
-def _inputs(signal_inputs, raw_label_input, scope):
+def _inputs(signal_inputs, raw_label_input, scope, *, batch=None):
     _require(isinstance(signal_inputs, dict) and bool(signal_inputs) and
         all(type(key) is str and key for key in signal_inputs), 'ordered Signal mapping required')
     projected, closures, refs = {}, {}, {}
@@ -306,7 +323,7 @@ def _inputs(signal_inputs, raw_label_input, scope):
         _require(bool(descriptors), 'nonempty weekly Signal list required')
         rows, members, sources, signal_refs, previous = {}, {}, [], [], None
         for descriptor in descriptors:
-            item = _saved_signal(descriptor, scope)
+            item = _saved_signal(descriptor, scope, batch=batch)
             if snapshot is None:
                 snapshot, pit = item['snapshot'], item['pit']
             _require((snapshot, pit) == (item['snapshot'], item['pit']), 'comparison Snapshot/PIT mismatch')
