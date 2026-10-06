@@ -227,6 +227,9 @@ def save_stock_signal_evaluation_inputs(signal_inputs, *, raw_label_input, scope
         ref = ArtifactRef(artifact_type='StockSignalEvaluationInputs', artifact_id=root['input_id'],
             artifact_contract_version=INPUT_VERSION, content_digest=file_digest(stage/'manifest.json'),
             uri=str(stage/'manifest.json'))
+        # Every original row is now frozen on disk. Keep the source guards and
+        # metadata, and release the wide source graph before verification reads.
+        del admitted
         _load_inputs(ref, scope)
         _check_marks(source_marks)
         target = destination/root['input_id'][7:]

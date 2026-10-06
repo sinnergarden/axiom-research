@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import weakref
 from unittest.mock import patch
 
 from axiom_research import (save_stock_signal_evaluation_inputs, evaluate_stock_signal_inputs,
@@ -214,6 +215,70 @@ class FrozenSignalEvaluationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'changed'):
                     self.freeze(root, {'signal': a}, label, scope)
             self.assertFalse((root/'inputs').exists())
+
+    def test_original_row_graph_released_before_frozen_verification_with_source_guard(self):
+        class TrackedRow(dict):
+            pass
+        class TrackedList(list):
+            pass
+        with tempfile.TemporaryDirectory() as temp:
+            for mutate in (False, True):
+                with self.subTest(mutate_after_release=mutate):
+                    root = Path(temp)/str(mutate)
+                    a, label, scope = fixture(root/'a')
+                    b, _, _ = fixture(root/'b', reverse=True)
+                    inputs = {'first': a, 'second': b}
+                    references = {'feature': [], 'wide_values': [], 'prediction': [], 'label': []}
+                    original_admit = projection._admit_inputs
+                    original_load = projection._load_inputs
+                    def tracked(kind, row):
+                        value = TrackedRow(row)
+                        references[kind].append(weakref.ref(value))
+                        if kind == 'feature':
+                            for field in ('values', 'availability', 'validity'):
+                                value[field] = TrackedList(value[field])
+                                references['wide_values'].append(weakref.ref(value[field]))
+                        return value
+                    def admit(*args, **kwargs):
+                        value = original_admit(*args, **kwargs)
+                        for item in value['projected'].values():
+                            features = {}
+                            def feature(row):
+                                if id(row) not in features:
+                                    features[id(row)] = tracked('feature', row)
+                                return features[id(row)]
+                            item['members'] = {key: feature(row) for key, row in item['members'].items()}
+                            item['prediction_features'] = {key: feature(row)
+                                for key, row in item['prediction_features'].items()}
+                            item['rows'] = {key: tracked('prediction', row) for key, row in item['rows'].items()}
+                        value['labels'] = {key: tracked('label', row) for key, row in value['labels'].items()}
+                        value['raw']['rows'] = [value['labels'][row['security_id'], row['feature_session']]
+                                               for row in value['raw']['rows']]
+                        return value
+                    checks = []
+                    def load(*args, **kwargs):
+                        for kind, rows in references.items():
+                            self.assertTrue(rows, kind)
+                            self.assertTrue(all(ref() is None for ref in rows), 'source rows retained: ' + kind)
+                        checks.append(True)
+                        verified = original_load(*args, **kwargs)
+                        if mutate:
+                            (root/'a'/'booster.txt').write_text('changed after frozen verification')
+                        return verified
+                    with patch.object(projection, '_admit_inputs', side_effect=admit), \
+                         patch.object(projection, '_load_inputs', side_effect=load):
+                        if mutate:
+                            with self.assertRaisesRegex(ValueError, 'changed'):
+                                self.freeze(root, inputs, label, scope)
+                            self.assertEqual(list((root/'inputs').iterdir()), [])
+                        else:
+                            ref = self.freeze(root, inputs, label, scope)
+                    self.assertTrue(checks)
+                    if not mutate:
+                        original = evaluate_stock_signals(inputs, raw_label_input=label, scope=scope)
+                        saved = evaluate_stock_signal_inputs(ref, scope=scope, destination=root/'reports')
+                        for name in inputs:
+                            self.compare(original[name], saved[name].to_dict())
 
     def test_source_and_raw_label_revisions_miss_without_rewriting_old_input(self):
         with tempfile.TemporaryDirectory() as temp:
