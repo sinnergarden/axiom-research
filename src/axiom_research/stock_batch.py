@@ -72,11 +72,15 @@ class StockMLBatchInputs:
 
     def _check_sources(self):
         value = _data(self)
+        if 'matrix_state' in value:
+            value['matrix_state'].store.check()
+            return
         require(all(_fingerprint(path) == mark for path, mark in value['fingerprints'].items()),
                 'saved batch source changed; initialize a fresh batch')
 
     def _project(self, inputs, spec):
         value = _data(self)
+        require('matrix_state' not in value, 'matrix inputs require a bounded fold projection')
         self._check_sources()
         require((digest(inputs), digest(spec)) in value['fold_keys'], 'fold outside saved batch definition')
         key = digest(inputs), digest(spec)
@@ -86,9 +90,17 @@ class StockMLBatchInputs:
         value['metrics']['fold_projection_calls'] += 1
         return result
 
+    def _matrix_project(self, inputs, spec):
+        value = _data(self)
+        require('matrix_state' in value, 'saved matrix batch required')
+        self._check_sources()
+        require((digest(inputs),digest(spec)) in value['fold_keys'], 'fold outside saved batch definition')
+        return value['matrix_state'].project(inputs,spec)
+
     def _matrices(self, training, candidates):
         import numpy as np
         value = _data(self)
+        require('matrix_state' not in value, 'matrix inputs require a bounded fold projection')
         def select(rows):
             indexes = [value['key_index'][r['security_id'], r['session']] for r in rows]
             matrix = value['matrix'][indexes]
@@ -104,6 +116,8 @@ class StockMLBatchInputs:
 
     def close(self):
         value = _data(self)
+        if 'matrix_state' in value:
+            value['matrix_state'].close()
         value.clear()
         value['closed'] = True
 
@@ -127,6 +141,14 @@ def load_stock_ml_batch_inputs(batch_manifest, *, limits=None):
     """
     begin = time.perf_counter()
     manifest = deepcopy(batch_manifest)
+    if type(manifest) is dict and manifest.get('contract_version') == 'stock_ml_batch_inputs_v2':
+        from .stock_matrix_reader import load_matrix_batch_state
+        state = load_matrix_batch_state(manifest, limits=limits)
+        state.store.metrics['initialization_seconds'] = time.perf_counter()-begin
+        value = {'identity':manifest['batch_ref'],'manifest':manifest,'matrix_state':state,
+            'fold_keys':{(digest(f['input_manifest']),digest(f['fold_spec'])) for f in manifest['folds']},
+            'closed':False,'metrics':state.store.metrics}
+        return StockMLBatchInputs(_TOKEN,value)
     require(type(manifest) is dict and set(manifest) == {'contract_version', 'folds'} and
             manifest['contract_version'] == 'stock_ml_batch_inputs_v1' and
             type(manifest['folds']) is list and bool(manifest['folds']), 'unsupported saved batch manifest')
