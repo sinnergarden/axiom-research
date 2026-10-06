@@ -82,12 +82,16 @@ class VerifiedMatrixStore:
         return self._np
 
     def _native_caller_bytes(self, value=None):
-        caller=0 if self._caller_retained_bytes is None else self._caller_retained_bytes()
-        require(type(caller) is int and caller>=0,'nonnegative caller retained byte count required')
-        return caller+self.resident_bytes+self.lease_bytes+_resident_size([
+        def retained():
+            caller=0 if self._caller_retained_bytes is None else self._caller_retained_bytes()
+            require(type(caller) is int and caller>=0,'nonnegative caller retained byte count required')
+            return caller+self.resident_bytes+self.lease_bytes
+        size=_bounded_resident_size([
             self.descriptors,self.fingerprints,self.json,self.arrays,self._hashes,
             self._decoded,self.content,self._native_bindings,self._carrier_files,
-            self._carrier_storage,self._coverage_verified,self._native_verified,self.metrics,value])
+            self._carrier_storage,self._coverage_verified,self._native_verified,self.metrics,value],
+            maximum=self.maximum_matrix_bytes,retained=retained)
+        return retained()+size
 
     def native_digest(self, value, *, exclude_ref_key=None):
         from .stock_native_json import native_digest
@@ -225,17 +229,48 @@ class VerifiedMatrixStore:
         return self._hashes[path]
 
     def _decode_once(self,path):
+        from .stock_parent_json import preflight_parent_file, stat_identity
         path=str(Path(path).absolute()); physical=self._resolve(path)
-        require(physical.stat().st_size<=self.maximum_parent_bytes,'matrix parent byte budget exceeded')
+        mark=file_fingerprint(physical)
+        require(mark[2]<=self.maximum_parent_bytes,'matrix parent byte budget exceeded')
+        require(path not in self.fingerprints or self.fingerprints[path]==mark,
+                'saved matrix parent changed before decode')
         if path not in self._decoded:
-            # Parent headers still use the existing stdlib decoder. Reserve
-            # a conservative token/container/pairs/UTF-8 conversion envelope
-            # before it allocates; large coverage never enters this decoder.
-            require(self._native_caller_bytes()+max(4096,128*physical.stat().st_size)
-                    <=self.maximum_matrix_bytes,'matrix parent decode workspace budget exceeded')
-            self._decoded[path]=_read(physical); self.metrics['json_decode_calls']+=1
-            require(self._native_caller_bytes()<=self.maximum_matrix_bytes,
+            # The Store graph is stable during this call. Count it once;
+            # external caller-owned state remains dynamic at each scan guard.
+            def external():
+                size=0 if self._caller_retained_bytes is None else self._caller_retained_bytes()
+                require(type(size) is int and size>=0,'nonnegative caller retained byte count required')
+                return size
+            owned=self.resident_bytes+self.lease_bytes
+            base=owned+_bounded_resident_size([
+                self.descriptors,self.fingerprints,self.json,self.arrays,self._hashes,
+                self._decoded,self.content,self._native_bindings,self._carrier_files,
+                self._carrier_storage,self._coverage_verified,self._native_verified,self.metrics],
+                maximum=self.maximum_matrix_bytes,retained=lambda:owned+external())
+            def retained():
+                return base+external()
+            require(file_fingerprint(physical)==mark,'matrix parent changed before preflight')
+            with physical.open('rb') as watch:
+                remaining=self.maximum_matrix_bytes-retained()
+                require(remaining>0,'matrix parent decode workspace budget exceeded')
+                admission=preflight_parent_file(watch,expected_stat=mark,
+                    maximum_workspace_bytes=self.maximum_matrix_bytes,caller_retained_bytes=retained,
+                    block_size=max(1,min(65536,remaining//16)))
+                require(stat_identity(os.fstat(watch.fileno()))==mark and file_fingerprint(physical)==mark,
+                        'matrix parent changed during preflight')
+                require(retained()+admission['decode_workspace_bytes']<=self.maximum_matrix_bytes,
+                        'matrix parent decode workspace budget exceeded')
+                # Decode the admitted inode, with a byte cap even if it grows.
+                # The existing duplicate/scalar rules remain in _read.
+                watch.seek(0)
+                self.metrics['json_decode_calls']+=1
+                value=_read(physical,_stream=watch,_expected_bytes=mark[2])
+                require(stat_identity(os.fstat(watch.fileno()))==mark and file_fingerprint(physical)==mark,
+                        'matrix parent changed during decode')
+            require(self._native_caller_bytes(value)<=self.maximum_matrix_bytes,
                     'decoded matrix parent resident budget exceeded')
+            self._decoded[path]=value
         return self._decoded[path]
 
     def read_json(self, descriptor, ref_key, *, _revisit=False,_raw_bundle=False):
@@ -394,6 +429,27 @@ class _CompactRows:
             'values':values,'validity':validity,
             'reasons':deepcopy(self.dictionary[int(self.reasons[ordinal])]),
             'availability':deepcopy(self.dictionary[int(self.availability[ordinal])])}
+
+
+def _bounded_resident_size(value, *, maximum, retained):
+    """Measure the complete live graph without an unbudgeted accounting set."""
+    seen=set(); stack=[iter((value,))]; size=0
+    while stack:
+        try: item=next(stack[-1])
+        except StopIteration:
+            stack.pop(); continue
+        if id(item) in seen: continue
+        amount=sys.getsizeof(item)
+        # Set growth can retain old/new tables. Reserve IDs/table slots and
+        # iterator headers before inserting into this temporary control graph.
+        require(retained()+size+amount+4096+256*(len(seen)+1)+512*(len(stack)+2)<=maximum,
+                'matrix resident accounting workspace budget exceeded')
+        seen.add(id(item)); size+=amount
+        if type(item) is dict:
+            stack.append(iter(item.keys())); stack.append(iter(item.values()))
+        elif type(item) in (list,tuple,set): stack.append(iter(item))
+    require(retained()+size<=maximum,'matrix resident accounting workspace budget exceeded')
+    return size
 
 
 def _resident_size(value):
@@ -1248,6 +1304,35 @@ class MatrixFoldProjection:
     def __exit__(self,*args): self.close()
 
 
+def _raw_snapshot_reservation(raw, store):
+    """Reserve deepcopy's result, memo and growth while the cached graph lives.
+
+    Scalar objects may be shared by deepcopy. Charging their original graph
+    size again is conservative; mutable containers must never be shared with
+    a caller. The memo/depth traversal is guarded before each insertion.
+    """
+    base=store._native_caller_bytes(raw)
+    seen=set(); stack=[iter((raw,))]; graph_bytes=0; containers=0; maximum_depth=1
+    while stack:
+        try: value=next(stack[-1])
+        except StopIteration:
+            stack.pop(); continue
+        if id(value) in seen: continue
+        require(base+4096+256*(len(seen)+1)+512*(len(stack)+2)<=store.maximum_matrix_bytes,
+                'Raw snapshot traversal workspace budget exceeded')
+        seen.add(id(value))
+        graph_bytes+=sys.getsizeof(value)
+        if type(value) is dict:
+            containers+=1
+            stack.append(iter(value.keys())); stack.append(iter(value.values()))
+        elif type(value) is list:
+            containers+=1; stack.append(iter(value))
+        maximum_depth=max(maximum_depth,len(stack))
+    # Twice the original graph covers result/table growth; 256 per mutable
+    # object covers old/new memo tables, IDs, entries and keep-alive pointers.
+    return 2*graph_bytes+256*containers+4096+4096*maximum_depth
+
+
 def _admit_raw_label(descriptor, *, store=None, limits=None):
     """Borrow one fully admitted Raw source, including an external override.
 
@@ -1271,6 +1356,13 @@ def _admit_raw_label(descriptor, *, store=None, limits=None):
         require(raw.get('contract_version')=='stock_label_build_v1' and type(raw.get('rows')) is list and
                 type(raw.get('source_evidence')) is dict and type(raw['source_evidence'].get('context')) is dict,
                 'saved original Raw Label build required')
+        # Native-ref deduplication can alias this graph at another cached path.
+        # Borrow a separately owned mutable snapshot, including all children,
+        # before releasing this path; eviction alone cannot isolate aliases.
+        copy_reserve=_raw_snapshot_reservation(raw,store)
+        require(store._native_caller_bytes(raw)+copy_reserve<=store.maximum_matrix_bytes,
+                'Raw snapshot copy workspace budget exceeded')
+        raw=deepcopy(raw)
         binding=store.storage_binding(descriptor)
         paths=store.source_paths(descriptor)
         records=tuple((path,store._hashes[path]) for path in sorted(paths))
@@ -1281,7 +1373,8 @@ def _admit_raw_label(descriptor, *, store=None, limits=None):
         store.resident_bytes+=max(0,controls()-before)
         controls_recorded=True
         size=_resident_size([raw,binding,records,marks])+MatrixFoldProjection.HEADER_RESERVE_BYTES
-        require(store.resident_bytes+store.lease_bytes+size<=store.maximum_matrix_bytes,
+        require(store._native_caller_bytes([raw,binding,records,marks])+
+                MatrixFoldProjection.HEADER_RESERVE_BYTES<=store.maximum_matrix_bytes,
                 'Raw override lease resident budget exceeded')
         store.check(); store.lease_bytes+=size
         return MatrixFoldProjection(store,raw=raw,storage_binding=binding,source_records=records,
