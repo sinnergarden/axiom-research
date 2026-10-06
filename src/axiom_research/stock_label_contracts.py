@@ -39,6 +39,14 @@ NORMALIZATION_SPEC = {
     "normalized_available_at": "Core_output_dependency_clock_at_offline_cutoff",
 }
 
+# The stock Target profile is narrower than the neutral Core carrier. Keeping
+# these saved schemas in the readonly contract module avoids a build-runtime
+# import when admitting historical matrix files.
+RAW_TARGET_SCHEMA = [{'name':'raw_return','dtype':'float64','unit':'dimensionless',
+                      'stage':'fact','missing':'preserve'}]
+NORMALIZED_TARGET_SCHEMA = [{'name':'normalized_target','dtype':'float64','unit':'dimensionless',
+                             'stage':'cross_sectional','missing':'preserve'}]
+
 
 def _finite(value: Any) -> bool:
     return type(value) in (int, float) and math.isfinite(value)

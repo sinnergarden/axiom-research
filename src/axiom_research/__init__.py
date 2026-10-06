@@ -33,6 +33,7 @@ _RUNTIME_EXPORTS = {
     "build_stock_ml_fold_from_saved_inputs": ".stock_folds",
     "StockMLBatchInputs": ".stock_batch", "load_stock_ml_batch_inputs": ".stock_batch",
     "build_stock_feature_inputs": ".stock_feature_inputs",
+    "prepare_stock_ml_batch_inputs": ".stock_matrix_prepare",
     "normalize_forward_labels": ".stock_label_normalization",
     "load_feature_catalog": ".feature_catalog", "build_feature_plan": ".feature_catalog",
     "build_forward_labels": ".labels", "mature_training_rows": ".labels",
