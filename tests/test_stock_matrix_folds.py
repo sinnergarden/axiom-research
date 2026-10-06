@@ -58,7 +58,18 @@ class CompactFoldTests(unittest.TestCase):
                 cached,hits=self.build(fixture,manifest,root,batch)
                 self.assertTrue(cached.reused); self.assertEqual(cached.identity,run.identity)
                 self.assertEqual((hits['train_calls'],hits['predict_calls'],hits['core_calls']), (0,0,0))
-                loaded=load_stock_ml_fold(run.path,batch=batch); self.assertEqual(loaded.predictions(),run.predictions())
+                from axiom_research.stock_batch import _data
+                state=_data(batch)['matrix_state']; fold=manifest['folds'][0]
+                offsets=state.selectors[digest(fold['input_manifest']),digest(fold['fold_spec'])]['inference']
+                project=state.feature.project
+                def only_oos(selected,columns=None):
+                    self.assertEqual(list(selected),list(offsets)); return project(selected,columns)
+                with patch.object(type(batch),'_matrix_project',side_effect=AssertionError('saved consumer projected training')), \
+                     patch.object(state.feature,'project',side_effect=only_oos), \
+                     patch('axiom_research.stock_matrix_reader._stream_ref',side_effect=AssertionError('saved consumer hashed training')):
+                    loaded=load_stock_ml_fold(run.path,batch=batch)
+                    self.assertEqual(loaded.predictions(),run.predictions())
+                self.assertEqual(state.store.borrowers,0); self.assertEqual(state.store.lease_bytes,0)
                 self.assertEqual({p.name:file_digest(p) for p in run.path.iterdir()},before)
                 self.assertEqual(batch.metrics['file_hash_calls'],admitted['file_hash_calls'])
                 self.assertEqual(batch.metrics['json_decode_calls'],admitted['json_decode_calls'])

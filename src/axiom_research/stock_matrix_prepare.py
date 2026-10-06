@@ -8,7 +8,9 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from hashlib import sha256
 import errno
+import json
 import struct
 import sys
 import tempfile
@@ -212,16 +214,29 @@ def _source_contents(wire, raw, cohort=None):
     return contents,digest(query),digest(selected),digest(cohort) if cohort is not None else None
 
 
-def _selector(publisher, *, view_ref, row_index, schema_ref, role, fold_ref, offsets):
+def _selector_payload(publisher, *, row_index, offsets):
+    """Save an active fit's offsets before releasing its working graph."""
     ids=row_index['security_ids']; days=row_index['sessions']; width=len(ids)
-    offsets=list(offsets)
-    require(offsets==sorted(set(offsets)) and all(0<=i<row_index['row_count'] for i in offsets),
-            'ordered unique selector offsets required')
+    h=sha256(); h.update(b'['); previous=-1; count=0
+    def checked():
+        nonlocal previous,count
+        for offset in offsets:
+            require(type(offset) is int and previous<offset<row_index['row_count'],
+                    'ordered unique selector offsets required')
+            if count: h.update(b',')
+            h.update(json.dumps([ids[offset%width],days[offset//width]],
+                separators=(',',':'),ensure_ascii=False,allow_nan=False).encode())
+            previous=offset; count+=1
+            yield offset
+    payload=publisher.buffer(checked(),dtype='uint64_le',shape=[len(offsets)])
+    h.update(b']')
+    return {'row_count':count,'payload':payload,'keys_digest':'sha256:'+h.hexdigest()}
+
+
+def _selector(publisher, *, view_ref, row_index, schema_ref, role, fold_ref, payload):
     value=seal({'contract_version':'stock_matrix_selector_v1','prepared_view_ref':view_ref,
         'row_index_ref':row_index['row_index_ref'],'schema_digest':schema_ref,'role':role,
-        'fold_spec_ref':fold_ref,'encoding':'offsets_u64_le','row_count':len(offsets),
-        'payload':publisher.buffer(offsets,dtype='uint64_le',shape=[len(offsets)]),
-        'keys_digest':digest([[ids[i%width],days[i//width]] for i in offsets])},'selector_ref')
+        'fold_spec_ref':fold_ref,'encoding':'offsets_u64_le',**payload},'selector_ref')
     return publisher.part(value,'selector_ref')
 
 
@@ -262,6 +277,14 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                 'training_offsets':[],'core_refs':[]}
             requests.extend([(ref,'training',training,fold['fit_cutoff']),
                              (ref,'evaluation',inference,fold['evaluation_cutoff'])])
+        # Account every fit, refreshing only the state that changed. Independent
+        # per-fit graphs conservatively count shared small strings twice; they
+        # avoid repeatedly walking all retained source descriptors per block.
+        state_sizes={ref:_graph_bytes(state) for ref,state in states.items()}
+        state_mapping_bytes=sys.getsizeof(states)+sys.getsizeof(state_sizes)+sum(sys.getsizeof(ref) for ref in states)
+        def retained_fit_bytes(ref):
+            state_sizes[ref]=_graph_bytes(states[ref])
+            return state_mapping_bytes+sum(state_sizes.values())+sum(sys.getsizeof(size) for size in state_sizes.values())
         implementations=_implementation(); definition={'version':'axiom.stock_ml_batch_inputs/2',
             'feature_inputs':feature.descriptor,'fold_specs':folds,'preparation_options':options,
             'implementation_sources':implementations,'implementation_ref':digest(implementations),
@@ -342,19 +365,12 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                             'adjustment_anchor':anchor,'query_refs':[qref],'selected_versions_ref':vref,'cohort_ref':cref})
                         if role=='training':
                             state=states[ref]
-                            for day in days:
-                                # Sources are the original saved Raw build and a
-                                # pre-Core Feature/cohort ref, never the final view.
-                                state['sources'][day]={'bindings':[
-                                    {'id':'offline_eligibility','data_ref':feature.identity,'view_ref':cref,
-                                     'revision_policy':'frozen_feature_membership_and_explicit_outcome_cutoff',
-                                     'qualification':'observed','availability_basis':'derived_offline_cutoff_selection'},
-                                    {'id':'raw_labels','data_ref':raw['label_ref'],'view_ref':raw['label_ref'],
-                                     'revision_policy':'frozen_saved_label_build','qualification':'observed',
-                                     'availability_basis':'exact_raw_label_available_at'}],
-                                    'source_sets':[['offline_eligibility'],['raw_labels']]}
                             state['chunks'].append((offset,len(rows),raw_desc,cutoff,raw_partition['metadata']))
-                        del wire,raw,rows,contents,adjusted,factors
+                        retained_states=retained_fit_bytes(ref)
+                        stats['peak_retained_fit_state_bytes']=max(stats.get('peak_retained_fit_state_bytes',0),retained_states)
+                        require(retained+_graph_bytes(wire)+_graph_bytes(raw)+retained_states<=options['maximum_resident_bytes'],
+                                'retained fit states exceed resident byte budget')
+                        del wire,raw,rows,contents,adjusted,factors,price
                     group.clear()
                 if progress is not None: progress({'stage':'raw_labels','completed':min(start+len(working),len(needed)),
                     'total':len(needed),'logical_query_count':stats['data_read_calls'],'seconds':time.perf_counter()-begin})
@@ -366,6 +382,18 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                     raw=_read(publisher.actual(raw_desc)); metadata=_read(publisher.actual(metadata_desc))
                     cohort=next(v for v in metadata['contents'].values() if type(v) is dict and
                                 v.get('contract_version')=='stock_matrix_label_cohort_v1')
+                    cohort_ref=digest(cohort)
+                    # Rehydrate source bindings only for the active fit. Their
+                    # exact Raw/cohort refs are unchanged by this lifetime.
+                    for day in cohort['sessions']:
+                        state['sources'][day]={'bindings':[
+                            {'id':'offline_eligibility','data_ref':feature.identity,'view_ref':cohort_ref,
+                             'revision_policy':'frozen_feature_membership_and_explicit_outcome_cutoff',
+                             'qualification':'observed','availability_basis':'derived_offline_cutoff_selection'},
+                            {'id':'raw_labels','data_ref':raw['label_ref'],'view_ref':raw['label_ref'],
+                             'revision_policy':'frozen_saved_label_build','qualification':'observed',
+                             'availability_basis':'exact_raw_label_available_at'}],
+                            'source_sets':[['offline_eligibility'],['raw_labels']]}
                     core_start=len(arrays['values'])
                     arrays['selection_cutoff_utc_us'].extend(instant_us(cutoff) for d in cohort['sessions'])
                     for row,reason in zip(raw['rows'],cohort['eligibility_reasons']):
@@ -376,25 +404,31 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                         arrays['fact_source_codes'].append(1 if valid else 0); arrays['reference_source_codes'].append(0)
                     state['reasons'].extend(cohort['eligibility_reasons'])
                     normalized_chunks.append((offset,count,raw_desc,cutoff,metadata_desc,core_start))
-                    require(_graph_bytes(state)<=options['maximum_resident_bytes'],'Core input resident byte budget exceeded')
+                    retained_states=retained_fit_bytes(ref)
+                    stats['peak_retained_fit_state_bytes']=max(stats.get('peak_retained_fit_state_bytes',0),retained_states)
+                    require(retained_states+_graph_bytes(raw)+_graph_bytes(metadata)<=options['maximum_resident_bytes'],
+                            'Core input resident byte budget exceeded')
                     del raw,metadata,cohort
                 reasons=[None,*sorted({r for r in state['reasons'] if r is not None})]
                 codes={r:i for i,r in enumerate(reasons)}
                 arrays['value_reason_codes']=array('i',(codes[r] for r in state['reasons']))
+                native=sum(len(values)*values.itemsize for values in arrays.values())
+                # Check before the readonly encoding also allocates copies.
+                core_budget=retained_fit_bytes(ref)+3*native+len(arrays['values'])*256
+                require(core_budget<=options['maximum_resident_bytes'],'Core working set resident byte budget exceeded')
                 carrier={'contract_version':'core_cs_zscore_batch_input_v1',
                     'calendar_ref':digest({'contract_version':'stock_label_calendar_v1','sessions':spec['calendar']}),
                     'schema':RAW_SCHEMA,'output_schema':NORMALIZED_SCHEMA,'sessions':state['training'],
                     'security_ids':spec['universe'],'reason_dictionary':reasons,
                     'source_bindings_by_session':state['sources'],
                     **{name:_readonly(values,name) for name,values in arrays.items()}}
-                native=sum(v.nbytes for k,v in carrier.items() if k in arrays)
                 # Core captures nine buffers, then allocates output lists and
                 # five owned outputs. Bound these simultaneous copies before
                 # entering its public mathematical executor.
-                core_budget=_graph_bytes(state)+3*native+len(arrays['values'])*256
-                require(core_budget<=options['maximum_resident_bytes'],'Core working set resident byte budget exceeded')
                 input_doc,input_buffers=_canonical_buffers(carrier,publisher,arrays)
-                core_input={'input':input_doc,'buffers':input_buffers}
+                core_input=publisher.part(seal({'input':input_doc,'buffers':input_buffers},
+                    'core_input_artifact_ref'),'core_input_artifact_ref')
+                del input_doc,input_buffers
                 clock=time.perf_counter(); result=execute_cs_zscore_batch(carrier,params=NORMALIZATION_SPEC['params'])
                 stats['normalization_seconds']+=time.perf_counter()-clock; stats['core_calls']+=1; stats['label_core_calls']+=1
                 output_names=['values','value_validity','value_reason_codes','available_at_utc_us','source_codes']
@@ -419,8 +453,19 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                         index_ref=row_index['row_index_ref'],offset=offset,rows=normalized,raw_desc=raw_desc,
                         cutoff=cutoff,contents=contents,core_refs=[core_ref]))
                     del raw,metadata,contents,normalized
-                # Release native input copies before the next Core execution.
-                state['arrays'].clear(); state['reasons'].clear(); del carrier,result
+                # Write selector bytes now; only their small descriptors wait
+                # for the prepared view identity. Do not retain prior fits'
+                # Python offset lists, sources or chunk graphs.
+                state['selector_payloads']={
+                    'training':_selector_payload(publisher,row_index=row_index,offsets=state['training_offsets']),
+                    'inference':_selector_payload(publisher,row_index=row_index,
+                        offsets=array('Q',(positions[d]*width+i for d in state['inference'] for i in range(width))))}
+                for name in ('arrays','reasons','sources','chunks','training_offsets'): state[name].clear()
+                retained_fit_bytes(ref)
+                stats['maximum_completed_fit_working_bytes']=max(stats.get('maximum_completed_fit_working_bytes',0),
+                    sum(_graph_bytes(state[name])-sys.getsizeof(state[name]) for name in
+                        ('arrays','reasons','sources','chunks','training_offsets')))
+                del carrier,result,normalized_chunks,canonical,physical,wrapper,core_input,reasons,codes
             selection=seal({'contract_version':'stock_matrix_source_selection_v1','feature_inputs_ref':feature.identity,
                 'feature_rows':feature_selection,'label_rows':label_selection},'source_selection_ref')
             schema={'features':feature_schema,'training_raw_labels':RAW_SCHEMA,
@@ -435,10 +480,9 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                 'partitions':partitions,'core_results':core_wrappers},'prepared_view_ref')
             view_desc=publisher.part(view,'prepared_view_ref'); outputs=[]
             for ref,state in states.items():
-                infer=[positions[d]*width+i for d in state['inference'] for i in range(width)]
                 selectors={role:None if role=='validation' else _selector(publisher,view_ref=view['prepared_view_ref'],
                     row_index=row_index,schema_ref=view['schema_digest'],role=role,fold_ref=ref,
-                    offsets=state['training_offsets'] if role in ('training','training_labels') else infer)
+                    payload=state['selector_payloads']['training' if role in ('training','training_labels') else 'inference'])
                     for role in ('training','validation','inference','training_labels','evaluation_labels')}
                 inputs=seal({'contract_version':'stock_ml_saved_inputs_v2','prepared_view':view_desc,
                     'fold_spec_ref':ref,'selectors':selectors,'core_result_refs':state['core_refs']},'input_ref')

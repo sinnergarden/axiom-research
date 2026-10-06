@@ -97,6 +97,29 @@ class StockMLBatchInputs:
         require((digest(inputs),digest(spec)) in value['fold_keys'], 'fold outside saved batch definition')
         return value['matrix_state'].project(inputs,spec)
 
+    def _matrix_evaluation(self, inputs, spec):
+        """Project only admitted OOS evidence; no training matrices or hashes."""
+        value = _data(self)
+        require('matrix_state' in value, 'saved matrix batch required')
+        self._check_sources()
+        require((digest(inputs),digest(spec)) in value['fold_keys'], 'fold outside saved batch definition')
+        return value['matrix_state'].evaluation(inputs,spec,batch_ref=value['identity'])
+
+    def _project_evaluation(self, inputs, spec):
+        """Borrow the admitted OOS evidence lease for a saved matrix fold."""
+        value = _data(self)
+        require('matrix_state' in value, 'saved matrix batch required')
+        self._check_sources()
+        require((digest(inputs),digest(spec)) in value['fold_keys'], 'fold outside saved batch definition')
+        return value['matrix_state'].project_evaluation(inputs,spec,batch_ref=value['identity'])
+
+    def _evaluation_source_records(self):
+        """The one immutable (absolute path, file digest) table for this batch."""
+        value = _data(self)
+        require('matrix_state' in value, 'saved matrix batch required')
+        self._check_sources()
+        return value['matrix_state'].source_records
+
     def _matrices(self, training, candidates):
         import numpy as np
         value = _data(self)
@@ -148,6 +171,14 @@ def load_stock_ml_batch_inputs(batch_manifest, *, limits=None):
         value = {'identity':manifest['batch_ref'],'manifest':manifest,'matrix_state':state,
             'fold_keys':{(digest(f['input_manifest']),digest(f['fold_spec'])) for f in manifest['folds']},
             'closed':False,'metrics':state.store.metrics}
+        try:
+            # Count the public handle's retained manifest/key graph in the
+            # same admission budget as the backing, without double counting
+            # aliases shared with the verified state.
+            state._account_resident(extra_roots=(value,))
+        except BaseException:
+            state.close()
+            raise
         return StockMLBatchInputs(_TOKEN,value)
     require(type(manifest) is dict and set(manifest) == {'contract_version', 'folds'} and
             manifest['contract_version'] == 'stock_ml_batch_inputs_v1' and
