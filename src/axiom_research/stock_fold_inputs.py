@@ -25,6 +25,11 @@ def seal(value, key):
     return {**value, key: digest(value)}
 
 
+def file_fingerprint(path):
+    value = Path(path).stat()
+    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+
+
 def ordered(values, name):
     require(type(values) is list and bool(values) and
             all(type(v) is str and v for v in values) and values == sorted(set(values)),
@@ -225,6 +230,56 @@ def validate_raw(raw, manifest, cutoff):
     return indexed
 
 
+
+def validate_feature_parent(desc, manifest):
+    """The original v1 per-parent byte/ref/key/clock validator, without accumulation."""
+    calendar, universe, columns = manifest['calendar'], manifest['universe'], manifest['ordered_features']
+    require(set(desc) == {'features', 'input_evidence', 'sessions'}, 'Feature parent descriptor required')
+    dates = ordered(desc['sessions'], 'Feature parent dates')
+    feature = read_parent(desc['features'], 'feature_ref'); parent_ref = feature['feature_ref']
+    require(feature['contract_version'] == 'stock_feature_build_v1' and
+            feature['catalog_ref'] == manifest['catalog_ref'] and
+            feature['selection'] == manifest['feature_selection'] and
+            feature['ordered_features'] == columns and
+            feature['qlib_view']['snapshot_id'] == manifest['snapshot'], 'Feature parent schema/source mismatch')
+    queries = feature['qlib_view']['queries'] + [feature['qlib_view']['universe_query']]
+    require(bool(feature['qlib_view']['queries']) and all(isinstance(q, dict) and
+            q['pit_policy'] == manifest['pit_policy'] and set(q['symbols']) == set(universe)
+            for q in queries), 'Feature frozen PIT/universe mismatch')
+    proof_desc = desc['input_evidence']
+    require(set(proof_desc) == {'path', 'file_digest', 'input_evidence_ref'} and
+            type(proof_desc['path']) is str and Path(proof_desc['path']).is_absolute() and
+            file_digest(proof_desc['path']) == proof_desc['file_digest'] and
+            feature['input_evidence_ref'] == proof_desc['input_evidence_ref'],
+            'Feature input evidence mismatch')
+    # Original saved parents can use spaced JSON. Keep the byte hash as
+    # their immutable file identity and verify the logical evidence ref.
+    # Canonical writer bytes avoid reserializing the largest proofs.
+    try:
+        byte_ref = _canonical_file_ref(proof_desc['path'])
+    except ValueError:  # Valid JSON without the canonical writer's final LF.
+        byte_ref = None
+    proof = _read(proof_desc['path'])
+    require(file_digest(proof_desc['path']) == proof_desc['file_digest'], 'Feature proof changed during read')
+    require(byte_ref == feature['input_evidence_ref'] or
+            digest(proof) == feature['input_evidence_ref'], 'Feature input evidence mismatch')
+    by_date = {p['session']: p for p in proof}
+    require(len(by_date) == len(proof) and set(by_date) == set(dates), 'Feature proof date coverage mismatch')
+    indexed = grid(feature['rows'], dates, universe, 'session')
+    for day in dates:
+        require(day in calendar, 'outside Feature parent date')
+        plan_ref = digest(by_date[day]['core_plan'])
+        for security in universe:
+            row = indexed[security, day]
+            require(row['source_refs'] == [by_date[day]['core_frame_ref'], plan_ref], 'Feature Core source mismatch')
+            require(type(row['member']) is bool and all(type(v) is bool for v in row['validity']) and
+                    len(row['values']) == len(row['validity']) == len(row['availability']) == len(columns),
+                    'Feature row schema mismatch')
+            require(_instant(row['knowledge_cutoff']) == _instant(day+'T20:30:00+08:00') and
+                    all(a is None or _instant(a) <= _instant(row['knowledge_cutoff']) for a in row['availability']),
+                    'original Feature clock conflict')
+    return feature, indexed, by_date
+
 def load_saved_feature_inputs(manifest):
     """Validate the complete common parents once and release each full proof."""
     calendar, universe, columns = _validate_saved_manifest(manifest)
@@ -241,53 +296,15 @@ def load_saved_feature_inputs(manifest):
     require(bool(manifest['feature_parents']), 'saved Feature parents required')
     for desc in manifest['feature_parents']:
         require(set(desc) == {'features', 'input_evidence', 'sessions'}, 'Feature parent descriptor required')
-        dates = ordered(desc['sessions'], 'Feature parent dates')
-        feature = read_parent(desc['features'], 'feature_ref'); parent_ref = feature['feature_ref']
-        require(feature['contract_version'] == 'stock_feature_build_v1' and
-                feature['catalog_ref'] == manifest['catalog_ref'] and
-                feature['selection'] == manifest['feature_selection'] and
-                feature['ordered_features'] == columns and
-                feature['qlib_view']['snapshot_id'] == manifest['snapshot'], 'Feature parent schema/source mismatch')
-        queries = feature['qlib_view']['queries'] + [feature['qlib_view']['universe_query']]
-        require(bool(feature['qlib_view']['queries']) and all(isinstance(q, dict) and
-                q['pit_policy'] == manifest['pit_policy'] and set(q['symbols']) == set(universe)
-                for q in queries), 'Feature frozen PIT/universe mismatch')
-        proof_desc = desc['input_evidence']
-        require(set(proof_desc) == {'path', 'file_digest', 'input_evidence_ref'} and
-                type(proof_desc['path']) is str and Path(proof_desc['path']).is_absolute() and
-                file_digest(proof_desc['path']) == proof_desc['file_digest'] and
-                feature['input_evidence_ref'] == proof_desc['input_evidence_ref'],
-                'Feature input evidence mismatch')
-        # Original saved parents can use spaced JSON. Keep the byte hash as
-        # their immutable file identity and verify the logical evidence ref.
-        # Canonical writer bytes avoid reserializing the largest proofs.
-        try:
-            byte_ref = _canonical_file_ref(proof_desc['path'])
-        except ValueError:  # Valid JSON without the canonical writer's final LF.
-            byte_ref = None
-        proof = _read(proof_desc['path'])
-        require(file_digest(proof_desc['path']) == proof_desc['file_digest'], 'Feature proof changed during read')
-        require(byte_ref == feature['input_evidence_ref'] or
-                digest(proof) == feature['input_evidence_ref'], 'Feature input evidence mismatch')
-        by_date = {p['session']: p for p in proof}
-        require(len(by_date) == len(proof) and set(by_date) == set(dates), 'Feature proof date coverage mismatch')
-        indexed = grid(feature['rows'], dates, universe, 'session')
-        for day in dates:
-            require(day in calendar and day not in parents, 'overlapping/outside Feature parent dates')
-            plan_ref = digest(by_date[day]['core_plan'])
+        feature, indexed, by_date = validate_feature_parent(desc, manifest)
+        parent_ref = feature['feature_ref']
+        for day in desc['sessions']:
+            require(day not in parents, 'overlapping Feature parent dates')
             for security in universe:
-                row = indexed[security, day]
-                require(row['source_refs'] == [by_date[day]['core_frame_ref'], plan_ref], 'Feature Core source mismatch')
-                require(type(row['member']) is bool and all(type(v) is bool for v in row['validity']) and
-                        len(row['values']) == len(row['validity']) == len(row['availability']) == len(columns),
-                        'Feature row schema mismatch')
-                require(_instant(row['knowledge_cutoff']) == _instant(day+'T20:30:00+08:00') and
-                        all(a is None or _instant(a) <= _instant(row['knowledge_cutoff']) for a in row['availability']),
-                        'original Feature clock conflict')
-                rows[security, day] = row
+                rows[security, day] = indexed[security, day]
             parents[day] = {'feature_ref': parent_ref, 'qlib_view_ref': feature['qlib_view']['view_id']}
         builds[parent_ref] = feature
-        del proof, by_date, indexed, feature
+        del by_date, indexed, feature
     require(common_source_identity(manifest) == identity, 'common source definition changed during validation')
     return _SavedFeatureInputs(_FEATURE_INPUT_TOKEN, identity=identity, rows=rows,
         parents=parents, builds=builds)
@@ -319,11 +336,33 @@ def project_saved_fold(manifest, spec, *, feature_inputs=None, reader=read_paren
         # are materialized here; Dataset records the actual joined training keys.
         'rows': [deepcopy(rows[s, d]) for d in (prediction_dates if compact else sorted(needed))
                  for s in universe]}, 'feature_ref')
+    # A complete Raw ref binds its query and horizon. Reuse only this call's
+    # admitted object/index at the exact fit information set, never selected
+    # normalized rows or a caller-supplied trusted flag.
+    raw_admissions = {}
+    def raw_parent(descriptor):
+        key = digest({'descriptor':descriptor,'snapshot':manifest['snapshot'],
+            'pit_policy':manifest['pit_policy'],'calendar':manifest['calendar'],
+            'universe':manifest['universe'],'fit_cutoff':_instant(spec['fit_cutoff']).isoformat()})
+        def signature(value):
+            return digest({'raw_ref':value['label_ref'],'query':value['source_evidence']['context'],
+                           'label_spec':value['label_spec'],'calendar_ref':value['calendar_ref']})
+        if key not in raw_admissions:
+            before = file_fingerprint(descriptor['path'])
+            raw = reader(descriptor, 'label_ref')
+            require(raw['label_ref'] == descriptor['label_ref'], 'Raw parent ref mismatch')
+            indexed = validate_raw(raw, manifest, spec['fit_cutoff'])
+            require(file_fingerprint(descriptor['path']) == before, 'Raw parent changed during admission')
+            raw_admissions[key] = raw, indexed, before, signature(raw), descriptor['path']
+        raw, indexed, mark, admitted, path = raw_admissions[key]
+        require(file_fingerprint(path) == mark and signature(raw) == admitted,
+                'Raw parent changed during projection')
+        return raw, indexed
     norm_rows, label_parents, section_refs, raw_refs = {}, [], [], []
     for desc in manifest['training_labels']:
         require(set(desc) == {'raw', 'normalized', 'sessions', 'raw_projection'}, 'training label descriptor required')
         dates = ordered(desc['sessions'], 'normalized parent dates')
-        raw = reader(desc['raw'], 'label_ref'); raw_index = validate_raw(raw, manifest, spec['fit_cutoff'])
+        raw, raw_index = raw_parent(desc['raw'])
         norm = reader(desc['normalized'], 'label_ref'); _verify_normalized_labels(norm)
         require(type(desc['raw_projection']) is bool, 'explicit raw projection flag required')
         projected = raw
@@ -409,4 +448,9 @@ def project_saved_fold(manifest, spec, *, feature_inputs=None, reader=read_paren
     evaluation = reader(manifest['evaluation_labels'], 'label_ref')
     evaluation_index = validate_raw(evaluation, manifest, spec['evaluation_cutoff'])
     require(all((s, d) in evaluation_index for d in prediction_dates for s in universe), 'missing OOS raw label grid')
+    require(all(file_fingerprint(path) == mark and
+                digest({'raw_ref':raw['label_ref'],'query':raw['source_evidence']['context'],
+                        'label_spec':raw['label_spec'],'calendar_ref':raw['calendar_ref']}) == admitted
+                for raw, indexed, mark, admitted, path in raw_admissions.values()),
+            'Raw parent changed before projection completed')
     return feature_slice, label_slice, training, excluded, sorted(set(raw_refs)), evaluation

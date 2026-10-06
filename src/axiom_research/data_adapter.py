@@ -52,7 +52,10 @@ def _utc(value: Any, *, availability: bool = False) -> str:
 
 def _versioned(batch: Any, purpose: str) -> tuple[dict, dict, dict]:
     _require(hasattr(batch, "to_json"), "expected DataBatch")
-    wire = batch.to_json()
+    return _versioned_wire(batch.to_json(), purpose)
+
+
+def _versioned_wire(wire: Any, purpose: str) -> tuple[dict, dict, dict]:
     _require(isinstance(wire, dict) and set(wire) == {"records", "field_meta", "context"},
              "unknown DataBatch shape")
     records, metadata, context = wire["records"], wire["field_meta"], wire["context"]
@@ -196,12 +199,20 @@ def adapt_decision_batch(batch: Any, *, reference: Any, recipe_ref: str,
     and metadata are keyed independently so DataFrame order never binds cells.
     Caller pins both reads before this function; it performs no I/O or writes.
     """
+    _require(hasattr(batch, "to_json") and hasattr(reference, "to_json"), "expected DataBatch")
+    return _adapt_decision_wires(batch.to_json(), reference.to_json(), recipe_ref=recipe_ref,
+        output_keys=output_keys, lag_sessions=lag_sessions, source_granularity=source_granularity)
+
+
+def _adapt_decision_wires(batch_wire: dict, reference_wire: dict, *, recipe_ref: str,
+                          output_keys=None, lag_sessions=1, source_granularity="cell"):
+    """Validate both complete wires on every call; never admit a trusted cache."""
     _require(isinstance(recipe_ref, str) and recipe_ref.startswith("sha256:") and
              len(recipe_ref) == 71, "recipe_ref must be an immutable digest")
     _require(type(lag_sessions) is int and lag_sessions >= 1, "positive lag required")
     _require(source_granularity in ("cell", "batch_field"), "unknown source granularity")
-    records, field_meta, ctx = _versioned(batch, "decision_facts")
-    ref_records, ref_meta, ref_ctx = _versioned(reference, "decision_facts")
+    records, field_meta, ctx = _versioned_wire(batch_wire, "decision_facts")
+    ref_records, ref_meta, ref_ctx = _versioned_wire(reference_wire, "decision_facts")
     # These are the exact three keys checked by _versioned, with no projection.
     batch_wire = {"records": records, "field_meta": field_meta, "context": ctx}
     reference_wire = {"records": ref_records, "field_meta": ref_meta, "context": ref_ctx}

@@ -68,8 +68,8 @@ class StockInputReuseTests(unittest.TestCase):
 
         plans, frames = [], []
 
-        def adapt(batch, **kwargs):
-            plan = Document({"session": batch.query.sessions[-1]})
+        def adapt(wire, reference_wire, **kwargs):
+            plan = Document({"session": max(row['session'] for row in wire['records'])})
             plans.append(plan)
             return SimpleNamespace(plan=plan, facts=Document({"facts": True}),
                 context=Document({"context": True}), source_evidence={})
@@ -89,7 +89,7 @@ class StockInputReuseTests(unittest.TestCase):
         with patch("axiom_research.qlib_adapter.QlibView", View), \
              patch("axiom_research.stock_ml._project_qlib", side_effect=lambda batch, values, ref: batch) as project, \
              patch("axiom_research.stock_ml._adjust_feature", side_effect=lambda price, factor, session: price), \
-             patch("axiom_research.data_adapter.adapt_decision_batch", side_effect=adapt), \
+             patch("axiom_research.data_adapter._adapt_decision_wires", side_effect=adapt), \
              patch("axiom_research.feature_catalog.build_feature_plan", side_effect=lambda plan, *args, **kwargs: plan), \
              patch("axiom_engine.core.execute_feature_plan", side_effect=execute), \
              patch("axiom_data.adjust_prices", side_effect=lambda price, factor, **kwargs: price) as adjust, \

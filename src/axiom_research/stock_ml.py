@@ -156,15 +156,11 @@ def _signal_evidence(predictions, labels, cutoff):
         'limitations':['Forward-label statistics are not account returns.','No tuning or confidence claim.']},'evidence_ref')
 
 
-def _prepare_stock_features(data, *, config, destination, catalog, chosen, progress):
-    """Build decision features once; no outcome reads or fold label cutoff."""
-    from .feature_catalog import build_feature_plan
+def _prepare_stock_qlib(data, *, config, destination):
+    """Prepare the original immutable native projection once for this scope."""
     from axiom_data import QuerySpec
-    from axiom_engine.core import execute_feature_plan
-    from .data_adapter import adapt_decision_batch
     from .qlib_adapter import QlibView
     import numpy as np
-    stats={'feature_core_calls':0,'core_calls':0,'data_read_calls':0,'feature_cache_hit':False}
     symbols=tuple(config['symbols']); sessions=tuple(config['read_sessions']); cutoffs=config['cutoff_by_session']
     price_query=QuerySpec('market_daily',('open','high','low','close','amount_cny'),symbols,
         sessions,config['pit_policy'],cutoffs)
@@ -181,11 +177,25 @@ def _prepare_stock_features(data, *, config, destination, catalog, chosen, progr
     for (instrument,day),row in native.iterrows():
         values[reverse[instrument],str(day.date())]={k:None if np.isnan(row['$'+k]) else float(row['$'+k])
             for k in ('open','high','low','close','amount_cny','factor')}
-    stats['qlib_seconds']=time.perf_counter()-begin
-    rows=[]; inputs=[]; columns=[f['id'] for f in chosen]; position={s:i for i,s in enumerate(sessions)}
+    return {'values':values,'view_reference':view_reference,'price_query':price_query,
+            'factor_query':factor_query,'member_query':member_query,'qlib_path':qlib_path,
+            'seconds':time.perf_counter()-begin}
+
+
+def _iter_stock_feature_days(data, *, config, catalog, chosen, qlib_inputs, progress=None, stats=None,
+                             history_sessions=21):
+    """Yield one original complete cross-section/proof; Core owns computation."""
+    from .feature_catalog import build_feature_plan
+    from axiom_engine.core import execute_feature_plan
+    from .data_adapter import _adapt_decision_wires
+    stats = stats if stats is not None else {'data_read_calls':0,'core_calls':0,'feature_core_calls':0}
+    symbols=tuple(config['symbols']); sessions=tuple(config['read_sessions']); cutoffs=config['cutoff_by_session']
+    price_query=qlib_inputs['price_query'];factor_query=qlib_inputs['factor_query'];member_query=qlib_inputs['member_query']
+    values=qlib_inputs['values'];view_id=qlib_inputs['view_reference']['view_id']
+    position={s:i for i,s in enumerate(sessions)}
     begin=time.perf_counter()
     for completed,session in enumerate(config['feature_sessions'],1):
-        i=position[session]; history=sessions[max(0,i-20):i+1]
+        i=position[session]; history=sessions[max(0,i-history_sessions+1):i+1]
         window_cutoffs={s:cutoffs[session] for s in history}
         pq=replace(price_query,sessions=history,cutoff_by_session=window_cutoffs)
         fq=replace(factor_query,sessions=history,cutoff_by_session=window_cutoffs)
@@ -195,31 +205,48 @@ def _prepare_stock_features(data, *, config, destination, catalog, chosen, progr
         factor=_project_qlib(data.read(snapshot=config['snapshot'],query=fq),values,view_id)
         adjusted=_adjust_feature(price,factor,session)
         membership=data.members(snapshot=config['snapshot'],query=rq)
-        adapted=adapt_decision_batch(adjusted,reference=membership,recipe_ref=catalog.recipe_ref(
+        # Complete local wires are revalidated by the same adapter. They are
+        # consumed read-only and discarded with this date, never a global cache.
+        adjusted_wire=adjusted.to_json(); membership_wire=membership.to_json()
+        adapted=_adapt_decision_wires(adjusted_wire,membership_wire,recipe_ref=catalog.recipe_ref(
             config['feature_selection'],normalized=True),output_keys=tuple((s,session) for s in symbols),
             source_granularity='batch_field')
         plan=build_feature_plan(adapted.plan,config['feature_selection'],catalog=catalog,normalized=True)
         frame=execute_feature_plan(plan,adapted.facts,adapted.context); stats['core_calls']+=1; stats['feature_core_calls']+=1
         frame_ref=frame.identity; plan_ref=plan.identity
-        frame_wire=frame.to_dict(); member={r['security_id']:r['is_member'] for r in membership.to_json()['records'] if r['session']==session}
+        frame_wire=frame.to_dict(); member={r['security_id']:r['is_member'] for r in membership_wire['records'] if r['session']==session}
+        rows=[]
         for r in frame_wire['rows']:
             rows.append({'security_id':r['security_id'],'session':session,'values':r['values'],
                 'availability':r['availability'],'validity':r['valid'],'reasons':r['reasons'],
                 'member':member[r['security_id']],
                 'knowledge_cutoff':cutoffs[session],'source_refs':[frame_ref,plan_ref]})
-        inputs.append({'session':session,'core_frame_ref':frame_ref,'core_plan':plan.to_dict(),
+        evidence={'session':session,'core_frame_ref':frame_ref,'core_plan':plan.to_dict(),
             'fact_ref':adapted.facts.identity,'context_ref':adapted.context.identity,
             'sessions':list(history),'cutoffs':window_cutoffs,
-            'adjusted_input_ref':digest(adjusted.to_json()),'membership_ref':digest(membership.to_json()),
+            'adjusted_input_ref':digest(adjusted_wire),'membership_ref':digest(membership_wire),
             'source_evidence':{k:{**{a:b for a,b in v.items() if a!='provenance_by_key'},
                 'provenance_by_key_ref':digest(v['provenance_by_key'])}
-                for k,v in adapted.source_evidence.items()}})
+                for k,v in adapted.source_evidence.items()}}
         if progress is not None:
             progress({'stage':'features','completed':completed,'total':len(config['feature_sessions']),
                       'session':session,'seconds':time.perf_counter()-begin})
+        yield rows,evidence
+
+
+def _prepare_stock_features(data, *, config, destination, catalog, chosen, progress):
+    """Legacy collector; bounded long preparation uses the public shard writer."""
+    stats={'feature_core_calls':0,'core_calls':0,'data_read_calls':0,'feature_cache_hit':False}
+    qlib_inputs=_prepare_stock_qlib(data,config=config,destination=destination)
+    stats['qlib_seconds']=qlib_inputs['seconds']
+    rows=[];inputs=[];begin=time.perf_counter()
+    for day_rows,evidence in _iter_stock_feature_days(data,config=config,catalog=catalog,chosen=chosen,
+            qlib_inputs=qlib_inputs,progress=progress,stats=stats):
+        rows.extend(day_rows);inputs.append(evidence)
     stats['feature_seconds']=time.perf_counter()-begin
     features=_seal({'contract_version':'stock_feature_build_v1','catalog_ref':catalog.identity,
-        'selection':config['feature_selection'],'ordered_features':columns,'qlib_view':view_reference,
+        'selection':config['feature_selection'],'ordered_features':[f['id'] for f in chosen],
+        'qlib_view':qlib_inputs['view_reference'],
         'input_evidence_ref':digest(inputs),'rows':rows},'feature_ref')
     return features, inputs, stats
 
