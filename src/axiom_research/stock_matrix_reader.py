@@ -15,7 +15,7 @@ import time
 import weakref
 
 from .stock_artifacts import digest, file_digest, _read, _verify_ref
-from .stock_fold_inputs import require, ordered, file_fingerprint, validate_spec
+from .stock_fold_inputs import require, ordered, file_fingerprint, validate_spec, seal
 from .stock_label_contracts import (_instant, _session, _eligible_reason, NORMALIZATION_SPEC,
                                     RAW_TARGET_SCHEMA, NORMALIZED_TARGET_SCHEMA)
 
@@ -64,6 +64,7 @@ class VerifiedMatrixStore:
         self.metrics = {'unique_descriptor_admissions': 0, 'file_hash_calls': 0,
             'json_decode_calls': 0, 'mmap_opens': 0, 'source_bytes': 0,
             'hash_bytes': 0, 'common_key_index_builds': 0, 'fold_projection_calls': 0,
+            'evaluation_projection_calls': 0,
             'projection_bytes': 0, 'data_read_calls': 0, 'core_calls': 0,
             'train_calls': 0, 'predict_calls': 0, 'account_calls': 0}
 
@@ -644,9 +645,17 @@ class _TargetBlock:
         return result
 
 
-def _find_core_input(contents, input_ref):
+def _find_core_input(contents, input_ref, store, *, artifacts=None):
     found=[]
     for value in contents.values():
+        if type(value) is dict and set(value)=={'path','file_digest','core_input_artifact_ref'}:
+            child=store.read_json(value,'core_input_artifact_ref')
+            _fields(child,{'input','buffers','core_input_artifact_ref'},'exact saved Core input artifact required')
+            pair={k:child[k] for k in ('input','buffers')}
+            if digest(pair['input'])==input_ref:
+                found.append(pair)
+                if artifacts is not None: artifacts[value['path']]=value
+            continue
         if type(value) is dict and set(value)=={'input','buffers'} and digest(value['input'])==input_ref:
             found.append(value)
     require(len(found)==1,'saved Core input closure missing or ambiguous')
@@ -664,7 +673,7 @@ def _outcome_query(context,calendar):
     clocks=query['cutoff_by_session']; require(set(clocks)==set(sessions),'complete label Query cutoffs required')
     instants=set(map(_instant,clocks.values())); require(len(instants)==1,'common label outcome cutoff required')
     cutoff=next(iter(instants)); anchor=query['adjustment_anchor']
-    require(anchor in calendar and type(derived) is dict and derived.get('recipe_version')=='common_anchor_price_v1' and
+    require(anchor in calendar and anchor<=sessions[-1] and type(derived) is dict and derived.get('recipe_version')=='common_anchor_price_v1' and
         derived.get('formula')=='price_t * factor_t / factor_anchor' and derived.get('anchor_session')==anchor and
         derived.get('decision_session')==sessions[-1] and _instant(derived.get('decision_cutoff'))==cutoff,
         'original label native anchor/derivation required')
@@ -682,23 +691,171 @@ def _outcome_query(context,calendar):
     return query,query['symbols'],anchor,cutoff
 
 
-def _label_admission(partitions, *, view,feature,store,row_index,core_wrappers,common,fold_specs):
+def _training_feature_clock(feature,cutoff):
+    clocks=feature['availability']
+    require(any(a is not None for a in clocks) and all(a is None or _instant(a)<=cutoff for a in clocks),
+            'training Feature clock exceeds fit')
+
+
+def _raw_row_types(row):
+    _fields(row,_TARGET_FIELDS,'exact original Raw Target row required')
+    require(type(row['valid']) is bool,'original Raw Target validity must be bool')
+    require(row['return'] is None or type(row['return']) in (int,float) and math.isfinite(row['return']),
+            'original Raw Target return must be finite or null')
+    require(row['invalid_reason'] is None or type(row['invalid_reason']) is str and bool(row['invalid_reason']),
+            'original Raw Target reason must be text or null')
+    for name in ('label_available_at','start_session','end_session'):
+        require(row[name] is None or type(row[name]) is str and bool(row[name]),
+                'original Raw Target clock/session must be text or null')
+    refs=row['source_refs']
+    require(type(refs) is list and bool(refs) and all(_ref(ref) for ref in refs) and len(set(refs))==len(refs),
+            'original Raw Target source refs must be unique digest list')
+
+
+class _RawAdmission:
+    """Compact once-validated Raw rows; never retain the selected price graph."""
+    def __init__(self,descriptor,raw,indexed,common,np):
+        for row in raw['rows']: _raw_row_types(row)
+        self.provenance={'raw_build':deepcopy(descriptor),**{k:deepcopy(raw[k]) for k in
+            ('contract_version','label_spec','calendar_ref','source_ref','source_evidence','label_ref')}}
+        self.days=sorted({d for _,d in indexed}); self.securities=list(common['universe'])
+        self.day_positions={d:i for i,d in enumerate(self.days)}
+        self.security_positions={s:i for i,s in enumerate(self.securities)}
+        rows=[indexed[s,d] for d in self.days for s in self.securities]
+        self.rows=_TargetBlock(rows,start=0,table='raw_admission',np=np)
+        self.bytes=self.rows.bytes+_resident_size([self.provenance,self.days,self.securities,
+            self.day_positions,self.security_positions])
+
+    def __contains__(self,key):
+        return key[0] in self.security_positions and key[1] in self.day_positions
+
+    def __getitem__(self,key):
+        require(key in self,'Target key outside admitted Raw build')
+        offset=self.day_positions[key[1]]*len(self.securities)+self.security_positions[key[0]]
+        return self.rows.row(offset,key)
+
+
+def _training_exclusion(row,spec,calendar):
+    pos=calendar.index(row['feature_session'])
+    if pos+5>=len(calendar) or calendar[pos+5]>_instant(spec['fit_cutoff']).date().isoformat():
+        return 'LABEL_NOT_MATURE'
+    if not row['normalized_valid']: return row['normalization_reason'] or 'NORMALIZATION_UNDEFINED'
+    return None
+
+
+class _TrainingBinding:
+    """One bounded canonical-list hash, fed while admitted chunks are alive."""
+    def __init__(self):
+        self.rows=sha256(b'['); self.keys=sha256(b'['); self.count=0; self.total=0
+        self.excluded={}; self.last_offset=-1
+
+    def add(self,offset,row,feature,spec,calendar):
+        require(offset>self.last_offset,'ordered complete normalized training grid required')
+        self.last_offset=offset; self.total+=1
+        reason=_training_exclusion(row,spec,calendar)
+        if reason is not None:
+            self.excluded[reason]=self.excluded.get(reason,0)+1; return
+        joined=deepcopy(feature)
+        joined.update(label=float(row['normalized_return']),
+            raw_return=float(row['return']) if row['return'] is not None else None,
+            label_available_at=row['label_available_at'],normalized_available_at=row['normalized_available_at'])
+        key=[row['security_id'],row['feature_session']]
+        if self.count: self.rows.update(b','); self.keys.update(b',')
+        encode=lambda value:json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()
+        self.rows.update(encode(joined)); self.keys.update(encode(key)); self.count+=1
+
+    def finish(self):
+        self.rows.update(b']'); self.keys.update(b']')
+        return {'training_rows_ref':'sha256:'+self.rows.hexdigest(),'training_keys_digest':'sha256:'+self.keys.hexdigest(),
+            'training_row_count':self.count,'total_row_count':self.total,'excluded':dict(self.excluded)}
+
+
+def _label_leaves(rows,wire,*,raw_ref,source_ref,query_ref,anchor,store,contents):
+    """Lossless OOS endpoint cells only; keep no training selected records."""
+    records={}
+    for record in wire['records']:
+        key=record['security_id'],record['session']
+        require(key not in records,'duplicate selected Label record key'); records[key]=record
+    metadata={}
+    for field in ('open','close'):
+        header=wire['field_meta'][field]
+        require(type(header) is dict and type(header.get('by_key')) is list,'keyed actual Label field metadata required')
+        indexed={}
+        for item in header['by_key']:
+            key=item['security_id'],item['session']
+            require(key not in indexed,'duplicate selected Label metadata key'); indexed[key]=item
+        metadata[field]=(header,indexed)
+    result=[]
+    cutoffs={_instant(clock) for clock in wire['context']['query']['cutoff_by_session'].values()}
+    require(len(cutoffs)==1,'common native outcome cutoff required for Label leaves')
+    cutoff=next(iter(cutoffs))
+    for row in rows:
+        security=row['security_id']; refs=[]; clocks=[]
+        for field,session in (('open',row['start_session']),('close',row['end_session'])):
+            if session is None:
+                require(row['valid'] is not True,'valid Label Target requires both original endpoints')
+                refs.append(None); continue
+            header,indexed=metadata[field]; key=security,session
+            if row['valid'] is True:
+                require(key in records and key in indexed,'valid Label Target requires actual selected endpoint record/metadata')
+                value=records[key].get(field); item=indexed[key]
+                require(type(value) in (int,float) and math.isfinite(value) and value>0,
+                        'valid Label Target endpoint value must be finite positive number')
+                require(item.get('missing_reason') is None,'valid Label Target endpoint metadata cannot be missing')
+                for name in ('price_provenance','factor_provenance','anchor_factor_provenance'):
+                    provenance=item.get(name); expected=anchor if name=='anchor_factor_provenance' else session
+                    require(type(provenance) is dict and (provenance.get('security_id'),provenance.get('session'))==(security,expected) and
+                        provenance.get('missing_reason') is None and provenance.get('usable_from') is not None,
+                        'valid Label Target original provenance key/availability required')
+                    clock=_instant(provenance['usable_from'])
+                    require(clock<=cutoff,'valid Label Target provenance exceeds native outcome cutoff'); clocks.append(clock)
+            leaf={'session':session,'value':deepcopy(records.get(key,{}).get(field)),
+                'field_meta':{**{k:deepcopy(v) for k,v in header.items() if k!='by_key'},
+                    'by_key':[deepcopy(indexed[key])] if key in indexed else []}}
+            ref=digest(leaf)
+            if ref not in contents:
+                contents[ref]=leaf; store.resident_bytes+=_resident_size([ref,leaf])
+                require(store.resident_bytes<=store.maximum_matrix_bytes,'OOS leaf resident byte budget exceeded')
+            else: require(contents[ref]==leaf,'conflicting canonical Label leaf')
+            refs.append(ref)
+        if row['valid'] is True:
+            require(_instant(row['label_available_at'])==max(clocks),'valid Label Target clock differs from original endpoint provenance')
+        result.append({'security_id':security,'feature_session':row['feature_session'],'raw_label_ref':raw_ref,
+            'source_ref':source_ref,'query_ref':query_ref,'adjustment_anchor':anchor,
+            'start_open_ref':refs[0],'end_close_ref':refs[1]})
+    return result
+
+
+def _label_admission(partitions, *, view,feature,store,row_index,core_wrappers,core_descriptors,common,fold_specs):
     """Admit one bounded Raw/normalized chunk at a time; retain compact targets."""
     from .stock_fold_inputs import validate_raw
     schemas={k:v for k,v in view['schema'].items() if k!='features'}
-    if not partitions: return {},set(),{},[]
+    if not partitions: return {},set(),{},[],{}, {},{},{},{}
     admitted,coverage=_validate_partitions(partitions,row_index,schemas,store,
                                           expected_fold_refs=set(fold_specs),metadata=False)
     groups={}
     for p,arrays,_ in admitted:
-        key=p['fold_spec_ref'],p['row_offset'],p['row_count']
+        spec=fold_specs[p['fold_spec_ref']]
+        cutoff=spec['evaluation_cutoff'] if p['table']=='evaluation_raw_labels' else spec['fit_cutoff']
+        key=_us(cutoff),p['fold_spec_ref'],p['row_offset'],p['row_count']
         groups.setdefault(key,[]).append((p,arrays))
     targets={}; reachable=set(); raw_refs={}; width=len(row_index['security_ids']); np=store.np; core_cache={}; selection_rows=[]
-    for (fold_ref,start,count),pieces in sorted(groups.items()):
-        spec=fold_specs[fold_ref]; core_seen=set(); raw_seen=set()
+    raw_cache={}; raw_provenance={}; raw_cache_bytes=0; core_artifacts={}; ordered_groups=sorted(groups.items())
+    training_streams={ref:_TrainingBinding() for ref in fold_specs}; leaf_rows={}; leaf_contents={}
+    fold_paths={ref:set() for ref in fold_specs}
+    stream_bytes={ref:_resident_size(vars(stream)) for ref,stream in training_streams.items()}
+    store.resident_bytes+=sum(stream_bytes.values())
+    require(store.resident_bytes<=store.maximum_matrix_bytes,'training stream resident byte budget exceeded')
+    last_core_consumer={key[1]:i for i,(key,pieces) in enumerate(ordered_groups)
+        if any(p['table']=='training_normalized_labels' for p,_ in pieces)}
+    store.metrics.update(raw_cache_live_bytes=0,raw_cache_peak_bytes=0,raw_cache_peak_entries=0,raw_cache_admissions=0)
+    for group_number,((native_clock,fold_ref,start,count),pieces) in enumerate(ordered_groups):
+        spec=fold_specs[fold_ref]
         group_features=(feature.row_metadata(np.arange(start,start+count,dtype='<u8'))
                         if any(p['table']!='evaluation_raw_labels' for p,_ in pieces) else None)
         for p,arrays in pieces:
+            fold_paths[fold_ref].add(p['metadata']['path'])
+            fold_paths[fold_ref].update(d['path'] for d in p['buffers'].values())
             metadata=store.read_json(p['metadata'],'metadata_ref')
             _fields(metadata,{'contract_version','role','fold_spec_ref','cutoff','rows','raw_build','core_result_refs','contents','metadata_ref'},
                     'exact matrix Target metadata required')
@@ -708,12 +865,27 @@ def _label_admission(partitions, *, view,feature,store,row_index,core_wrappers,c
                     metadata['fold_spec_ref']==fold_ref and _instant(metadata['cutoff'])==_instant(cutoff),
                     'Target metadata fit/role/cutoff mismatch')
             rows=metadata['rows']; require(type(rows) is list and len(rows)==count,'complete matrix Target rows required')
-            raw=store.read_json(metadata['raw_build'],'label_ref')
-            raw_index=validate_raw(raw,common,cutoff)
+            raw_desc=metadata['raw_build']
+            _fields(raw_desc,{'path','file_digest','label_ref'},'exact Raw build descriptor required')
+            raw_key=raw_desc['path'],raw_desc['label_ref']
+            fold_paths[fold_ref].add(raw_desc['path'])
+            if raw_key not in raw_cache:
+                raw=store.read_json(raw_desc,'label_ref'); indexed=validate_raw(raw,common,cutoff)
+                admission=_RawAdmission(raw_desc,raw,indexed,common,np)
+                store.resident_bytes+=admission.bytes
+                require(store.resident_bytes<=store.maximum_matrix_bytes,'Raw compact metadata budget exceeded')
+                raw_cache[raw_key]=admission; raw_provenance[raw_key]=admission.provenance
+                raw_cache_bytes+=admission.bytes; store.metrics['raw_cache_live_bytes']=raw_cache_bytes
+                store.metrics['raw_cache_peak_bytes']=max(store.metrics['raw_cache_peak_bytes'],raw_cache_bytes)
+                store.metrics['raw_cache_peak_entries']=max(store.metrics['raw_cache_peak_entries'],len(raw_cache))
+                store.metrics['raw_cache_admissions']+=1
+                store.drop_json(raw_desc,'label_ref'); del raw,indexed
+            else:
+                store._register(raw_desc)
+            raw_index=raw_cache[raw_key]; raw=raw_index.provenance
             query,_,anchor,native_cutoff=_outcome_query(raw['source_evidence']['context'],common['calendar'])
             require(native_cutoff==_instant(cutoff),'Target original Query current cutoff mismatch')
             if role=='training': raw_refs.setdefault(fold_ref,set()).add(raw['label_ref'])
-            raw_seen.add((metadata['raw_build']['path'],raw['label_ref']))
             refs=metadata['core_result_refs']; require(type(refs) is list and len(set(refs))==len(refs),'ordered Target Core result refs required')
             if p['table']=='training_normalized_labels':
                 require(bool(refs),'normalized Target requires saved Core result')
@@ -732,6 +904,8 @@ def _label_admission(partitions, *, view,feature,store,row_index,core_wrappers,c
             require(len(cohorts)==(1 if role=='training' else 0),'Target cohort evidence mismatch')
             if cohorts:
                 expected_reasons=[_eligible_reason(r,f,len(common['ordered_features']),_instant(cutoff)) for r,f in zip(rows,group_features)]
+                for reason,frow in zip(expected_reasons,group_features):
+                    if reason is None: _training_feature_clock(frow,_instant(cutoff))
                 expected_cohort={'contract_version':'stock_matrix_label_cohort_v1',
                     'feature_inputs_ref':view['definition']['feature_inputs']['feature_inputs_ref'],'raw_label_ref':raw['label_ref'],
                     'fold_spec_ref':fold_ref,'cutoff':metadata['cutoff'],'sessions':sorted({r['feature_session'] for r in rows}),
@@ -747,7 +921,15 @@ def _label_admission(partitions, *, view,feature,store,row_index,core_wrappers,c
                 feature_rows=group_features
                 for ref in refs:
                     require(ref in core_wrappers,'Target Core result outside prepared view')
-                    wrapper=core_wrappers[ref]; inp=_find_core_input(metadata['contents'],wrapper['result']['metadata']['input_ref'])
+                    wrapper=core_wrappers[ref]; inp=_find_core_input(metadata['contents'],wrapper['result']['metadata']['input_ref'],store,
+                        artifacts=core_artifacts.setdefault(fold_ref,{}))
+                    fold_paths[fold_ref].add(core_descriptors[ref]['path'])
+                    fold_paths[fold_ref].update(d['path'] for d in wrapper['buffers'].values())
+                    fold_paths[fold_ref].update(d['path'] for d in inp['buffers'].values())
+                    fold_paths[fold_ref].update(d['path'] for d in core_artifacts[fold_ref].values())
+                    fold_paths[fold_ref].update(content['path'] for content in metadata['contents'].values()
+                        if type(content) is dict and set(content)=={'path','file_digest','core_input_artifact_ref'} and
+                        content['path'] in store._hashes)
                     if ref not in core_cache:
                         core_cache[ref]=validate_saved_core_result(wrapper,store,core_input=inp)
                     in_arrays,out_arrays=core_cache[ref]
@@ -784,7 +966,6 @@ def _label_admission(partitions, *, view,feature,store,row_index,core_wrappers,c
                                     'normalized Core eligibility source mapping mismatch')
                             core_cells[off]=(reason,bool(out_arrays['value_validity'][k]),float(out_arrays['values'][k]),
                                              int(out_arrays['available_at_utc_us'][k]),ref)
-                    core_seen.add(ref)
             for i,row in enumerate(rows):
                 _fields(row,_TARGET_FIELDS|(_NORMALIZED_FIELDS if refs else set()),'exact thin matrix Target row required')
                 offset=start+i; key=(row_index['security_ids'][offset%width],row_index['sessions'][offset//width])
@@ -809,17 +990,54 @@ def _label_admission(partitions, *, view,feature,store,row_index,core_wrappers,c
                         float(arrays['values'][i,0])==(float(value) if valid else 0.0) and
                         bool(arrays['available_at_validity'][i,0]) is (at is not None) and
                         (at is None or int(arrays['available_at_utc_us'][i,0])==_us(at)), 'Target binary values/flags/clocks mismatch')
+                if refs: training_streams[fold_ref].add(offset,row,group_features[i],spec,common['calendar'])
+            if role=='evaluation':
+                leaves=_label_leaves(rows,selected_wire,raw_ref=raw['label_ref'],source_ref=raw['source_ref'],
+                    query_ref=qref,anchor=anchor,store=store,contents=leaf_contents)
+                saved_leaves=leaf_rows.setdefault(fold_ref,{})
+                previous_size=sys.getsizeof(saved_leaves); added_bytes=0
+                for i,leaf in enumerate(leaves):
+                    offset=start+i
+                    require(offset not in saved_leaves,'duplicate OOS Label leaf key'); saved_leaves[offset]=leaf
+                    added_bytes+=sys.getsizeof(offset)+_resident_size(leaf)
+                store.resident_bytes+=sys.getsizeof(saved_leaves)-previous_size+added_bytes
+                require(store.resident_bytes<=store.maximum_matrix_bytes,'OOS leaf row resident byte budget exceeded')
+                del leaves
+            if refs:
+                current_size=_resident_size(vars(training_streams[fold_ref]))
+                store.resident_bytes+=current_size-stream_bytes[fold_ref]; stream_bytes[fold_ref]=current_size
+                require(store.resident_bytes<=store.maximum_matrix_bytes,'training stream resident byte budget exceeded')
             target=_TargetBlock(rows,start=start,table=p['table'],np=np)
-            target.core_refs=list(refs)
+            target.core_refs=list(refs); target.raw_key=raw_key
             store.resident_bytes+=target.bytes
             require(store.resident_bytes<=store.maximum_matrix_bytes,'Target compact metadata budget exceeded')
             targets.setdefault((fold_ref,p['table']),[]).append(target)
             store.drop_json(p['metadata'],'metadata_ref')
-            del metadata,rows,raw_index,feature_rows,core_cells
-        for path,ref in raw_seen:
-            if path in store.json: store.drop_json({'path':path,'label_ref':ref},'label_ref')
+            del metadata,rows,raw_index,raw,feature_rows,core_cells,selected,selected_wire,cohorts
+        if last_core_consumer.get(fold_ref)==group_number:
+            # Every admitted Core cohort binds this fold. Its final normalized
+            # partition is now consumed; physical input buffers stay mapped.
+            for descriptor in core_artifacts.pop(fold_ref,{}).values(): store.drop_json(descriptor,'core_input_artifact_ref')
+            del inp,canon
+        if group_number+1==len(ordered_groups) or ordered_groups[group_number+1][0][0]!=native_clock:
+            # A Raw build's admitted native cutoff is exact. A different
+            # cutoff cannot legally consume it, so no row cache crosses this
+            # boundary; only separately owned provenance survives.
+            for admission in raw_cache.values():
+                store.resident_bytes-=admission.bytes-_resident_size(admission.provenance)
+            raw_cache.clear(); del admission
+            raw_cache_bytes=0; store.metrics['raw_cache_live_bytes']=0
         del group_features
-    return targets,reachable,raw_refs,selection_rows
+    training_bindings={ref:stream.finish() for ref,stream in training_streams.items()}
+    for ref,binding in training_bindings.items():
+        training_dates,_=validate_spec(fold_specs[ref],common['calendar'])
+        require(binding['total_row_count']==len(training_dates)*width,'complete normalized training grid required')
+    store.resident_bytes+=_resident_size(training_bindings)-sum(stream_bytes.values())
+    del training_streams,stream_bytes
+    require(store.resident_bytes<=store.maximum_matrix_bytes,'training binding resident byte budget exceeded')
+    store.metrics.update(training_rows_ref_builds=len(training_bindings),
+        training_rows_streamed=sum(b['training_row_count'] for b in training_bindings.values()))
+    return targets,reachable,raw_refs,selection_rows,raw_provenance,training_bindings,leaf_rows,leaf_contents,fold_paths
 
 
 def _target_row(targets,table,fold_ref,offset,key):
@@ -833,17 +1051,21 @@ class MatrixFoldProjection:
     """One active fold lease; closing the owning batch while borrowed fails."""
     def __init__(self,store,**values):
         self._store=store; self._closed=False; self.__dict__.update(values); store.borrowers+=1
-        self._finalizer=weakref.finalize(self,MatrixFoldProjection._release,weakref.ref(store))
+        self._finalizer=weakref.finalize(self,MatrixFoldProjection._release,weakref.ref(store),getattr(self,'_lease_bytes',0))
     @staticmethod
-    def _release(reference):
+    def _release(reference,lease_bytes):
         store=reference()
-        if store is not None: store.borrowers-=1
+        if store is not None:
+            store.borrowers-=1; store.lease_bytes-=lease_bytes
     def close(self):
         if not self._closed:
+            owned_state=getattr(self,'_owned_state',None)
             self._closed=True; self._finalizer()
-            self.X=self.y=self.P=None
-            self._store.lease_bytes-=getattr(self,'_lease_bytes',0)
-            if getattr(self,'_owned_state',None) is not None: self._owned_state.close()
+            for name in ('X','y','P','features','labels','common','feature_rows','training_keys',
+                         'candidate_keys','evaluation','excluded','raw_refs','raw_provenance',
+                         'label_leaf_bindings','fold_binding','source_record_indices','_owned_state'):
+                setattr(self,name,None)
+            if owned_state is not None: owned_state.close()
     def __enter__(self): require(not self._closed,'matrix fold projection is closed'); return self
     def __exit__(self,*args): self.close()
 
@@ -871,13 +1093,147 @@ def _stream_ref(rows):
 
 
 class MatrixBatchState:
-    def __init__(self,token,*,store,view,feature,row_index,targets,raw_refs,core_wrappers,selectors):
+    def __init__(self,token,*,store,view,feature,row_index,targets,raw_refs,raw_provenance,training_bindings,
+                 leaf_rows,leaf_contents,selectors,common_paths,fold_paths):
         require(token is _TOKEN,'matrix batch requires saved validation')
         self.store=store; self.view=view; self.feature=feature; self.row_index=row_index
-        self.targets=targets; self.raw_refs=raw_refs; self.core_wrappers=core_wrappers; self.selectors=selectors
+        self.targets=targets; self.raw_refs=raw_refs; self.raw_provenance=raw_provenance
+        self.training_bindings=training_bindings; self.leaf_rows=leaf_rows; self.leaf_contents=leaf_contents
+        self._batch_ref=None
+        self.selectors=selectors
+        self.source_records=tuple(sorted(store._hashes.items()))
+        self.source_records_ref=digest(self.source_records)
+        self.common_source_paths=tuple(sorted(common_paths))
+        self.source_paths={ref:tuple(sorted(common_paths|paths)) for ref,paths in fold_paths.items()}
+        require(all(set(paths)<=set(store._hashes) for paths in self.source_paths.values()),'unadmitted fold source path')
+        self.source_record_index={path:i for i,(path,_) in enumerate(self.source_records)}
+        self.source_record_indices={ref:tuple(self.source_record_index[path] for path in paths)
+            for ref,paths in self.source_paths.items()}
+        store.metrics['source_records_ref_builds']=1
+        store.metrics['source_record_index_builds']=1
+        self._account_resident()
+
+    def _account_resident(self,extra_roots=()):
+        """Account the admitted owned graph once, before publication.
+
+        Explicit object dictionaries make aliases share one accounting pass.
+        Owning ndarray headers include their native storage; readonly mmap
+        headers are counted without claiming mapped capacity or OS RSS.
+        Modules, functions and file-backed pages are not traversed.
+        """
+        store=self.store
+        require(not store.closed and store.borrowers==0 and store.lease_bytes==0,
+                'resident accounting requires an unborrowed matrix batch')
+        store.metrics.setdefault('resident_metadata_bytes',store.resident_bytes)
+        roots=[self,vars(self),vars(store),vars(self.feature)]
+        roots.extend(vars(block['rows']) for block in self.feature._blocks)
+        roots.extend(vars(block) for blocks in self.targets.values() for block in blocks)
+        roots.extend(extra_roots)
+        resident=_resident_size(roots)
+        require(resident<=store.maximum_matrix_bytes,'admitted matrix resident byte budget exceeded')
+        store.resident_bytes=resident
+        store.metrics['resident_metadata_bytes']=resident
+        return resident
 
     def close(self):
-        self.store.close(); self.targets.clear(); self.selectors.clear(); self.feature._blocks.clear()
+        self.store.close(); self.targets.clear(); self.selectors.clear(); self.raw_provenance.clear(); self.feature._blocks.clear()
+        self.training_bindings.clear(); self.leaf_rows.clear(); self.leaf_contents.clear()
+        self.source_paths.clear()
+        self.source_record_index.clear(); self.source_record_indices.clear()
+
+    def _feature_slice(self,inputs,spec,rows):
+        common=self.view['definition']; training_dates,prediction_dates=validate_spec(spec,common['calendar'])
+        parents={d:deepcopy(self.feature._parents_by_session[d]) for d in sorted(set(training_dates+prediction_dates))}
+        features={'contract_version':'stock_feature_slice_v3','input_manifest_ref':digest(inputs),
+            'prepared_view_ref':self.view['prepared_view_ref'],'selectors':deepcopy(inputs['selectors']),
+            'universe':deepcopy(common['universe']),'ordered_features':deepcopy(common['ordered_features']),
+            'catalog_ref':common['catalog_ref'],'selection':deepcopy(common['feature_selection']),
+            'training_sessions':training_dates,'prediction_sessions':prediction_dates,
+            'parents_by_session':parents,'rows':rows}
+        return {**features,'feature_ref':digest(features)}
+
+    def _evaluation_slice(self,inputs,spec,selected):
+        offsets=selected['evaluation_labels']; fold_ref=digest(spec)
+        rows=[_target_row(self.targets,'evaluation_raw_labels',fold_ref,off,key) for off,key in
+              zip(offsets,self.feature.keys(offsets))]
+        ev={'contract_version':'stock_matrix_evaluation_target_slice_v1','prepared_view_ref':self.view['prepared_view_ref'],
+            'fold_spec_ref':fold_ref,'selector':deepcopy(inputs['selectors']['evaluation_labels']),
+            'cutoff':spec['evaluation_cutoff'],'rows':rows}
+        return {**ev,'label_ref':digest(ev)}
+
+    def _label_slice(self,inputs,spec):
+        fold_ref=digest(spec); binding=self.training_bindings[fold_ref]
+        training_dates,_=validate_spec(spec,self.view['definition']['calendar'])
+        return seal({'contract_version':'stock_fold_label_slice_v3','input_manifest_ref':digest(inputs),
+            'prepared_view_ref':self.view['prepared_view_ref'],'fold_spec_ref':fold_ref,'cutoff':spec['fit_cutoff'],
+            'selectors':{k:deepcopy(inputs['selectors'][k]) for k in ('training_labels','evaluation_labels')},
+            'core_result_refs':list(inputs['core_result_refs']),'raw_label_refs':sorted(self.raw_refs[fold_ref]),
+            'training_sessions':training_dates,'training_row_count':binding['training_row_count'],
+            'excluded':deepcopy(binding['excluded'])},'label_ref')
+
+    def _saved_fold_binding(self,inputs,spec,features):
+        from .stock_training import TARGET_SEMANTICS
+        fold_ref=digest(spec); binding=self.training_bindings[fold_ref]; labels=self._label_slice(inputs,spec)
+        dataset=seal({'contract_version':'stock_fold_dataset_v3','prepared_view_ref':self.view['prepared_view_ref'],
+            'feature_ref':features['feature_ref'],'label_ref':labels['label_ref'],'raw_label_refs':sorted(self.raw_refs[fold_ref]),
+            'fold_spec_ref':fold_ref,'fit_cutoff':spec['fit_cutoff'],
+            'ordered_features':deepcopy(self.view['definition']['ordered_features']),
+            'selectors':deepcopy(inputs['selectors']),'training_keys_digest':binding['training_keys_digest'],
+            'training_rows_ref':binding['training_rows_ref'],'training_row_count':binding['training_row_count'],
+            'excluded':deepcopy(binding['excluded']),'target_semantics':TARGET_SEMANTICS,
+            'normalization':deepcopy(NORMALIZATION_SPEC),'validation':'none_fixed_parameters_no_early_stopping'},'dataset_ref')
+        return {'dataset':dataset,'labels':labels}
+
+    def evaluation(self,inputs,spec,*,batch_ref):
+        """Owned OOS rows plus one immutable admitted file closure; no train panel."""
+        self.store.check(); key=digest(inputs),digest(spec)
+        require(_ref(batch_ref) and batch_ref==self._batch_ref,'OOS evaluation requires its verified batch identity')
+        require(key in self.selectors,'fold outside saved matrix batch definition')
+        selected=self.selectors[key]
+        native_bytes=len(selected['inference'])*len(self.view['definition']['ordered_features'])*9
+        require(self.store.resident_bytes+self.store.lease_bytes+native_bytes<=self.store.maximum_matrix_bytes,
+                'OOS evaluation matrix byte budget exceeded')
+        rows=self.feature.row_metadata(selected['inference'])
+        common_keys=('scope','snapshot','pit_policy','calendar','universe','catalog_ref','feature_selection','ordered_features')
+        common={k:deepcopy(self.view['definition'][k]) for k in common_keys}
+        raw_keys={block.raw_key for block in self.targets.get((digest(spec),'evaluation_raw_labels'),[])}
+        features=self._feature_slice(inputs,spec,rows)
+        leaves=[deepcopy(self.leaf_rows[digest(spec)][int(off)]) for off in selected['evaluation_labels']]
+        leaf_refs={leaf[name] for leaf in leaves for name in ('start_open_ref','end_close_ref') if leaf[name] is not None}
+        train_raw_refs=self.raw_refs[digest(spec)]
+        value={'contract_version':'stock_matrix_signal_evaluation_input_v1','input_ref':inputs['input_ref'],
+            'batch_ref':batch_ref,'inputs':deepcopy(inputs),'spec':deepcopy(spec),
+            'prepared_view_ref':self.view['prepared_view_ref'],'fold_spec_ref':digest(spec),'common':common,
+            'features':features,'evaluation':self._evaluation_slice(inputs,spec,selected),
+            'raw_provenance':[deepcopy(self.raw_provenance[k]) for k in sorted(raw_keys)],
+            'training_raw_provenance':[deepcopy(p) for k,p in sorted(self.raw_provenance.items()) if k[1] in train_raw_refs],
+            'label_leaf_rows':leaves,'label_leaf_contents':{ref:deepcopy(self.leaf_contents[ref]) for ref in sorted(leaf_refs)},
+            'saved_fold_binding':self._saved_fold_binding(inputs,spec,features),
+            'source_records_ref':self.source_records_ref}
+        require(self.store.resident_bytes+self.store.lease_bytes+_resident_size(value)<=self.store.maximum_matrix_bytes,
+                'OOS evaluation resident byte budget exceeded')
+        value['source_records']=self.source_records
+        value['source_paths']=self.source_paths[digest(spec)]
+        value['evaluation_input_ref']=digest({k:v for k,v in value.items() if k!='source_records'})
+        require(self.store.resident_bytes+self.store.lease_bytes+
+                _resident_size({k:v for k,v in value.items() if k not in ('source_records','source_paths')})<=self.store.maximum_matrix_bytes,
+                'OOS evaluation resident byte budget exceeded')
+        self.store.check(); self.store.metrics['evaluation_projection_calls']+=1
+        return value
+
+    def project_evaluation(self,inputs,spec,*,batch_ref):
+        """The owner OOS lease: eight fields, with no training/native matrices."""
+        value=self.evaluation(inputs,spec,batch_ref=batch_ref)
+        payload={'common':value['common'],'features':value['features'],'labels':value['saved_fold_binding']['labels'],
+            'evaluation':value['evaluation'],'raw_provenance':value['raw_provenance'],
+            'label_leaf_bindings':{'rows':value['label_leaf_rows'],'contents':value['label_leaf_contents']},
+            'fold_binding':{**value['saved_fold_binding'],'training_raw_provenance':value['training_raw_provenance']},
+            'source_record_indices':self.source_record_indices[digest(spec)]}
+        lease_bytes=_resident_size({k:v for k,v in payload.items() if k!='source_record_indices'})
+        require(self.store.resident_bytes+self.store.lease_bytes+lease_bytes<=self.store.maximum_matrix_bytes,
+                'OOS evaluation lease resident byte budget exceeded')
+        self.store.check(); self.store.lease_bytes+=lease_bytes
+        return MatrixFoldProjection(self.store,**payload,_lease_bytes=lease_bytes)
 
     def project(self,inputs,spec):
         self.store.check(); view=self.view; common=deepcopy(view['definition']); fold_ref=digest(spec)
@@ -908,49 +1264,38 @@ class MatrixBatchState:
             base=dates.index(day)*width
             for j,security in enumerate(common['universe']):
                 offset=base+j; row=_target_row(self.targets,'training_normalized_labels',fold_ref,offset,[security,day])
-                reason='LABEL_NOT_MATURE' if immature else (row['normalization_reason'] or 'NORMALIZATION_UNDEFINED') if not row['normalized_valid'] else None
+                reason=_training_exclusion(row,spec,calendar)
                 if reason is None: expected.append(offset)
                 else: excluded[reason]=excluded.get(reason,0)+1
                 require((offset in selected_set)==(reason is None),'training selector does not match mature eligible target grid')
         require(expected==[int(v) for v in train],'training selector key order mismatch')
-        parents={d:deepcopy(self.feature._parents_by_session[d]) for d in sorted(set(training_dates+prediction_dates))}
-        features={'contract_version':'stock_feature_slice_v3','input_manifest_ref':digest(inputs),
-            'prepared_view_ref':view['prepared_view_ref'],'selectors':deepcopy(inputs['selectors']),
-            'universe':common['universe'],'ordered_features':columns,'catalog_ref':common['catalog_ref'],
-            'selection':common['feature_selection'],'training_sessions':training_dates,'prediction_sessions':prediction_dates,
-            'parents_by_session':parents,'rows':rows}
-        features={**features,'feature_ref':digest(features)}
-        label_summary={'contract_version':'stock_fold_label_slice_v3','input_manifest_ref':digest(inputs),
-            'prepared_view_ref':view['prepared_view_ref'],'fold_spec_ref':fold_ref,'cutoff':spec['fit_cutoff'],
-            'selectors':{k:deepcopy(inputs['selectors'][k]) for k in ('training_labels','evaluation_labels')},
-            'core_result_refs':list(inputs['core_result_refs']),'raw_label_refs':sorted(self.raw_refs[fold_ref]),
-            'training_sessions':training_dates,'training_row_count':len(train),'excluded':excluded}
-        labels={**label_summary,'label_ref':digest(label_summary)}
-        evaluation_rows=[_target_row(self.targets,'evaluation_raw_labels',fold_ref,off,key) for off,key in
-                         zip(selected['evaluation_labels'],self.feature.keys(selected['evaluation_labels']))]
-        ev={'contract_version':'stock_matrix_evaluation_target_slice_v1','prepared_view_ref':view['prepared_view_ref'],
-            'fold_spec_ref':fold_ref,'selector':deepcopy(inputs['selectors']['evaluation_labels']),
-            'cutoff':spec['evaluation_cutoff'],'rows':evaluation_rows}
-        evaluation={**ev,'label_ref':digest(ev)}
+        features=self._feature_slice(inputs,spec,rows)
+        labels=self._label_slice(inputs,spec)
+        require(labels['training_row_count']==len(train) and labels['excluded']==excluded,'admitted training binding differs from fold projection')
+        evaluation=self._evaluation_slice(inputs,spec,selected)
         def training_rows():
             for i,(off,key) in enumerate(zip(train,keys)):
                 block=next(b for b in self.feature._blocks if b['start']<=int(off)<b['start']+b['count'])
                 row=block['rows'].row(int(off)-block['start'],security=key[0],session=key[1],
                                      values=[float(v) for v in X[i]],validity=[True]*len(columns))
+                _training_feature_clock(row,_instant(spec['fit_cutoff']))
                 target=_target_row(self.targets,'training_normalized_labels',fold_ref,off,key)
                 row.update(label=float(y[i]),raw_return=target['return'],label_available_at=target['label_available_at'],
                            normalized_available_at=target['normalized_available_at'])
                 yield row
         training_rows_ref=_stream_ref(training_rows())
-        lease_bytes=X.nbytes+y.nbytes+P.nbytes+_resident_size([features,labels,common,keys,candidate_keys,evaluation])
+        require(training_rows_ref==self.training_bindings[fold_ref]['training_rows_ref'],
+                'admitted training row binding differs from fold projection')
+        raw_refs=sorted(self.raw_refs[fold_ref])
+        lease_bytes=X.nbytes+y.nbytes+P.nbytes+_resident_size([features,labels,common,keys,candidate_keys,evaluation,excluded,raw_refs])
         require(self.store.resident_bytes+self.store.lease_bytes+lease_bytes<=self.store.maximum_matrix_bytes,
                 'active fold resident byte budget exceeded')
-        self.store.lease_bytes+=lease_bytes; self.store.metrics['fold_projection_calls']+=1
         self.store.check()
+        self.store.lease_bytes+=lease_bytes; self.store.metrics['fold_projection_calls']+=1
         return MatrixFoldProjection(self.store,X=X,y=y,P=P,features=features,labels=labels,common=common,
             feature_rows=rows,feature_ref=features['feature_ref'],label_ref=labels['label_ref'],
             training_keys=keys,candidate_keys=candidate_keys,training_rows_ref=training_rows_ref,
-            excluded=excluded,raw_refs=sorted(self.raw_refs[fold_ref]),evaluation=evaluation,
+            excluded=excluded,raw_refs=raw_refs,evaluation=evaluation,
             _lease_bytes=lease_bytes)
 
 
@@ -1033,13 +1378,14 @@ def _admit_matrix_view(descriptor,folds,*,limits=None,_store=None):
                     'ordered disjoint prepared folds required')
             fold_specs[ref]=spec; previous=spec['oos_trade_sessions'][-1]
         require(bool(fold_specs),'prepared matrix folds required')
-        wrappers={}
+        common_paths=set(store._hashes); wrappers={}; core_descriptors={}
         require(type(view['core_results']) is list and bool(view['core_results']),'prepared saved Core results required')
         for desc in view['core_results']:
             wrapper=store.read_json(desc,'core_result_artifact_ref'); ref=wrapper['result']['metadata']['result_ref']
-            require(ref not in wrappers,'duplicate prepared Core result'); wrappers[ref]=wrapper
-        targets,hashes,raw_refs,label_selection=_label_admission([p for p in view['partitions'] if p['table']!='features'],
-            view=view,feature=feature,store=store,row_index=row_index,core_wrappers=wrappers,common=definition,fold_specs=fold_specs)
+            require(ref not in wrappers,'duplicate prepared Core result'); wrappers[ref]=wrapper; core_descriptors[ref]=desc
+        targets,hashes,raw_refs,label_selection,raw_provenance,training_bindings,leaf_rows,leaf_contents,fold_paths=_label_admission([p for p in view['partitions'] if p['table']!='features'],
+            view=view,feature=feature,store=store,row_index=row_index,core_wrappers=wrappers,core_descriptors=core_descriptors,
+            common=definition,fold_specs=fold_specs)
         selection=store.read_json(view['source_selection'],'source_selection_ref')
         _fields(selection,{'contract_version','feature_inputs_ref','feature_rows','label_rows','source_selection_ref'},'exact prepared source-selection required')
         require(selection['contract_version']=='stock_matrix_source_selection_v1' and selection['feature_inputs_ref']==feature.identity and
@@ -1047,6 +1393,7 @@ def _admit_matrix_view(descriptor,folds,*,limits=None,_store=None):
                 'prepared Feature source-selection mismatch')
         require(len(selection['label_rows'])==len(label_selection) and sorted(digest(r) for r in selection['label_rows'])==
                 sorted(digest(r) for r in label_selection),'prepared actual Target source-selection mismatch')
+        common_paths.add(view['source_selection']['path'])
         selectors={}
         for inputs,spec in folds:
             require(digest(spec) in fold_specs and spec==fold_specs[digest(spec)],'saved fold outside prepared definition')
@@ -1054,7 +1401,12 @@ def _admit_matrix_view(descriptor,folds,*,limits=None,_store=None):
             for role,desc in inputs['selectors'].items():
                 if desc is None: continue
                 selected[role],entries[role]=_selector(desc,role=role,inputs=inputs,spec=spec,view=view,row_index=row_index,store=store)
+                fold_paths[digest(spec)].update((desc['path'],entries[role]['payload']['path']))
             require(bool(store.np.array_equal(selected['training'],selected['training_labels'])),'training X/y selectors must have identical keys')
+            binding=training_bindings[digest(spec)]
+            require(entries['training']['keys_digest']==binding['training_keys_digest'] and
+                entries['training']['row_count']==binding['training_row_count'],
+                'training selector differs from admitted mature training binding')
             training_dates,inference_dates=validate_spec(spec,definition['calendar'])
             expected=feature.offsets([[s,d] for d in inference_dates for s in definition['universe']])
             require(bool(store.np.array_equal(selected['inference'],expected)) and
@@ -1070,9 +1422,18 @@ def _admit_matrix_view(descriptor,folds,*,limits=None,_store=None):
                 result=wrappers[ref]['result']
                 require(set(result['sessions'])<=set(training_dates),'fold Core result outside training window')
             selectors[digest(inputs),digest(spec)]=selected
-        store.metrics['resident_metadata_bytes']=store.resident_bytes; store.check()
+        # All proof/selector checks are complete. Runtime projections use the
+        # admitted compact data and fingerprints, never decoded parent proofs.
+        # Retain the directly owned index/view/row-index facts, not their cache
+        # aliases or complete Core source-binding graphs.
+        wrappers.clear(); wrapper=None; result=None; selection=None; label_selection=None; entries=None
+        for block in feature._blocks: del block['_source_selection_rows']
+        store.json.clear(); store.content.clear(); store._decoded.clear()
+        store.check()
         return MatrixBatchState(_TOKEN,store=store,view=view,feature=feature,row_index=row_index,targets=targets,
-                                raw_refs=raw_refs,core_wrappers=wrappers,selectors=selectors)
+                                raw_refs=raw_refs,raw_provenance=raw_provenance,training_bindings=training_bindings,
+                                leaf_rows=leaf_rows,leaf_contents=leaf_contents,selectors=selectors,
+                                common_paths=common_paths,fold_paths=fold_paths)
     except BaseException:
         for array in store.arrays.values():
             if hasattr(array,'_mmap'): array._mmap.close()
@@ -1102,6 +1463,7 @@ def load_matrix_batch_state(manifest,*,limits=None,_store=None):
     state=_admit_matrix_view(manifest['prepared_view'],folds,limits=limits,_store=_store)
     if not all(state.view['definition'][k]==definition[k] for k in definition if k!='version'):
         state.close(); raise ValueError('matrix batch/prepared definition mismatch')
+    state._batch_ref=manifest['batch_ref']
     return state
 
 

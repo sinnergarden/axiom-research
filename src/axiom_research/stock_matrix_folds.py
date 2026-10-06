@@ -173,15 +173,21 @@ def load_matrix_fold(path, *, projection=None,batch=None):
     for name,key in OUTPUTS.items():
         value=_read(path/name); _verify_ref(value,key); require(value[key]==fold[key],'fold stage reference mismatch'); saved[name]=value
     own=projection is None
-    projection=_projection(inputs,spec,batch) if own else projection
+    if own:
+        projection=(batch._project_evaluation(inputs,spec) if batch is not None
+                    else _projection(inputs,spec,batch))
     try:
         features,labels=projection.features,projection.labels; common=projection.common
         require(saved['feature-slice.json']==features and saved['label-slice.json']==labels,'saved matrix slice/parent mismatch')
         dataset,model=saved['dataset.json'],saved['model.json']; predictions,evidence=saved['predictions.json'],saved['signal-evidence.json']
-        require(dataset==_dataset(projection,inputs,spec) and len(projection.training_keys)>=40,'saved compact training selection mismatch')
+        binding=getattr(projection,'fold_binding',None)
+        expected_dataset=binding['dataset'] if binding is not None else _dataset(projection,inputs,spec)
+        expected_raw_refs=expected_dataset['raw_label_refs']
+        require((binding is None or binding['labels']==labels) and dataset==expected_dataset and
+                expected_dataset['training_row_count']>=40,'saved compact training selection mismatch')
         require(model['contract_version']=='stock_model_release_v2','unsupported saved model contract')
         for actual,expected in ((model['dataset_ref'],dataset['dataset_ref']),(model['feature_ref'],features['feature_ref']),
-            (model['label_ref'],labels['label_ref']),(model['raw_label_refs'],projection.raw_refs),
+            (model['label_ref'],labels['label_ref']),(model['raw_label_refs'],expected_raw_refs),
             (model['fit_cutoff'],spec['fit_cutoff']),(model['simulated_available_at'],spec['simulated_model_available_at']),
             (model['clock_basis'],'declared_simulation'),(model['ordered_features'],common['ordered_features']),
             (model['feature_selection'],common['feature_selection']),(model['catalog_ref'],common['catalog_ref']),
