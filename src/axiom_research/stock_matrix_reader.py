@@ -261,11 +261,14 @@ class VerifiedMatrixStore:
                         'matrix parent changed during preflight')
                 require(retained()+admission['decode_workspace_bytes']<=self.maximum_matrix_bytes,
                         'matrix parent decode workspace budget exceeded')
+                require(path not in self._hashes or admission['digest']==self._hashes[path],
+                        'matrix parent bytes changed during preflight')
                 # Decode the admitted inode, with a byte cap even if it grows.
                 # The existing duplicate/scalar rules remain in _read.
                 watch.seek(0)
                 self.metrics['json_decode_calls']+=1
-                value=_read(physical,_stream=watch,_expected_bytes=mark[2])
+                value=_read(physical,_stream=watch,_expected_bytes=mark[2],
+                            _expected_digest=admission['digest'])
                 require(stat_identity(os.fstat(watch.fileno()))==mark and file_fingerprint(physical)==mark,
                         'matrix parent changed during decode')
             require(self._native_caller_bytes(value)<=self.maximum_matrix_bytes,

@@ -220,6 +220,21 @@ class ParentJsonTests(unittest.TestCase):
                 store._decode_once(path)
         self.assertEqual(store._decoded,{})
 
+    def test_same_length_inplace_rewrite_is_rejected_before_dom_allocation(self):
+        payload=b'"'+b'x'*8192+b'"'
+        replacement=b'['+b'{},'*2730+b'{}]'
+        self.assertEqual(len(payload),len(replacement))
+        path=self.saved(payload)
+        store=self.store()
+        def rewritten_read(target,**kwargs):
+            path.write_bytes(replacement)
+            with patch('axiom_research.stock_artifacts.json.loads',side_effect=AssertionError('unadmitted DOM allocation')):
+                return _read(target,**kwargs)
+        with patch('axiom_research.stock_matrix_reader._read',rewritten_read):
+            with self.assertRaisesRegex(ValueError,'stream bytes changed'):
+                store._decode_once(path)
+        self.assertEqual(store._decoded,{})
+
 
 if __name__ == '__main__':
     unittest.main()

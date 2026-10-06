@@ -36,7 +36,7 @@ def write_json(path, value):
         ensure_ascii=False, allow_nan=False) + '\n', encoding='utf-8')
 
 
-def _read(path, *, _stream=None, _expected_bytes=None):
+def _read(path, *, _stream=None, _expected_bytes=None, _expected_digest=None):
     def unique(pairs):
         out = {}
         for k, v in pairs:
@@ -51,6 +51,8 @@ def _read(path, *, _stream=None, _expected_bytes=None):
         payload=_stream.read(_expected_bytes+1)
         if type(payload) is not bytes or len(payload)!=_expected_bytes:
             raise ValueError('saved JSON stream byte length changed')
+        if _expected_digest!='sha256:'+sha256(payload).hexdigest():
+            raise ValueError('saved JSON stream bytes changed')
         text=payload.decode('utf-8')
     return json.loads(text, object_pairs_hook=unique,
                       parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)))

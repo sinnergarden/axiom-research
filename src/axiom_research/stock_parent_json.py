@@ -124,6 +124,7 @@ class _ParentPreflight(_Validator):
             largest = max(chunk)
             self.source_kind = max(self.source_kind, 4 if largest >= 240 else 2 if largest >= 196 else 1)
         self.reserve()
+        self.hasher.update(chunk)
         self.size += len(chunk)
         cursor = 0
         while cursor < len(chunk):
@@ -189,7 +190,7 @@ class _ParentPreflight(_Validator):
         if self.size != self.physical_size:
             raise ValueError('Legacy JSON physical size changed')
         self.reserve(1024)
-        return {'size': self.size, 'token_count': self.tokens,
+        return {'size': self.size, 'digest':'sha256:'+self.hasher.hexdigest(), 'token_count': self.tokens,
             'decode_workspace_bytes': self.decode_peak,
             'scanner_workspace_peak_bytes': self.peak,
             'decoded_graph_upper_bytes': self.decoded_bytes,
