@@ -109,8 +109,25 @@ def _leaves(meta: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return [meta]
 
 
-def _availability(meta: Mapping[str, Any], cutoff: str) -> str:
-    times = [_utc(leaf["usable_from"], availability=True) for leaf in _leaves(meta)
+class _AvailabilityClock:
+    """Bounded string parsing reuse within one adapter call, never admission."""
+    def __init__(self):
+        self.values = {}
+
+    def __call__(self, value):
+        if type(value) is not str:
+            return _utc(value, availability=True)
+        if value not in self.values:
+            result = _utc(value, availability=True)
+            if len(self.values) < 128:
+                self.values[value] = result
+            return result
+        return self.values[value]
+
+
+def _availability(meta: Mapping[str, Any], cutoff: str, *, clock=None) -> str:
+    convert = clock if clock is not None else lambda v: _utc(v, availability=True)
+    times = [convert(leaf["usable_from"]) for leaf in _leaves(meta)
              if leaf.get("usable_from") is not None]
     available = max(times) if times else cutoff  # absence established by the query at cutoff
     _require(available <= cutoff, "cell provenance exceeds its decision cutoff")
@@ -304,6 +321,7 @@ def _adapt_decision_wires(batch_wire: dict, reference_wire: dict, *, recipe_ref:
         return source_id
 
     fact_rows, reference_rows, members = [], [], {session: {} for session in sessions}
+    available_clock = _AvailabilityClock()
     for key in sorted(expected):
         symbol, session = key
         member = refs[key]["is_member"]
@@ -311,7 +329,7 @@ def _adapt_decision_wires(batch_wire: dict, reference_wire: dict, *, recipe_ref:
         member_provenance = membership_meta[key]
         source = bind("is_member", key, member_provenance, ref=True)
         reference_rows.append(dict(security_id=symbol, session=session, member=member,
-                                   industry=None, available_at=_availability(member_provenance, cutoffs[session]),
+                                   industry=None, available_at=_availability(member_provenance, cutoffs[session],clock=available_clock),
                                    source=source))
         if member:
             members[session][symbol] = None
@@ -322,7 +340,7 @@ def _adapt_decision_wires(batch_wire: dict, reference_wire: dict, *, recipe_ref:
             reason = meta.get("missing_reason")
             _require(value is None or reason is None, "present fact has missing reason")
             values.append(value)
-            availability.append(_availability(meta, cutoffs[session]))
+            availability.append(_availability(meta, cutoffs[session],clock=available_clock))
             ids.append([bind(field, key, meta)])
             reasons.append(str(reason or "MISSING") if value is None else None)
         fact_rows.append(dict(security_id=symbol, session=session, values=values,
