@@ -168,6 +168,10 @@ class _NativeWindow:
         from axiom_data import DataBatch
         # Reject a large coverage/source graph before to_json duplicates it.
         reserve = self.bytes+retained_bytes+2*_batch_bytes(batch,stats=stats)+len(batch.frame)*len(FIELDS)*32
+        # A private projected wire adds one shallow row dictionary per key and
+        # new numeric scalars. Charge its list/rows before either wire exists.
+        if _with_wire:
+            reserve += sys.getsizeof([])+len(batch.frame)*(512+128*len(batch.frame.columns))
         _guard_resident(reserve, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
             caller_retained_bytes=caller_retained_bytes, reason='Reader projection working set exceeds resident budget')
         begin = time.perf_counter_ns()

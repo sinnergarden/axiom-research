@@ -14,7 +14,7 @@ from axiom_data import DataBatch
 from axiom_engine.core import FeatureFrame, FeaturePlan
 from axiom_research import data_adapter as adapter
 from axiom_research.stock_artifacts import digest
-from axiom_research.stock_matrix_feature_producer import FIELDS, _NativeWindow, iter_matrix_feature_days
+from axiom_research.stock_matrix_feature_producer import FIELDS, _NativeWindow, _batch_bytes, iter_matrix_feature_days
 from axiom_research.stock_ml import _adjust_feature, _adjust_feature_wire, _feature_projection, _join_feature_wire
 from test_data_adapter import REF, batch as adapter_batch
 from test_stock_matrix_feature_batch import arguments, prepared_inputs
@@ -66,6 +66,24 @@ def project(window, value, *, wire=False):
 
 
 class FeatureWireReuseTests(unittest.TestCase):
+    def test_projected_records_reservation_rejects_before_serialization_or_frame_copy(self):
+        source, _, window = inputs()
+        # The old batch-only path fits exactly. The extra private row table
+        # must require room of its own, rather than borrowing that admission.
+        maximum = window.bytes+2*_batch_bytes(source)+len(source.frame)*len(FIELDS)*32+64*1024
+        stats = {key: 0 for key in ('native_value_reuses', 'reader_projection_fallback_cells',
+                                   'reader_projection_fallback_null_cells')}
+        with patch.object(DataBatch, 'to_json', side_effect=AssertionError('serialized before admission')), \
+             patch.object(pd.DataFrame, 'copy', side_effect=AssertionError('copied before admission')):
+            with self.assertRaisesRegex(ValueError, 'Reader projection working set exceeds resident budget'):
+                window.project(source, view_ref='fixed-native-view', stats=stats,
+                    maximum_resident_bytes=maximum, _with_wire=True)
+        admitted = window.project(source, view_ref='fixed-native-view', stats=stats,
+            maximum_resident_bytes=maximum)
+        self.assertEqual(len(admitted.frame), len(source.frame))
+        projected, wire = project(window, source, wire=True)
+        self.assertEqual(wire, projected.to_json())
+
     def test_projected_wire_is_exact_current_frame_with_distinct_raw_reference(self):
         source, _, window = inputs(); before = source.to_json()
         projected, wire = project(window, source, wire=True)
