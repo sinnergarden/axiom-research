@@ -156,7 +156,7 @@ class _NativeWindow:
         self.bytes = int(self.frame.memory_usage(deep=True).sum())
 
     def project(self, batch, *, view_ref, stats, maximum_resident_bytes, retained_bytes=0,
-                caller_retained_bytes=None):
+                caller_retained_bytes=None, _with_wire=False):
         """Round actual Reader values exactly as the native float32 format.
 
         Equal native values can be reused. Revision/missingness differences
@@ -182,6 +182,7 @@ class _NativeWindow:
                  'Reader projection outside native window')
         native = self.frame.reindex(pd.MultiIndex.from_tuples(keys))
         frame = batch.frame.copy()
+        projected_records = [dict(row) for row in wire['records']] if _with_wire else None
         for field in fields:
             missing = np.asarray([row[field] is None for row in wire['records']], dtype=bool)
             original = np.asarray([row[field] for row in wire['records']], dtype=np.float64)
@@ -207,13 +208,21 @@ class _NativeWindow:
                 frame[field] = pd.array(selected, dtype=dtype)
             else:
                 frame[field] = selected
+            if projected_records is not None:
+                convert = int if pd.api.types.is_integer_dtype(dtype) else float
+                for row, value, absent in zip(projected_records, selected, missing):
+                    row[field] = None if absent else convert(value)
         context = {**wire['context'], 'numeric_projection': {
             'contract_version': 'research_qlib_native_projection_v2', 'view_ref': view_ref,
             'reader_batch_ref': digest(wire),
             'revision_admission': 'actual_reader_float32_with_native_value_reuse',
             'dtype': 'float32_values_promoted_to_float64'}}
-        result = DataBatch(frame, batch.field_meta, context)
+        # to_json already owns canonical metadata. Keep this selected snapshot
+        # isolated from later mutation of the original Reader object.
+        result = DataBatch(frame, wire['field_meta'], context)
         stats['native_projection_ns'] = stats.get('native_projection_ns', 0)+time.perf_counter_ns()-begin
+        if _with_wire:
+            return result, {'records': projected_records, 'field_meta': wire['field_meta'], 'context': context}
         return result
 
 
@@ -493,11 +502,12 @@ def _iter_core_feature_batch(pending, *, resident_base, maximum_resident_bytes,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature output working graph exceeds resident budget')
             frame_wire = frame.to_dict()
             day = evidence['session']
+            frame_ref, plan_ref = frame.identity, plan.identity
             rows = [{'security_id': row['security_id'], 'session': day, 'values': row['values'],
                 'availability': row['availability'], 'validity': row['valid'], 'reasons': row['reasons'],
                 'member': members[row['security_id']], 'knowledge_cutoff': evidence['cutoffs'][day],
-                'source_refs': [frame.identity, plan.identity]} for row in frame_wire['rows']]
-            evidence['core_frame_ref'] = frame.identity
+                'source_refs': [frame_ref, plan_ref]} for row in frame_wire['rows']]
+            evidence['core_frame_ref'] = frame_ref
             pending[index] = frames[index] = None
             remaining_bytes -= view_charge+frame_charges[index]
             del request, plan, facts, context, frame, frame_wire, members
@@ -534,7 +544,7 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
     """
     from .data_adapter import _adapt_decision_wires
     from .feature_catalog import build_feature_plan
-    from .stock_ml import _adjust_feature
+    from .stock_ml import _adjust_feature_wire
     for value, name in [(history_sessions, 'history_sessions'), (output_block_sessions, 'output_block_sessions'),
                         (maximum_resident_bytes, 'maximum_resident_bytes')]:
         _positive(value, name)
@@ -652,13 +662,13 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
             tick = time.perf_counter_ns()
             source = data.read(snapshot=config['snapshot'], query=price_query)
             stats['data_read_ns'] += time.perf_counter_ns()-tick
-            prices = window.project(source,
+            prices, prices_wire = window.project(source,
                 view_ref=qlib_inputs['view_reference']['view_id'], stats=stats,
                 maximum_resident_bytes=maximum_resident_bytes, retained_bytes=retained_pending,
-                caller_retained_bytes=caller_retained_bytes)
+                caller_retained_bytes=caller_retained_bytes, _with_wire=True)
             del source
             prices_bytes = _batch_bytes(prices,stats=stats)
-            _guard_resident(resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes+prices_bytes+read_estimate,
+            _guard_resident(resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes+2*prices_bytes+read_estimate,
                 maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='one Reader Feature view exceeds resident budget')
             stats['data_read_calls'] += 1
@@ -671,7 +681,7 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
             factors = window.project(source,
                 view_ref=qlib_inputs['view_reference']['view_id'], stats=stats,
                 maximum_resident_bytes=maximum_resident_bytes,
-                retained_bytes=retained_pending+prices_bytes+_header_bytes(prices.field_meta),
+                retained_bytes=retained_pending+2*prices_bytes+_header_bytes(prices.field_meta),
                 caller_retained_bytes=caller_retained_bytes)
             del source
             # Public adjustment serializes source/derivation lineage. Reserve
@@ -681,7 +691,8 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
             _guard_resident(adjustment_reserve, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature adjustment/source working set exceeds resident budget')
             tick = time.perf_counter_ns()
-            adjusted, adjusted_wire = _adjust_feature(prices, factors, day, _with_wire=True)
+            adjusted_wire = _adjust_feature_wire(prices, factors, day, prices_wire)
+            del prices_wire
             adjusted_bytes = 4*(prices_bytes+factors_bytes)
             reader_bytes = prices_bytes+factors_bytes+adjusted_bytes
             stats['reader_batch_size_reuses'] += 2
@@ -756,7 +767,7 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                 owned_estimate=document_estimate+output_reserve+len(members)*512)
             # Only immutable original Documents and compact saved provenance
             # survive collection. No source DataFrames or full adapter graph do.
-            del prices, factors, adjusted, adjusted_wire, membership, membership_wire, adapted, plan
+            del prices, factors, adjusted_wire, membership, membership_wire, adapted, plan
             del wires, documents, evidence, members
             stats['feature_adaptation_ns'] += time.perf_counter_ns()-tick
             read_estimate = max(read_estimate, owned-(resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes))

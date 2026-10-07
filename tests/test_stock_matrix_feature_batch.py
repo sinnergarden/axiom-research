@@ -353,34 +353,31 @@ class MatrixFeatureBatchTests(unittest.TestCase):
                     next(iter_matrix_feature_days(fixture.data,
                         **arguments(fixture, prepared, reuse_budget_bytes=0)))
 
-    def test_metadata_alias_growth_at_next_data_call_invalidates_local_size_charge(self):
-        from axiom_data import DataBatch
+    def test_original_reader_metadata_mutation_at_next_read_is_isolated_from_projection(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             fixture = MemoryFeatureInputs(root)
             prepared = prepared_inputs(fixture, root)
-            original_read, original_json = fixture.data.read, DataBatch.to_json
-            prices, forbidden = [], set()
+            original_read = fixture.data.read
+            prices = []
             def read(**kwargs):
                 value = original_read(**kwargs)
                 if kwargs['query'].domain == 'market_daily':
                     prices.append(value)
                 else:
-                    prices[-1].field_meta['alias_growth'] = 'x'*LIMIT
-                    forbidden.add(id(value))
+                    prices[-1].field_meta['close']['by_key'][0]['usable_from'] = '2099-01-01T00:00:00Z'
+                    prices[-1].frame.loc[0, 'close'] = 1e9
                 return value
-            def to_json(value):
-                if id(value) in forbidden:
-                    raise AssertionError('factor serialized before rechecking old price metadata')
-                return original_json(value)
+            config = {**fixture.config, 'feature_sessions': fixture.outputs[:1]}
             with patch.object(fixture.data,'read',side_effect=read), \
-                 patch.object(DataBatch,'to_json',new=to_json), \
                  patch('axiom_research.qlib_adapter.QlibView.read',
-                       lambda view, **kwargs: fixture.native_read(view, **kwargs)), \
-                 patch('axiom_engine.core.execute_feature_plan_batch',side_effect=AssertionError('Core called')):
-                with self.assertRaisesRegex(ValueError,'Reader projection working set exceeds resident budget'):
-                    next(iter_matrix_feature_days(fixture.data,
-                        **arguments(fixture,prepared,reuse_budget_bytes=0)))
+                       lambda view, **kwargs: fixture.native_read(view, **kwargs)):
+                output = list(iter_matrix_feature_days(fixture.data,
+                    **{**arguments(fixture,prepared,reuse_budget_bytes=0), 'config': config}))
+            self.assertEqual(len(prices), 1)
+            self.assertEqual(prices[0].field_meta['close']['by_key'][0]['usable_from'], '2099-01-01T00:00:00Z')
+            self.assertEqual(digest(output),
+                'sha256:210ee8dfa6107dfcbdedeca4a2924471411206d815bd400ce119271b7095cad9')
 
 
 class CoreBudgetScopeTargetTests(unittest.TestCase):
