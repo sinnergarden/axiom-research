@@ -189,25 +189,16 @@ def _endpoint(rows: dict, metadata: dict, key: tuple[str, str], field: str,
     return float(value), clocks, None
 
 
-def build_forward_labels(batch: Any, *, calendar: tuple[str, ...] | list[str],
-                         feature_sessions: tuple[str, ...] | list[str],
-                         horizon_sessions: int = 5) -> dict:
-    """Build ``adjusted_close(f+h) / adjusted_open(f+1) - 1`` labels.
+def _forward_rows(records, field_meta, ctx, *, calendar, features, horizon_sessions, source_ref):
+    """The single Raw operator for dynamic and compact cached outcomes.
 
-    Every security × feature-session key survives, including incomplete tails.
-    Label availability requires all six endpoint provenance clocks. A query's
-    cutoff establishes selection scope; it never substitutes for a fact clock.
+    Storage identities are supplied by the owner; arithmetic, null precedence,
+    exchange endpoints and the six native clocks never depend on the codec.
     """
     _require(type(horizon_sessions) is int and horizon_sessions > 0,
              "horizon_sessions must be a positive integer")
-    calendar = _sessions(calendar, "calendar")
-    features = _sessions(feature_sessions, "feature sessions")
     _require(set(features) <= set(calendar), "feature sessions must belong to the supplied calendar")
-    records, field_meta, ctx = _versioned(batch, "label_outcomes")
     q, securities, anchor, cutoff = _query_context(ctx, calendar)
-    source_refs = _batch_source_refs(records, field_meta, ctx)
-    source_ref = source_refs["source_ref"]
-    calendar_ref = _content_ref({"contract_version": "stock_label_calendar_v1", "sessions": list(calendar)})
     keys = {(security, session) for security in securities for session in q["sessions"]}
     indexed = _keyed(records, keys, "label record")
     metadata = {}
@@ -216,7 +207,6 @@ def build_forward_labels(batch: Any, *, calendar: tuple[str, ...] | list[str],
         _require(isinstance(definition, dict), "malformed " + field + " metadata")
         metadata[field] = _keyed(definition.get("by_key", []), keys, field + " provenance")
     positions = {session: index for index, session in enumerate(calendar)}
-    rows = []
     for feature in features:
         position = positions[feature]
         start = calendar[position + 1] if position + 1 < len(calendar) else None
@@ -235,10 +225,25 @@ def build_forward_labels(batch: Any, *, calendar: tuple[str, ...] | list[str],
                         value, reason = None, "nonfinite_return"
                     else:
                         available = max(start_clocks + end_clocks).isoformat().replace("+00:00", "Z")
-            rows.append(dict(security_id=security, feature_session=feature,
+            yield dict(security_id=security, feature_session=feature,
                 start_session=start, end_session=end, **{"return": value},
                 label_available_at=available, valid=reason is None,
-                invalid_reason=reason, source_refs=[source_ref]))
+                invalid_reason=reason, source_refs=[source_ref])
+
+
+def build_forward_labels(batch: Any, *, calendar: tuple[str, ...] | list[str],
+                         feature_sessions: tuple[str, ...] | list[str],
+                         horizon_sessions: int = 5) -> dict:
+    """Legacy logical projection of the same operator; not the v3 writer."""
+    calendar = _sessions(calendar, "calendar")
+    features = _sessions(feature_sessions, "feature sessions")
+    records, field_meta, ctx = _versioned(batch, "label_outcomes")
+    _, _, anchor, _ = _query_context(ctx, calendar)
+    source_refs = _batch_source_refs(records, field_meta, ctx)
+    source_ref = source_refs["source_ref"]
+    calendar_ref = _content_ref({"contract_version": "stock_label_calendar_v1", "sessions": list(calendar)})
+    rows = list(_forward_rows(records, field_meta, ctx, calendar=calendar, features=features,
+                             horizon_sessions=horizon_sessions, source_ref=source_ref))
     result = dict(contract_version=CONTRACT_VERSION, label_spec={
         "label_id": f"forward_{horizon_sessions}_session_open_close_v1", "semantic_version": "1",
         "horizon_sessions": horizon_sessions, "start_session_offset": 1,

@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 from axiom_research import stock_matrix_reader as reader
 from axiom_research.stock_batch import load_stock_ml_batch_inputs, _data
-from axiom_research.stock_matrix_prepare import prepare_stock_ml_batch_inputs
 from test_stock_matrix_prepare import PrepareFeatureFixture, PublicDataFixture, Query
+from legacy_stock_matrix_fixture import prepare_saved_v2_fixture
 
 
 class PrepareBudgetTests(unittest.TestCase):
@@ -32,7 +32,7 @@ class PrepareBudgetTests(unittest.TestCase):
                  patch('axiom_research.stock_ml._implementation',return_value=fixture.implementation), \
                  patch('axiom_research.stock_ml._environment',return_value=fixture.environment), \
                  patch.object(reader,'_validate_staged_matrix_batch',side_effect=observed):
-                cls.manifest=prepare_stock_ml_batch_inputs(data,feature_inputs=saved,
+                cls.manifest=prepare_saved_v2_fixture(data,feature_inputs=saved,
                     fold_specs=fixture.folds(),destination=cls.root/'prepared',
                     preparation_options={'row_block_sessions':32,'column_block':32,
                         'maximum_resident_bytes':cls.declared,'normalization_backend':'core_cs_batch_v1'})

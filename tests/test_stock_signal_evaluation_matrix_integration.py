@@ -17,7 +17,7 @@ import weakref
 from unittest.mock import patch
 
 from axiom_engine.core import evaluate_signal_statistics
-from axiom_research import (prepare_stock_ml_batch_inputs, load_stock_ml_batch_inputs,
+from axiom_research import ( load_stock_ml_batch_inputs,
     build_stock_ml_fold_from_saved_inputs, save_stock_signal_evaluation_inputs,
     evaluate_stock_signal_inputs, load_stock_signal_evaluation, audit_stock_signal_evaluation)
 from axiom_research.labels import build_forward_labels
@@ -28,6 +28,7 @@ from axiom_research.stock_fold_artifacts import load_stock_ml_fold
 from axiom_research.stock_signal_evaluation_projection import _load_inputs
 from test_stock_matrix_prepare import PrepareFeatureFixture, PublicDataFixture, Query, Batch
 from test_stock_folds import backend
+from legacy_stock_matrix_fixture import prepare_saved_v2_fixture
 
 
 class ExactData(PublicDataFixture):
@@ -47,7 +48,7 @@ def saved_four_folds(root):
     with patch.dict(sys.modules, {'axiom_data': module}), \
          patch('axiom_research.stock_ml._implementation', return_value=fixture.implementation), \
          patch('axiom_research.stock_ml._environment', return_value=fixture.environment):
-        manifest = prepare_stock_ml_batch_inputs(data, feature_inputs=saved, fold_specs=fixture.folds(),
+        manifest = prepare_saved_v2_fixture(data, feature_inputs=saved, fold_specs=fixture.folds(),
             destination=root/'prepared', preparation_options={'row_block_sessions': 32, 'column_block': 32,
                 'maximum_resident_bytes': 64*1024**2, 'normalization_backend': 'core_cs_batch_v1'})
     saved.close()

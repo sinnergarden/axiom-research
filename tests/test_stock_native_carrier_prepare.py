@@ -17,12 +17,13 @@ from axiom_research.stock_artifacts import _read, digest, file_digest
 from axiom_research.stock_batch import load_stock_ml_batch_inputs
 from axiom_research.stock_feature_inputs import _write_feature_matrix_block
 from axiom_research.stock_fold_inputs import seal
-from axiom_research.stock_matrix_prepare import _Publisher, prepare_stock_ml_batch_inputs
+from axiom_research.stock_matrix_prepare import _Publisher
 from axiom_research.stock_matrix_reader import VerifiedMatrixStore, _admit_raw_label
 from axiom_research.stock_matrix_storage import row_index
 from test_stock_feature_inputs import file_state
 from test_stock_matrix_prepare import PrepareFeatureFixture, PublicDataFixture, Query, Batch
 from test_stock_native_carrier_reader import ABSENT, raw_build
+from legacy_stock_matrix_fixture import prepare_saved_v2_fixture
 
 
 LIMIT = 32 * 1024 * 1024
@@ -222,7 +223,7 @@ class NativeCarrierPrepareTests(unittest.TestCase):
              patch('axiom_engine.core.execute_cs_zscore_batch', wraps=execute_cs_zscore_batch) as core, \
              patch('axiom_research.stock_ml._iter_stock_feature_days', side_effect=AssertionError('Feature recomputed')), \
              patch('axiom_research.stock_training.fit_predict_stock_model', side_effect=AssertionError('model executed')):
-            batch = prepare_stock_ml_batch_inputs(data, feature_inputs=saved, fold_specs=folds,
+            batch = prepare_saved_v2_fixture(data, feature_inputs=saved, fold_specs=folds,
                 destination=self.root/'prepared', preparation_options=options, metrics=metrics)
             self.assertEqual(core.call_count, 1)
             self.assertEqual(metrics['core_calls'], 1)
@@ -295,7 +296,7 @@ class NativeCarrierPrepareTests(unittest.TestCase):
                         self.assertEqual(len(lease.raw_provenance[0]), 7)
                     self.assertEqual(verified.metrics['data_read_calls'], 0)
                     self.assertEqual(verified.metrics['core_calls'], 0)
-                again = prepare_stock_ml_batch_inputs(data, feature_inputs=saved, fold_specs=folds,
+                again = prepare_saved_v2_fixture(data, feature_inputs=saved, fold_specs=folds,
                     destination=self.root/'prepared', preparation_options=options, metrics=counters)
             self.assertEqual(again, batch)
             self.assertTrue(counters['cache_hit'])

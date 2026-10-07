@@ -159,7 +159,7 @@ class StockMLBatchInputs:
         self.close()
 
 
-def load_stock_ml_batch_inputs(batch_manifest, *, limits=None):
+def load_stock_ml_batch_inputs(batch_manifest, *, feature_inputs=None, limits=None):
     """Verify each unique saved parent once and allocate one readonly matrix.
 
     ``batch_manifest`` is {contract_version: stock_ml_batch_inputs_v1, folds:
@@ -171,6 +171,28 @@ def load_stock_ml_batch_inputs(batch_manifest, *, limits=None):
     """
     begin = time.perf_counter()
     manifest = deepcopy(batch_manifest)
+    if type(manifest) is dict and manifest.get('contract_version')=='stock_ml_batch_inputs_v3':
+        from .stock_compact_batch import load_compact_state
+        from .stock_compact_store import _view_data, sealed, limits as compact_limits
+        sealed(manifest,'content_digest')
+        state=None
+        if feature_inputs is not None:
+            fd=_view_data(feature_inputs)
+            state=fd['prepared'].get(manifest['batch_ref'])
+            if state is not None:
+                require(state.batch==manifest and state.feature is feature_inputs,'prepared compact handle mismatch')
+                state.check(); state.compatible(compact_limits(limits)); fd['prepared'].pop(manifest['batch_ref'])
+        if state is None: state=load_compact_state(manifest,feature_inputs=feature_inputs,limits=limits)
+        metrics=deepcopy(state.store.metrics)
+        for key in ('file_hash_calls','hash_bytes','source_bytes','json_decode_calls'):
+            metrics[key]+=state.feature.metrics.get(key,0)
+        metrics.update(initialization_seconds=time.perf_counter()-begin,legacy_ancestor_reads=0,
+            legacy_native_hash_calls=0,common_key_index_builds=1)
+        value={'identity':manifest['batch_ref'],'manifest':manifest,'matrix_state':state,
+            'fold_keys':{(digest(f['input_manifest']),digest(f['fold_spec'])) for f in manifest['folds']},
+            'closed':False,'metrics':metrics}
+        return StockMLBatchInputs(_TOKEN,value)
+    require(feature_inputs is None,'Feature handle reuse requires compact v3 inputs')
     if type(manifest) is dict and manifest.get('contract_version') == 'stock_ml_batch_inputs_v2':
         from .stock_matrix_reader import load_matrix_batch_state
         state = load_matrix_batch_state(manifest, limits=limits)

@@ -10,11 +10,12 @@ import types
 import unittest
 from unittest.mock import patch
 
-from axiom_research import (prepare_stock_ml_batch_inputs,load_stock_ml_batch_inputs,
+from axiom_research import (load_stock_ml_batch_inputs,
     build_stock_ml_fold_from_saved_inputs,load_stock_ml_fold,load_stock_model)
 from axiom_research.stock_artifacts import digest,file_digest,_read,write_json
 from test_stock_matrix_prepare import PrepareFeatureFixture,PublicDataFixture,Query
 from test_stock_folds import backend
+from legacy_stock_matrix_fixture import prepare_saved_v2_fixture
 
 
 def prepared(root, legacy=False):
@@ -26,7 +27,7 @@ def prepared(root, legacy=False):
     with patch.dict(sys.modules,{'axiom_data':module}), \
          patch('axiom_research.stock_ml._implementation',return_value=fixture.implementation), \
          patch('axiom_research.stock_ml._environment',return_value=fixture.environment):
-        manifest=prepare_stock_ml_batch_inputs(data,feature_inputs=saved,fold_specs=fixture.folds(),
+        manifest=prepare_saved_v2_fixture(data,feature_inputs=saved,fold_specs=fixture.folds(),
             destination=root/'prepared',preparation_options={'row_block_sessions':32,'column_block':32,
                 'maximum_resident_bytes':64*1024**2,'normalization_backend':'core_cs_batch_v1'})
     if hasattr(saved,'close'): saved.close()
@@ -123,7 +124,7 @@ class CompactFoldTests(unittest.TestCase):
                  patch('axiom_research.stock_ml._environment',return_value=fixture.environment), \
                  patch('axiom_research.stock_matrix_reader._validate_staged_matrix_batch',side_effect=ValueError('injected invalid closure')):
                 with self.assertRaisesRegex(ValueError,'invalid closure'):
-                    prepare_stock_ml_batch_inputs(data,feature_inputs=saved,fold_specs=fixture.folds(),
+                    prepare_saved_v2_fixture(data,feature_inputs=saved,fold_specs=fixture.folds(),
                         destination=root/'prepared',preparation_options={'row_block_sessions':32,'column_block':32,
                             'maximum_resident_bytes':64*1024**2,'normalization_backend':'core_cs_batch_v1'})
             self.assertEqual(list((root/'prepared').iterdir()),[])
@@ -164,7 +165,7 @@ class CompactFoldTests(unittest.TestCase):
                  patch('axiom_research.stock_ml._environment',return_value=fixture.environment), \
                  patch.object(Path,'rename',raced):
                 with self.assertRaisesRegex(ValueError,'digest mismatch'):
-                    prepare_stock_ml_batch_inputs(data,feature_inputs=saved,fold_specs=fixture.folds(),
+                    prepare_saved_v2_fixture(data,feature_inputs=saved,fold_specs=fixture.folds(),
                         destination=root/'prepared',preparation_options={'row_block_sessions':32,'column_block':32,
                             'maximum_resident_bytes':64*1024**2,'normalization_backend':'core_cs_batch_v1'})
             saved.close()

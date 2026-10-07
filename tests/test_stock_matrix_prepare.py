@@ -18,11 +18,11 @@ from axiom_research.stock_feature_inputs import _feature_wire
 from axiom_research.stock_fold_inputs import seal
 from axiom_research.stock_label_contracts import _instant
 from axiom_research.stock_label_normalization import normalize_forward_labels
-from axiom_research.stock_matrix_prepare import prepare_stock_ml_batch_inputs
 from axiom_research.stock_matrix_reader import VerifiedMatrixStore, validate_saved_core_result
 from axiom_research.stock_batch import load_stock_ml_batch_inputs
 from test_stock_feature_inputs import SyntheticInputs
 from test_stock_matrix_storage import SyntheticWideInputs
+from legacy_stock_matrix_fixture import prepare_saved_v2_fixture
 
 
 def fixture_native(descriptor, ref_key):
@@ -166,7 +166,7 @@ class MatrixPrepareTests(unittest.TestCase):
                  patch('axiom_engine.core.execute_cs_zscore_batch',wraps=execute_cs_zscore_batch) as core, \
                  patch('axiom_research.stock_ml._iter_stock_feature_days',side_effect=AssertionError('Feature executed')), \
                  patch('axiom_research.stock_training.fit_predict_stock_model',side_effect=AssertionError('model executed')):
-                batch=prepare_stock_ml_batch_inputs(data,feature_inputs=saved,fold_specs=folds,
+                batch=prepare_saved_v2_fixture(data,feature_inputs=saved,fold_specs=folds,
                     destination=root/'prepared',preparation_options=options,metrics=metrics)
                 self.assertEqual(core.call_count,4)
                 self.assertEqual(metrics['core_calls'],4)
@@ -217,7 +217,7 @@ class MatrixPrepareTests(unittest.TestCase):
                 hits={}
                 with patch.object(data,'read',side_effect=AssertionError('HIT read Data')), \
                      patch('axiom_engine.core.execute_cs_zscore_batch',side_effect=AssertionError('HIT ran Core')):
-                    again=prepare_stock_ml_batch_inputs(data,feature_inputs=saved,fold_specs=folds,
+                    again=prepare_saved_v2_fixture(data,feature_inputs=saved,fold_specs=folds,
                         destination=root/'prepared',preparation_options=options,metrics=hits)
                 self.assertEqual(again,batch); self.assertEqual(hits['data_read_calls'],0)
                 self.assertEqual(hits['core_calls'],0)
@@ -403,7 +403,7 @@ class PublicMemoryMatrixPrepareTests(unittest.TestCase):
                      patch('axiom_engine.core.execute_cs_zscore_batch', wraps=execute_cs_zscore_batch) as core, \
                      patch('axiom_research.stock_ml._iter_stock_feature_days', side_effect=AssertionError('Feature executed')), \
                      patch('axiom_research.stock_training.fit_predict_stock_model', side_effect=AssertionError('model executed')):
-                    batch = prepare_stock_ml_batch_inputs(data, feature_inputs=saved, fold_specs=folds,
+                    batch = prepare_saved_v2_fixture(data, feature_inputs=saved, fold_specs=folds,
                         destination=root/'prepared-public', preparation_options=options, metrics=metrics)
                     self.assertEqual(core.call_count, 3)
                     self.assertEqual(public_reads.call_count, metrics['data_read_calls'])
@@ -570,7 +570,7 @@ class PublicMemoryMatrixPrepareTests(unittest.TestCase):
                      patch('axiom_research.stock_ml._environment', return_value=feature.environment), \
                      patch.object(data, 'read', side_effect=AssertionError('HIT read Data')), \
                      patch('axiom_engine.core.execute_cs_zscore_batch', side_effect=AssertionError('HIT ran Core')):
-                    again = prepare_stock_ml_batch_inputs(data, feature_inputs=saved, fold_specs=folds,
+                    again = prepare_saved_v2_fixture(data, feature_inputs=saved, fold_specs=folds,
                         destination=root/'prepared-public', preparation_options=options, metrics=hits)
                 self.assertEqual(again, batch)
                 self.assertEqual(hits['data_read_calls'], 0)

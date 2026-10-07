@@ -18,6 +18,7 @@ from axiom_research.stock_matrix_feature_sources import _day_ref, _selection
 from test_stock_matrix_storage import SyntheticWideInputs
 from test_stock_matrix_prepare import PrepareFeatureFixture, PublicDataFixture, Query
 from test_stock_feature_inputs import InterruptedPreparation
+from legacy_stock_matrix_fixture import prepare_saved_v2_fixture
 
 
 def original_proof(rows, p):
@@ -451,7 +452,7 @@ class CompactSourceTests(unittest.TestCase):
             finally: saved.close()
 
     def test_prepare_fold_projection_and_prediction_ancestry_without_training(self):
-        from axiom_research.stock_matrix_prepare import prepare_stock_ml_batch_inputs
+
         from axiom_research.stock_folds import prediction_rows
         from axiom_research.stock_matrix_folds import _predictions
         with tempfile.TemporaryDirectory() as temp:
@@ -462,7 +463,7 @@ class CompactSourceTests(unittest.TestCase):
                  patch('axiom_research.stock_ml._implementation',return_value=f.implementation), \
                  patch('axiom_research.stock_ml._environment',return_value=f.environment), \
                  patch('axiom_research.stock_training.fit_predict_stock_model',side_effect=AssertionError('training called')):
-                batch=prepare_stock_ml_batch_inputs(data,feature_inputs=saved,fold_specs=[fold],destination=root/'prepared',
+                batch=prepare_saved_v2_fixture(data,feature_inputs=saved,fold_specs=[fold],destination=root/'prepared',
                     preparation_options={'row_block_sessions':24,'column_block':2,'maximum_resident_bytes':64*1024**2,
                                          'normalization_backend':'core_cs_batch_v1'},metrics=metrics)
             view=_read(batch['prepared_view']['path'])

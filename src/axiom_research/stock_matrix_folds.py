@@ -19,6 +19,9 @@ def _projection(inputs,spec,batch):
     if batch is not None:
         from .stock_batch import _data
         _data(batch); return batch._matrix_project(inputs,spec)
+    if inputs.get('contract_version')=='stock_ml_saved_inputs_v3':
+        from .stock_compact_batch import load_compact_projection
+        return load_compact_projection(inputs,spec)
     from .stock_matrix_reader import load_matrix_input_projection
     return load_matrix_input_projection(inputs,spec)
 
@@ -152,13 +155,23 @@ def _predictions(predictions,features,common,spec,model):
 
 def load_matrix_fold(path, *, projection=None,batch=None):
     """Complete readonly v3 closure; no Data/Core/model execution is imported."""
+    from .stock_compact_store import OwnedStore
+    with OwnedStore() as ingress:
+        return _load_matrix_fold(path,projection=projection,batch=batch,ingress=ingress)
+
+
+def _load_matrix_fold(path, *, projection,batch,ingress):
     from .stock_fold_artifacts import StockMLFold
-    path=Path(path); manifest=_read(path/'manifest.json')
+    path=Path(path).resolve(); manifest=ingress.read_json({'path':str(path/'manifest.json')})
     require(set(manifest)=={'contract_version','fold_ref','files'} and
         manifest['contract_version']=='stock_ml_fold_manifest_v2' and
         set(manifest['files'])=={*OUTPUTS,'fold.json','booster.txt'},'unexpected compact fold manifest')
-    for name,ref in manifest['files'].items(): require(file_digest(path/name)==ref,'saved fold file mismatch: '+name)
-    fold=_read(path/'fold.json'); _verify_ref(fold,'content_digest'); definition=fold['definition']
+    documents={}
+    for name,ref in manifest['files'].items():
+        descriptor={'path':str(path/name),'file_digest':ref}
+        if name=='booster.txt': ingress.read(descriptor)
+        else: documents[name]=ingress.read_json(descriptor,key='content_digest' if name=='fold.json' else OUTPUTS[name])
+    fold=documents['fold.json']; definition=fold['definition']
     require(fold['contract_version']=='stock_ml_fold_v3' and fold['status']=='COMPLETE' and
         definition['version']=='axiom.stock_ml_fold/3' and definition['parameters']==LGBM_PARAMETERS and
         definition['num_boost_round']==TREES and definition['target_semantics']==TARGET_SEMANTICS and
@@ -171,7 +184,7 @@ def load_matrix_fold(path, *, projection=None,batch=None):
     require(fold['fold_ref']==digest({'definition_ref':fold['definition_ref'],**refs})==manifest['fold_ref'],'compact fold identity mismatch')
     saved={}
     for name,key in OUTPUTS.items():
-        value=_read(path/name); _verify_ref(value,key); require(value[key]==fold[key],'fold stage reference mismatch'); saved[name]=value
+        value=documents[name]; require(value[key]==fold[key],'fold stage reference mismatch'); saved[name]=value
     own=projection is None
     if own:
         projection=(batch._project_evaluation(inputs,spec) if batch is not None
@@ -208,6 +221,7 @@ def load_matrix_fold(path, *, projection=None,batch=None):
         # changing its immutable parents cannot publish a COMPLETE fold.
         projection._store.check()
         if batch is not None: batch._check_sources()
+        ingress.check()
         return StockMLFold(path)
     finally:
         if own: projection.close()

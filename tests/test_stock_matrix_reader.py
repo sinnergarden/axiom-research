@@ -17,10 +17,10 @@ from axiom_research.stock_fold_inputs import seal
 from axiom_research.stock_matrix_reader import (load_matrix_input_projection, VerifiedMatrixStore,
                                                 _validate_staged_matrix_batch)
 from axiom_research.stock_matrix_storage import write_part, write_buffer
-from axiom_research.stock_matrix_prepare import prepare_stock_ml_batch_inputs
 from axiom_research.stock_feature_inputs import build_stock_feature_inputs
 from test_stock_matrix_prepare import PrepareFeatureFixture, PublicDataFixture, Query
 from test_stock_feature_inputs import NoData
+from legacy_stock_matrix_fixture import prepare_saved_v2_fixture
 
 
 def sealed(value,key):
@@ -70,7 +70,7 @@ class MatrixReaderTests(unittest.TestCase):
         with patch.dict(sys.modules,{'axiom_data':module}), \
              patch('axiom_research.stock_ml._implementation',return_value=fixture.implementation), \
              patch('axiom_research.stock_ml._environment',return_value=fixture.environment):
-            cls.manifest=prepare_stock_ml_batch_inputs(data,feature_inputs=saved,fold_specs=fixture.folds(),
+            cls.manifest=prepare_saved_v2_fixture(data,feature_inputs=saved,fold_specs=fixture.folds(),
                 destination=cls.root/'prepared',preparation_options={'row_block_sessions':32,'column_block':32,
                     'maximum_resident_bytes':64*1024**2,'normalization_backend':'core_cs_batch_v1'})
         saved.close(); cls.fixture=fixture
@@ -356,9 +356,9 @@ class MatrixReaderTests(unittest.TestCase):
             with patch.dict(sys.modules,{'axiom_data':module}), \
                  patch('axiom_research.stock_ml._implementation',return_value=fixture.implementation), \
                  patch('axiom_research.stock_ml._environment',return_value=fixture.environment), \
-                 patch('axiom_research.stock_matrix_prepare.require',side_effect=faulty_producer), \
+                 patch('legacy_stock_matrix_fixture.require',side_effect=faulty_producer), \
                  patch('axiom_research.stock_matrix_reader._training_feature_clock',return_value=None):
-                manifest=prepare_stock_ml_batch_inputs(data,feature_inputs=saved,fold_specs=fixture.folds()[:1],
+                manifest=prepare_saved_v2_fixture(data,feature_inputs=saved,fold_specs=fixture.folds()[:1],
                     destination=root/'bad-prepared',preparation_options={'row_block_sessions':32,'column_block':32,
                     'maximum_resident_bytes':64*1024**2,'normalization_backend':'core_cs_batch_v1'})
             saved.close()
@@ -400,7 +400,7 @@ class MatrixReaderTests(unittest.TestCase):
             with patch.dict(sys.modules,{'axiom_data':module}), \
                  patch('axiom_research.stock_ml._implementation',return_value=fixture.implementation), \
                  patch('axiom_research.stock_ml._environment',return_value=fixture.environment):
-                manifest=prepare_stock_ml_batch_inputs(data,feature_inputs=saved,fold_specs=[first,second],
+                manifest=prepare_saved_v2_fixture(data,feature_inputs=saved,fold_specs=[first,second],
                     destination=root/'same-fit',preparation_options={'row_block_sessions':32,'column_block':32,
                     'maximum_resident_bytes':64*1024**2,'normalization_backend':'core_cs_batch_v1'})
             saved.close(); view=_read(manifest['prepared_view']['path'])
@@ -772,7 +772,7 @@ with load_stock_ml_batch_inputs(manifest) as batch:
             with patch.dict(sys.modules,{'axiom_data':module}), \
                  patch('axiom_research.stock_ml._implementation',return_value=f.implementation), \
                  patch('axiom_research.stock_ml._environment',return_value=f.environment):
-                manifest=prepare_stock_ml_batch_inputs(data,feature_inputs=saved,fold_specs=f.folds()[:1],destination=root/'prepared',
+                manifest=prepare_saved_v2_fixture(data,feature_inputs=saved,fold_specs=f.folds()[:1],destination=root/'prepared',
                     preparation_options={'row_block_sessions':32,'column_block':32,'maximum_resident_bytes':64*1024**2,
                                          'normalization_backend':'core_cs_batch_v1'})
             self.assertEqual(manifest['definition']['feature_inputs']['feature_inputs_ref'],saved.identity)
