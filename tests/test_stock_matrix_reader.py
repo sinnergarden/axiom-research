@@ -142,11 +142,13 @@ class MatrixReaderTests(unittest.TestCase):
             actual=retained_owned_bytes(_data(batch)); reported=batch.metrics['resident_metadata_bytes']
         # A previous compact-only ledger admitted a graph larger than its
         # limit. This bound targets the actual post-admission owned graph.
-        with self.assertRaisesRegex(ValueError,'admitted matrix resident byte budget'):
+        # Native-carrier preflight may reject before final graph admission.
+        with self.assertRaisesRegex(ValueError,'admitted matrix resident byte budget|Legacy JSON parent workspace budget'):
             load_stock_ml_batch_inputs(self.manifest,limits={
                 'maximum_source_bytes':16*1024**2,'maximum_matrix_bytes':actual-1024})
         with load_stock_ml_batch_inputs(self.manifest,limits={
-                'maximum_source_bytes':16*1024**2,'maximum_matrix_bytes':reported+1024**2}) as batch:
+                # Admission also reserves temporary native-proof workspace.
+                'maximum_source_bytes':16*1024**2,'maximum_matrix_bytes':max(reported+1024**2,64*1024**2)}) as batch:
             state=_data(batch)['matrix_state']; fold=self.manifest['folds'][0]
             self.assertGreaterEqual(state.store.resident_bytes,retained_owned_bytes(_data(batch)))
             with batch._project_evaluation(fold['input_manifest'],fold['fold_spec']) as lease:
@@ -686,7 +688,7 @@ class MatrixReaderTests(unittest.TestCase):
             state.store.maximum_matrix_bytes=state.store.resident_bytes+100
             f=self.manifest['folds'][0]
             with self.assertRaisesRegex(ValueError,'active fold matrix'): batch._matrix_project(f['input_manifest'],f['fold_spec'])
-        with self.assertRaisesRegex(ValueError,'compact metadata budget'):
+        with self.assertRaisesRegex(ValueError,'compact metadata budget|matrix resident accounting workspace budget'):
             load_stock_ml_batch_inputs(self.manifest,limits={'maximum_source_bytes':16*1024**2,'maximum_matrix_bytes':100})
 
     def test_public_loader_and_projection_import_no_provider_core_or_model(self):

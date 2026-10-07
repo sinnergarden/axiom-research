@@ -626,6 +626,7 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
         stats['native_window_peak_sessions'] = max(stats['native_window_peak_sessions'], len(history))
         stats['native_window_peak_bytes'] = max(stats['native_window_peak_bytes'], window.bytes)
         previous = None
+        signature = None
         previous_bytes = sys.getsizeof(None)
         pending = []
         for day in block:
@@ -719,27 +720,33 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                 maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature Core snapshot copies exceed resident budget')
             wires = plan.to_dict(), adapted.facts.to_dict(), adapted.context.to_dict()
-            signature = _view_signature(plan, adapted.facts, adapted.context, calendar=sessions, _wires=wires)
-            if previous is not None:
-                classification = classify_shared_feature_views(previous, signature)
-                counts = stats['classifier_status_counts']
-                status = classification['status']
-                counts[status] = counts.get(status, 0)+1
-                counts = stats['classifier_reason_counts']
-                for reason in classification['reasons']:
-                    counts[reason] = counts.get(reason, 0)+1
-            previous = signature
-            previous_bytes = len(signature['facts'])*1024+len(signature['reference'])*512+len(sessions)*256
-            stats['signature_charge_estimates'] = stats.get('signature_charge_estimates', 0)+1
+            if not config.get("_compact_source",False):
+                signature = _view_signature(plan, adapted.facts, adapted.context, calendar=sessions, _wires=wires)
+                if previous is not None:
+                    classification = classify_shared_feature_views(previous, signature)
+                    counts = stats['classifier_status_counts']
+                    status = classification['status']
+                    counts[status] = counts.get(status, 0)+1
+                    counts = stats['classifier_reason_counts']
+                    for reason in classification['reasons']:
+                        counts[reason] = counts.get(reason, 0)+1
+                previous = signature
+                previous_bytes = len(signature['facts'])*1024+len(signature['reference'])*512+len(sessions)*256
+                stats['signature_charge_estimates'] = stats.get('signature_charge_estimates', 0)+1
             owned = (base+window.bytes+reuse_budget_bytes+_pending_owned_bytes(pending)+reader_bytes+
                      membership_bytes+previous_bytes+wire_estimate+3*document_estimate)
             _guard_resident(owned, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature input working graph exceeds resident budget')
             members = {row['security_id']: row['is_member'] for row in membership_wire['records'] if row['session'] == day}
+            if config.get('_compact_source',False):
+                stats['feature_source_batch_ref_reuses']=stats.get('feature_source_batch_ref_reuses',0)+2
             evidence = {'session': day, 'core_plan': wires[0],
                 'fact_ref': adapted.facts.identity, 'context_ref': adapted.context.identity,
-                'sessions': list(history), 'cutoffs': cutoffs, 'adjusted_input_ref': digest(adjusted_wire),
-                'membership_ref': digest(membership_wire), 'source_evidence': {key: {
+                'sessions': list(history), 'cutoffs': cutoffs,
+                'adjusted_input_ref': (next(source['batch_ref'] for source in adapted.source_evidence.values()
+                    if source['field']!='is_member') if config.get('_compact_source',False) else digest(adjusted_wire)),
+                'membership_ref': (next(source['batch_ref'] for source in adapted.source_evidence.values()
+                    if source['field']=='is_member') if config.get('_compact_source',False) else digest(membership_wire)), 'source_evidence': {key: {
                     **{name: value for name, value in source.items() if name != 'provenance_by_key'},
                     'provenance_by_key_ref': digest(source['provenance_by_key'])}
                     for key, source in adapted.source_evidence.items()}}

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import errno
 import math
+import os
 import tempfile
 import time
 import sys
@@ -118,10 +119,11 @@ def _qlib_scope(view, spec, universe_id):
         all(q.get('universe_id') is None for q in queries[:-1]), 'Qlib original fields/universe mismatch')
 
 
-def _validate_feature_block(feature, indexed, proof, spec, view, universe_id):
+def _validate_feature_block(feature, indexed, proof, spec, view, universe_id, *, source_contexts=None):
     """Shared native Feature source/PIT checks for v1 files and v2 blocks."""
     history_length = spec['read_sessions'].index(spec['feature_sessions'][0]) + 1
     require(feature['qlib_view'] == view, 'parent Qlib identity mismatch')
+    context_refs = {}  # Only compact, already-admitted contexts use this cache.
     for day in proof:
         p = proof[day]; pos = spec['read_sessions'].index(day)
         history = spec['read_sessions'][pos-history_length+1:pos+1]
@@ -147,7 +149,9 @@ def _validate_feature_block(feature, indexed, proof, spec, view, universe_id):
                 'Feature original source field coverage mismatch')
         membership = False
         for source_id,source in sources.items():
-            context = source['query_context']; query = context['query']
+            context = (source['query_context'] if source_contexts is None else
+                       source_contexts[source['query_context_ref']]['context'])
+            query = context['query']
             require(context['snapshot_id'] == spec['snapshot'] and query['sessions'] == history and
                     query['symbols'] == spec['universe'] and query['pit_policy'] == spec['pit_policy'] and
                     query.get('policy_by_session') is None and
@@ -170,13 +174,18 @@ def _validate_feature_block(feature, indexed, proof, spec, view, universe_id):
             require(source_id == digest({'field':source['field'],'batch_ref':source['batch_ref'],
                 'qualification':binding['qualification'],'basis':binding['availability_basis']}) and
                 binding['revision_policy'] == query['pit_policy'], 'Feature original field/source binding mismatch')
-            reference = digest({'snapshot_id':context['snapshot_id'],'query':query,
-                                'reader_version':context['reader_version']})
-            data_ref = reference if source['field'] == 'is_member' else digest({
-                'snapshot_id':context['snapshot_id'],'domain':context['domain']})
-            view_ref = reference if source['field'] == 'is_member' else digest({
-                'snapshot_id':context['snapshot_id'],'query':query,
-                'reader_version':context['reader_version'],'derivation':context.get('derivation')})
+            key = None if source_contexts is None else source['query_context_ref']
+            if key is not None and key in context_refs:
+                data_ref,view_ref = context_refs[key]
+            else:
+                reference = digest({'snapshot_id':context['snapshot_id'],'query':query,
+                                    'reader_version':context['reader_version']})
+                data_ref = reference if source['field'] == 'is_member' else digest({
+                    'snapshot_id':context['snapshot_id'],'domain':context['domain']})
+                view_ref = reference if source['field'] == 'is_member' else digest({
+                    'snapshot_id':context['snapshot_id'],'query':query,
+                    'reader_version':context['reader_version'],'derivation':context.get('derivation')})
+                if key is not None: context_refs[key] = data_ref,view_ref
             require(binding['data_ref'] == data_ref and binding['view_ref'] == view_ref,
                     'Feature original source context binding mismatch')
         require(membership, 'Feature membership source missing')
@@ -224,7 +233,7 @@ def load_stock_feature_inputs(path, *, limits=None):
     limits = _limits(limits); path = Path(path); _bounded(path/'index.json', limits)
     marks = {str(path/'index.json'):file_fingerprint(path/'index.json')}
     value = _read(path/'index.json')
-    if value.get('contract_version') == 'stock_feature_inputs_v2':
+    if value.get('contract_version') in ('stock_feature_inputs_v2','stock_feature_inputs_v3'):
         from .stock_matrix_reader import load_feature_matrix_index
         return load_feature_matrix_index(path, limits=limits, _index=value,
                                          _index_fingerprint=marks[str(path/'index.json')])
@@ -258,6 +267,19 @@ def _atomic(path, value):
         temp.unlink(missing_ok=True)
 
 
+def _publish_compact_index(path, value):
+    """Immutable final index: concurrent bytes are admitted, never overwritten."""
+    with tempfile.NamedTemporaryFile(prefix='.'+path.name,dir=path.parent,delete=False) as stream:
+        temporary=Path(stream.name)
+    try:
+        write_json(temporary,value); expected=file_digest(temporary)
+        try: os.link(temporary,path)
+        except FileExistsError: pass
+        require(not path.is_symlink() and file_digest(path)==expected,'concurrent compact Feature index changed')
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 MATRIX_OPTIONS = {'layout':'matrix_v1', 'row_block_sessions':64, 'column_block':32,
                   'maximum_resident_bytes':int(5.5*1024**3)}
 MATRIX_METADATA_FIELDS = {'contract_version','sessions','ordered_features','catalog_ref',
@@ -271,7 +293,7 @@ def _storage_options(options):
     require(type(options) is dict and not (set(options)-set(MATRIX_OPTIONS)),
             'exact matrix storage options required')
     value = {**MATRIX_OPTIONS, **options}
-    require(value['layout'] == 'matrix_v1' and all(type(value[k]) is int and value[k] > 0
+    require(value['layout'] in ('matrix_v1','matrix_v2') and all(type(value[k]) is int and value[k] > 0
             for k in ('row_block_sessions','column_block','maximum_resident_bytes')),
             'matrix layout and positive integer budgets required')
     return value
@@ -369,7 +391,14 @@ def _validate_feature_matrix_block(metadata, rows, spec, view, *, universe_id=No
 
 def _write_feature_matrix_block(target, *, rows, proof, spec, view, schema, index_ref,
                                 row_offset, options, universe_id=None, caller_retained_bytes=None,
-                                metrics=None, descriptor_mapper=None, path_resolver=None):
+                                metrics=None, descriptor_mapper=None, path_resolver=None, _coverage_writer=None):
+    if options.get('layout','matrix_v1')=='matrix_v2':
+        from .stock_matrix_feature_sources import write_block
+        require(descriptor_mapper is None and path_resolver is None,
+                'compact Feature writer requires fixed publication paths')
+        return write_block(target,rows=rows,proof=proof,spec=spec,view=view,schema=schema,
+            index_ref=index_ref,row_offset=row_offset,options=options,universe_id=universe_id,
+            caller_retained_bytes=caller_retained_bytes,metrics=metrics,coverage_writer=_coverage_writer)
     from .stock_matrix_storage import instant_us, write_buffer, write_part, write_partition
     from .stock_native_json import native_digest, make_native_carrier
     from .stock_matrix_reader import _resident_size
@@ -485,11 +514,33 @@ def _object_upper_bytes(value):
 
 
 def _build_feature_matrix(data, *, spec, destination, storage_options, progress):
+    options=_storage_options(storage_options)
+    if options['layout']=='matrix_v1':
+        return _build_feature_matrix_impl(data,spec=spec,destination=destination,
+            storage_options=options,progress=progress)
+    from .stock_matrix_reader import VerifiedMatrixStore
+    store=VerifiedMatrixStore(maximum_matrix_bytes=options['maximum_resident_bytes'],
+                              maximum_parent_bytes=DEFAULT_LIMITS['maximum_parent_bytes'])
+    try:
+        result=_build_feature_matrix_impl(data,spec=spec,destination=destination,
+            storage_options=options,progress=progress,_publication_store=store)
+        if result._store is not store: store.close()  # A public, independently admitted HIT.
+        return result
+    except BaseException:
+        if not store.closed: store.close()
+        raise
+
+
+def _build_feature_matrix_impl(data, *, spec, destination, storage_options, progress, _publication_store=None):
     from .feature_catalog import load_feature_catalog
     from .stock_ml import _implementation, _environment
     from .stock_matrix_feature_producer import prepare_matrix_qlib, iter_matrix_feature_days
     from .stock_matrix_storage import row_index, write_part
+    from .stock_matrix_reader import admit_feature_matrix_parts
     options = _storage_options(storage_options); spec = deepcopy(spec)
+    compact=options['layout']=='matrix_v2'; compact_blocks=[]; compact_sources=set(); compact_parents={}
+    from .stock_matrix_feature_sources import _FeatureCoverageWriter
+    coverage_writer=_FeatureCoverageWriter() if compact else None
     source_marks={spec['scope']['path']:file_fingerprint(spec['scope']['path'])}
     universe_id=_spec(spec); catalog=load_feature_catalog(); chosen=catalog.select(spec['feature_selection'])
     require(catalog.identity == spec['catalog_ref'] and [c['id'] for c in chosen] == spec['ordered_features'],
@@ -521,6 +572,12 @@ def _build_feature_matrix(data, *, spec, destination, storage_options, progress)
     qdesc={'path':str(qpath.resolve()),'file_digest':file_digest(qpath),'view_id':view['view_id']}
     require(_qlib(qdesc,DEFAULT_LIMITS,fingerprints=source_marks) == view, 'prepared Qlib reference mismatch')
     row_wire=row_index(spec['feature_sessions'],spec['universe']); rid=write_part(target,row_wire,'row_index_ref')
+    if compact:
+        _spec(spec,reader=_publication_store.read_json)
+        require(_qlib(qdesc,DEFAULT_LIMITS,fingerprints=_publication_store.fingerprints,
+            _file_hasher=_publication_store._hash_once,_json_reader=_publication_store._decode_once)==view,
+            'compact Feature publication Qlib mismatch')
+        require(_publication_store.read_json(rid,'row_index_ref')==row_wire,'compact Feature publication row index mismatch')
     partitions=[]; feature_rows=[]; rows=[]; proof=[]; completed=[]; pending_bytes=0
     checkpoint=target/'checkpoint.json'
     if checkpoint.exists():
@@ -528,19 +585,29 @@ def _build_feature_matrix(data, *, spec, destination, storage_options, progress)
         previous=_read(checkpoint); _verify_ref(previous,'content_digest')
         require(set(previous) == {'contract_version','definition_ref','qlib_manifest','schema','row_index',
             'partitions','feature_rows','content_digest'} and
-            previous['contract_version'] == 'stock_feature_inputs_checkpoint_v2' and
+            previous['contract_version'] == ('stock_feature_inputs_checkpoint_v3' if compact else 'stock_feature_inputs_checkpoint_v2') and
             previous['definition_ref'] == definition_ref and previous['qlib_manifest'] == qdesc and
             previous['schema'] == schema and previous['row_index'] == rid, 'matrix Feature checkpoint mismatch')
-        with VerifiedMatrixStore(maximum_parent_bytes=DEFAULT_LIMITS['maximum_parent_bytes']) as store:
-            completed, admitted_blocks, unused_sources, unused_parents=admit_feature_matrix_parts(
-                store,spec=spec,view=view,schema=schema,row_index=row_wire,
-                partitions=previous['partitions'],complete=False,universe_id=universe_id)
-            require(previous['feature_rows'] == [row for block in admitted_blocks
-                for row in block['_source_selection_rows']], 'matrix checkpoint source-selection mismatch')
-            source_marks.update(store.fingerprints)
+        if compact:
+            completed,compact_blocks,compact_sources,compact_parents=admit_feature_matrix_parts(
+                _publication_store,spec=spec,view=view,schema=schema,row_index=row_wire,
+                partitions=previous['partitions'],complete=False,universe_id=universe_id,
+                metadata_version='stock_matrix_feature_metadata_v2')
+            require(previous['feature_rows']==[r for b in compact_blocks for r in b['_source_selection_rows']],
+                    'compact checkpoint source-selection mismatch')
+            source_marks.update(_publication_store.fingerprints)
+        else:
+            with VerifiedMatrixStore(maximum_parent_bytes=DEFAULT_LIMITS['maximum_parent_bytes']) as store:
+                completed, admitted_blocks, unused_sources, unused_parents=admit_feature_matrix_parts(
+                    store,spec=spec,view=view,schema=schema,row_index=row_wire,
+                    partitions=previous['partitions'],complete=False,universe_id=universe_id)
+                require(previous['feature_rows'] == [row for block in admitted_blocks
+                    for row in block['_source_selection_rows']], 'matrix checkpoint source-selection mismatch')
+                source_marks.update(store.fingerprints)
         partitions=previous['partitions']; feature_rows=previous['feature_rows']
         require([v['session'] for v in feature_rows] == completed, 'matrix checkpoint source-selection mismatch')
     config['feature_sessions']=spec['feature_sessions'][len(completed):]
+    if compact: config['_compact_source']=True
     stats={'data_read_calls':0,'core_calls':0,'feature_core_calls':0,
            'prepare_matrix_qlib_seconds':prepared['seconds']}
     # row_block_sessions is a maximum. Large schemas use the same writer with
@@ -550,10 +617,22 @@ def _build_feature_matrix(data, *, spec, destination, storage_options, progress)
     fixed_retained_bytes=_object_upper_bytes([row_wire,schema,source_marks,qdesc,
         definition,spec,config,view])
     published_retained_bytes=_object_upper_bytes([partitions,feature_rows])
+    publication_retained_bytes=0; publication_external_bytes=0
+    if compact:
+        # Admission shares the producer's live budget, then relinquishes this
+        # private callback before the Store becomes the returned backing.
+        _publication_store._caller_retained_bytes=lambda:publication_external_bytes
     def caller_retained_bytes():
-        return pending_bytes+fixed_retained_bytes+published_retained_bytes
+        return (pending_bytes+fixed_retained_bytes+published_retained_bytes+publication_retained_bytes+
+                (coverage_writer.resident_bytes if compact else 0))
+    if compact:
+        publication_external_bytes=caller_retained_bytes()
+        publication_retained_bytes=(_publication_store._native_caller_bytes()-publication_external_bytes+
+                                    _object_upper_bytes(compact_blocks))
+        publication_external_bytes=0
     def publish_block():
         nonlocal rows, proof, pending_bytes, published_retained_bytes
+        nonlocal publication_retained_bytes, publication_external_bytes
         # The producer is suspended at yield and still owns its native window
         # and compatibility signature. Reserve the writer's proof/metadata,
         # encoder copies and one column buffer before publishing any child.
@@ -567,12 +646,27 @@ def _build_feature_matrix(data, *, spec, destination, storage_options, progress)
         tick=time.perf_counter_ns()
         new_parts,new_sources=_write_feature_matrix_block(target,rows=rows,proof=proof,spec=spec,view=view,
             schema=schema,index_ref=row_wire['row_index_ref'],row_offset=len(completed)*len(spec['universe']),
-            options=options,universe_id=universe_id,caller_retained_bytes=lambda:combined,metrics=stats)
+            options=options,universe_id=universe_id,caller_retained_bytes=lambda:combined,metrics=stats,
+            _coverage_writer=coverage_writer)
+        if compact:
+            publication_external_bytes=combined
+            _,new_blocks,new_hashes,new_parents=admit_feature_matrix_parts(_publication_store,
+                spec=spec,view=view,schema=schema,row_index=row_wire,partitions=new_parts,
+                complete=False,universe_id=universe_id,start_offset=len(completed)*len(spec['universe']),
+                metadata_version='stock_matrix_feature_metadata_v2')
+            require(new_sources==[r for b in new_blocks for r in b['_source_selection_rows']],
+                    'published compact Feature source-selection mismatch')
+            compact_blocks.extend(new_blocks); compact_sources.update(new_hashes); compact_parents.update(new_parents)
+            publication_retained_bytes=(_publication_store._native_caller_bytes()-publication_external_bytes+
+                                        _object_upper_bytes(compact_blocks))
+            publication_external_bytes=0
+            stats['feature_publication_retained_peak_bytes']=max(
+                stats.get('feature_publication_retained_peak_bytes',0),publication_retained_bytes)
         stats['feature_writer_blocks']=stats.get('feature_writer_blocks',0)+1
         stats['feature_writer_ns']=stats.get('feature_writer_ns',0)+time.perf_counter_ns()-tick
         published_retained_bytes+=_object_upper_bytes(new_parts)+_object_upper_bytes(new_sources)
         partitions.extend(new_parts); feature_rows.extend(new_sources); completed.extend(p['session'] for p in proof)
-        _atomic(checkpoint,seal({'contract_version':'stock_feature_inputs_checkpoint_v2','definition_ref':definition_ref,
+        _atomic(checkpoint,seal({'contract_version':'stock_feature_inputs_checkpoint_v3' if compact else 'stock_feature_inputs_checkpoint_v2','definition_ref':definition_ref,
             'qlib_manifest':qdesc,'schema':schema,'row_index':rid,'partitions':partitions,
             'feature_rows':feature_rows},'content_digest'))
         rows=[]; proof=[]; pending_bytes=0
@@ -606,28 +700,48 @@ def _build_feature_matrix(data, *, spec, destination, storage_options, progress)
     # Progress callbacks and resumed files cannot turn a corrupt checkpoint
     # into a formal HIT that fails only after publication.
     from .stock_matrix_reader import VerifiedMatrixStore, admit_feature_matrix_parts
-    with VerifiedMatrixStore(maximum_matrix_bytes=options['maximum_resident_bytes'],
+    if compact:
+        from .stock_matrix_reader import _complete_intervals
+        # Every block already proved its complete column grid and actual
+        # bytes. Bind the final plan to those private admitted descriptors;
+        # fingerprints invalidate reuse if any published file changed.
+        require(partitions==[p for b in compact_blocks for p,arrays in b['parts']],
+                'complete compact Feature partition binding mismatch')
+        _complete_intervals([(b['start'],b['start']+b['count']) for b in compact_blocks],row_wire['row_count'])
+        require(feature_rows==[r for b in compact_blocks for r in b['_source_selection_rows']],
+                'complete compact Feature source-selection mismatch')
+        _publication_store.check(); source_marks.update(_publication_store.fingerprints)
+    else:
+        with VerifiedMatrixStore(maximum_matrix_bytes=options['maximum_resident_bytes'],
             maximum_parent_bytes=DEFAULT_LIMITS['maximum_parent_bytes']) as store:
-        covered,blocks,unused_sources,unused_parents=admit_feature_matrix_parts(store,
-            spec=spec,view=view,schema=schema,row_index=row_wire,partitions=partitions,
-            complete=True,universe_id=universe_id)
-        require(covered == spec['feature_sessions'] and feature_rows == [r for block in blocks
-                for r in block['_source_selection_rows']], 'complete Feature source-selection mismatch')
-        store.check(); source_marks.update(store.fingerprints)
-    selection=write_part(target,seal({'contract_version':'stock_feature_source_selection_v1',
+            covered,blocks,unused_sources,unused_parents=admit_feature_matrix_parts(store,
+                spec=spec,view=view,schema=schema,row_index=row_wire,partitions=partitions,
+                complete=True,universe_id=universe_id)
+            require(covered == spec['feature_sessions'] and feature_rows == [r for block in blocks
+                    for r in block['_source_selection_rows']], 'complete Feature source-selection mismatch')
+            store.check(); source_marks.update(store.fingerprints)
+    selection=write_part(target,seal({'contract_version':'stock_feature_source_selection_v2' if compact else 'stock_feature_source_selection_v1',
         'definition_ref':definition_ref,'feature_rows':feature_rows},'source_selection_ref'),'source_selection_ref')
     _spec(spec)
     require(all(file_fingerprint(p) == mark for p,mark in source_marks.items()),
             'Feature scope/Qlib changed during preparation')
-    value={'contract_version':'stock_feature_inputs_v2','definition':definition,'definition_ref':definition_ref,
+    value={'contract_version':'stock_feature_inputs_v3' if compact else 'stock_feature_inputs_v2','definition':definition,'definition_ref':definition_ref,
         'status':'COMPLETE','qlib_view':view,'qlib_manifest':qdesc,'schema':schema,'schema_digest':digest(schema),
         'row_index':rid,'source_selection':selection,'partitions':partitions}
     value['feature_inputs_ref']=digest({k:value[k] for k in ('contract_version','definition_ref',
         'qlib_manifest','schema_digest','row_index','source_selection','partitions')})
-    _atomic(target/'index.json',seal(value,'content_digest'))
+    if not compact: _atomic(target/'index.json',seal(value,'content_digest'))
     if progress is not None:
         progress({'stage':'feature_producer_complete','completed_dates':len(completed),
                   'total_dates':len(spec['feature_sessions']),**deepcopy(stats)})
+    if compact:
+        from .stock_matrix_reader import _published_feature_matrix
+        publication_external_bytes=caller_retained_bytes()
+        _publication_store.check()
+        _publish_compact_index(target/'index.json',seal(value,'content_digest'))
+        _publication_store.metrics.update({k:v for k,v in stats.items() if k.startswith(('feature_coverage_','feature_context_'))})
+        return _published_feature_matrix(target,value,_publication_store,row_wire,compact_blocks,
+                                         compact_sources,compact_parents)
     return load_stock_feature_inputs(target)
 
 

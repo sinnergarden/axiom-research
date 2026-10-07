@@ -314,7 +314,7 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
     path=feature_inputs.path if hasattr(feature_inputs,'path') else Path(feature_inputs)
     # A public object is a locator, never a trusted skip-validation marker.
     locator=_read(Path(path)/'index.json')
-    feature=(load_feature_matrix_index(path) if locator.get('contract_version')=='stock_feature_inputs_v2'
+    feature=(load_feature_matrix_index(path) if locator.get('contract_version') in ('stock_feature_inputs_v2','stock_feature_inputs_v3')
              else _V1FeatureAccess(load_stock_feature_inputs(path)))
     try:
         index=feature.to_dict(); spec=index['definition']['spec']; row_index=feature._row_index
@@ -363,7 +363,7 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
         with tempfile.TemporaryDirectory(prefix='.stock-matrix-',dir=target.parent) as temporary:
             stage=Path(temporary)/'complete'; stage.mkdir()
             publisher=_Publisher(stage,target,maximum_resident_bytes=options['maximum_resident_bytes'],metrics=stats)
-            if index['contract_version']=='stock_feature_inputs_v2':
+            if index['contract_version'] in ('stock_feature_inputs_v2','stock_feature_inputs_v3'):
                 partitions=list(index['partitions']); feature_selection=_read(index['source_selection']['path'])['feature_rows']
                 feature_schema=index['schema']; row_desc=index['row_index']
             else:
@@ -537,7 +537,7 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                     sum(_graph_bytes(state[name])-sys.getsizeof(state[name]) for name in
                         ('arrays','reasons','sources','chunks','training_offsets')))
                 del carrier,result,normalized_chunks,canonical,physical,wrapper,core_input,reasons,codes
-            selection=seal({'contract_version':'stock_matrix_source_selection_v1','feature_inputs_ref':feature.identity,
+            selection=seal({'contract_version':'stock_matrix_source_selection_v2' if index['contract_version']=='stock_feature_inputs_v3' else 'stock_matrix_source_selection_v1','feature_inputs_ref':feature.identity,
                 'feature_rows':feature_selection,'label_rows':label_selection},'source_selection_ref')
             schema={'features':feature_schema,'training_raw_labels':RAW_SCHEMA,
                 'training_normalized_labels':NORMALIZED_SCHEMA,'evaluation_raw_labels':RAW_SCHEMA}

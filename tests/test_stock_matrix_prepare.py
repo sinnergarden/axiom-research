@@ -395,12 +395,32 @@ class PublicMemoryMatrixPrepareTests(unittest.TestCase):
                 self.assertFalse(physical_root.exists())
                 view = _read(batch['prepared_view']['path'])
                 _verify_ref(view, 'prepared_view_ref')
+                def original_wire(descriptor, ref_key):
+                    # Physical native carriers preserve the original logical
+                    # document. Restore its exact saved coverage for this
+                    # independent oracle; production admission remains bounded.
+                    self.assertEqual(file_digest(descriptor['path']), descriptor['file_digest'])
+                    wire = _read(descriptor['path'])
+                    if wire.get('contract_version') == 'stock_native_json_carrier_v1':
+                        _verify_ref(wire, 'carrier_ref')
+                        original = deepcopy(wire['skeleton'])
+                        for slot in wire['coverage_slots']:
+                            blob = slot['bytes']
+                            self.assertEqual(file_digest(blob['path']), blob['buffer_digest'])
+                            self.assertEqual(Path(blob['path']).stat().st_size, blob['shape'][0])
+                            parent = original
+                            for key in slot['path'][:-1]: parent = parent[key]
+                            parent['coverage'] = _read(blob['path'])
+                        wire = original
+                    _verify_ref(wire, ref_key)
+                    self.assertEqual(wire[ref_key], descriptor[ref_key])
+                    return wire
                 raw_rows, normalized_rows = {}, {}
                 for part in view['partitions']:
                     if part['table'] not in ('training_raw_labels', 'training_normalized_labels'):
                         continue
-                    metadata = _read(part['metadata']['path'])
-                    raw = _read(metadata['raw_build']['path'])
+                    metadata = original_wire(part['metadata'], 'metadata_ref')
+                    raw = original_wire(metadata['raw_build'], 'label_ref')
                     ref = part['fold_spec_ref']
                     target = raw_rows if part['table'] == 'training_raw_labels' else normalized_rows
                     indexed = target.setdefault(ref, {})
