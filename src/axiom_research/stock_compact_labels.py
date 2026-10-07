@@ -37,14 +37,14 @@ def _raw_implementation():
 
 def _working(metrics, amount):
     """Measure each completed chunk once; never rescan an accumulated panel."""
-    total=metrics['_feature_bytes']+metrics['_store'].resident_bytes+metrics['_retained_raw_bytes']+amount
+    total=metrics['_feature_bytes']+metrics['_store'].resident_bytes+metrics['_retained_raw_bytes']+metrics.get('_price_view_bytes',0)+amount
     require(total<=metrics['_limits']['maximum_matrix_bytes'],'compact producer working byte budget exceeded')
     metrics['maximum_working_bytes']=max(metrics['maximum_working_bytes'],total)
 
 
 def _measured(metrics,value):
     return _size(value,maximum=metrics['_limits']['maximum_matrix_bytes'],
-        retained=metrics['_feature_bytes']+metrics['_store'].resident_bytes+metrics['_retained_raw_bytes'])
+        retained=metrics['_feature_bytes']+metrics['_store'].resident_bytes+metrics['_retained_raw_bytes']+metrics.get('_price_view_bytes',0))
 
 
 def _clock(value):
@@ -131,29 +131,35 @@ def _query(spec,cutoff,days):
     return query,anchor
 
 
-def _raw(data,spec,cutoff,days,cache,metrics,price_views):
-    from .labels import _forward_rows, _query_context
+def _price_view(data,spec,cutoff,days,metrics):
+    """Select one full public cutoff domain, never relabel sliced Data wires."""
+    from .labels import _query_context
     from .data_adapter import _versioned
     from axiom_data import adjust_prices
     query,anchor=_query(spec,cutoff,days)
     query_wire={f.name:(dict(value) if isinstance(value,Mapping) else list(value) if isinstance(value,tuple) else value)
         for f in dataclass_fields(query) for value in (getattr(query,f.name),)}
-    query_key=digest({'snapshot':spec['snapshot'],'query':query_wire})
     # Data owns its internal read allocations. Bound requested cells before
     # calling it, then charge the actual adjusted wire once at this boundary.
     _working(metrics,len(query.sessions)*len(spec['universe'])*4096+len(days)*len(spec['universe'])*1024)
-    if query_key in price_views:
-        records,meta,context,source=price_views[query_key]; metrics['admitted_price_view_reuses']+=1
-    else:
-        price=data.read(snapshot=spec['snapshot'],query=query)
-        factors=data.read(snapshot=spec['snapshot'],query=replace(query,domain='adjustment_factors',fields=('factor',)))
-        metrics['data_read_calls']+=2
-        adjusted=adjust_prices(price,factors,fields=('open','close'),anchor_session=anchor,
-                              decision_session=anchor,factor_field='factor')
-        records,meta,context=_versioned(adjusted,'label_outcomes')
-        _working(metrics,2*_measured(metrics,[records,meta,context])+len(days)*len(spec['universe'])*1024)
-        _query_context(context,spec['calendar']); source=_source_view(records,meta,context)
-        price_views[query_key]=(records,meta,context,source)
+    price=data.read(snapshot=spec['snapshot'],query=query)
+    factors=data.read(snapshot=spec['snapshot'],query=replace(query,domain='adjustment_factors',fields=('factor',)))
+    metrics['data_read_calls']+=2
+    adjusted=adjust_prices(price,factors,fields=('open','close'),anchor_session=anchor,
+                          decision_session=anchor,factor_field='factor')
+    records,meta,context=_versioned(adjusted,'label_outcomes')
+    _working(metrics,2*_measured(metrics,[records,meta,context])+len(days)*len(spec['universe'])*1024)
+    _query_context(context,spec['calendar']); source=_source_view(records,meta,context)
+    metrics['_price_view_bytes']=_measured(metrics,[records,meta,context,source])
+    metrics['price_domains'].append({'cutoff':cutoff,'query_ref':digest(query_wire),
+        'query':query_wire,'price_view_ref':source['price_view_ref'],'data_read_calls':2,
+        'resident_bytes':metrics['_price_view_bytes']})
+    return records,meta,context,source
+
+
+def _raw(spec,cutoff,days,cache,metrics,price_view):
+    from .labels import _forward_rows
+    records,meta,context,source=price_view
     definition={'price_view':source,'snapshot':spec['snapshot'],'cutoff':cutoff,
         'calendar':spec['calendar'],'universe':spec['universe'],'sessions':days,
         'formula':'close(f+5) / open(f+1) - 1','price_basis':'common_anchor_adjusted_v1',
@@ -169,7 +175,7 @@ def _raw(data,spec,cutoff,days,cache,metrics,price_views):
         return {**descriptor,'file_digest':store.hashes[descriptor['path']],'target_ref':value['target_ref']},rows
     rows=list(_forward_rows(records,meta,context,calendar=spec['calendar'],features=days,
         horizon_sessions=5,source_ref=source['price_view_ref']))
-    _working(metrics,_measured(metrics,rows)+2*_measured(metrics,[records,meta,context]))
+    _working(metrics,_measured(metrics,rows))
     metrics['raw_operator_calls']+=1
     descriptor=_publish(target,definition,rows,budgets=metrics['_limits'],store=metrics['_store'])
     return descriptor,rows
@@ -178,7 +184,8 @@ def _raw(data,spec,cutoff,days,cache,metrics,price_views):
 def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
     from axiom_engine.core import execute_cs_zscore_batch
     from axiom_engine._implementation import IMPLEMENTATION_REF
-    spec=_view_data(feature)['definition']['spec']; width=len(spec['universe'])
+    fd=_view_data(feature); spec=fd['definition']['spec']; width=len(spec['universe'])
+    feature_ref=fd['definition']['feature_view_ref']
     positions={d:i for i,d in enumerate(spec['feature_sessions'])}
     offsets=[positions[d]*width+i for d in days for i in range(width)]
     _working(metrics,len(rows)*(len(spec['ordered_features'])*96+3072))
@@ -190,7 +197,7 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
                     all(a is None or _instant(a)<=_instant(cutoff) for a in f['availability']),
                     'training Feature native clock exceeds fit')
         reasons.append(reason)
-    cohort={'contract_version':'stock_compact_cohort_v1','feature_view_ref':feature.identity,'cutoff':cutoff,
+    cohort={'contract_version':'stock_compact_cohort_v1','feature_view_ref':feature_ref,'cutoff':cutoff,
         'sessions':days,'universe':spec['universe'],'raw_refs':[d['target_ref'] for d in raw_parts],
         'eligibility_reasons':reasons,'eligible_keys':[[r['security_id'],r['feature_session']]
             for r,reason in zip(rows,reasons) if reason is None]}
@@ -204,6 +211,7 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
         store=metrics['_store']; desc={'path':str(artifact.absolute())}
         value,normalized=read_target(store,desc,expected=definition,raw_rows=rows)
         metrics['normalized_cache_hits']+=1
+        fd['store'].check()
         return {**desc,'file_digest':store.hashes[desc['path']],'target_ref':value['target_ref']},list(normalized),value['core_ref'],cohort
     arrays={name:array(code) for name,code in {'values':'d','value_validity':'B','value_reason_codes':'i',
         'fact_available_at_utc_us':'q','reference_member':'B','reference_available_at_utc_us':'q',
@@ -216,7 +224,7 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
     raw_index={(r['security_id'],r['feature_session']):r for r in rows}
     _working(metrics,_measured(metrics,[fr,cohort,indexed,raw_index])+len(rows)*4096)
     for i,day in enumerate(days):
-        section=normalization_section_inputs(raw_like,feature_ref=feature.identity,feature_rows=indexed,
+        section=normalization_section_inputs(raw_like,feature_ref=feature_ref,feature_rows=indexed,
             session=day,securities=spec['universe'],width=len(spec['ordered_features']),cutoff=cutoff,raw_index=raw_index)
         sources[day]={'bindings':sorted(section['plan']['sources'],key=lambda r:r['id']),
                       'source_sets':[['offline_eligibility'],['raw_labels']]}
@@ -246,6 +254,7 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
             'invalid_reason':None if valid else reasons[i] or 'NORMALIZATION_UNDEFINED'})
     desc=_publish(target,definition,normalized,budgets=metrics['_limits'],normalized=True,core_ref=core_ref,cohort=cohort,
                   store=metrics['_store'])
+    fd['store'].check()
     return desc,normalized,core_ref,cohort
 
 
@@ -281,6 +290,7 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
     stats={'cache_hit':False,'data_read_calls':0,'supplier_calls':0,'feature_core_calls':0,'core_calls':0,
         'label_core_calls':0,'raw_operator_calls':0,'raw_cache_hits':0,'normalized_cache_hits':0,
         'admitted_price_view_reuses':0,'account_calls':0,'train_calls':0,'predict_calls':0,'fold_queries':[],
+        'price_domains':[],
         'maximum_working_bytes':fd['store'].resident_bytes,
         '_limits':budgets,'_feature_bytes':fd['store'].resident_bytes+_caller_bytes,'_retained_raw_bytes':0,'_store':store}
     try:
@@ -299,17 +309,43 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             require((previous is None or fold['oos_trade_sessions'][0]>previous) and
                     set(training+inference)<=set(spec['feature_sessions']),'fold grid/chronology mismatch')
             previous=fold['oos_trade_sessions'][-1]; plans.append((fold,training,inference))
-        cache=Path(destination).absolute()/'compact-cache'; records=[]; raw_partitions=[]; normalized_partitions=[]
-        for fold,training,inference in plans:
-            parts=[]; rows=[]; before={k:stats[k] for k in ('data_read_calls','admitted_price_view_reuses')}
-            for start in range(0,len(training),options['row_block_sessions']):
-                days=training[start:start+options['row_block_sessions']]; views={}
-                desc,chunk=_raw(data,spec,fold['fit_cutoff'],days,cache,stats,views)
+        cache=Path(destination).absolute()/'compact-cache'; records=[]; domains={}; raw_outputs=[]
+        for i,(fold,training,inference) in enumerate(plans):
+            chunks=[training[n:n+options['row_block_sessions']] for n in range(0,len(training),options['row_block_sessions'])]
+            raw_outputs.append({'raw_parts':[None]*len(chunks),'evaluation':None})
+            stats['fold_queries'].append({'fold_spec_ref':digest(fold),'data_read_calls':0,
+                'admitted_price_view_reuses':0,'price_domain_refs':[]})
+            jobs=[('raw_parts',n,days,fold['fit_cutoff']) for n,days in enumerate(chunks)]
+            jobs.append(('evaluation',None,inference,fold['evaluation_cutoff']))
+            for role,n,days,cutoff in jobs:
+                group=domains.setdefault(_instant(cutoff),{'cutoff':cutoff,'days':set(),'jobs':[]})
+                group['days'].update(days); group['jobs'].append((i,role,n,days,cutoff))
+        # One public selected price/factor domain per exact cutoff; release it
+        # before selecting the next cutoff. Raw children retain the full query
+        # identity, never an invented sliced DataBatch contract.
+        for group in domains.values():
+            stats['_price_view_bytes']=0
+            price_view=_price_view(data,spec,group['cutoff'],sorted(group['days']),stats)
+            for use,(i,role,n,days,cutoff) in enumerate(group['jobs']):
+                report=stats['fold_queries'][i]; domain_ref=price_view[3]['price_view_ref']
+                if domain_ref not in report['price_domain_refs']: report['price_domain_refs'].append(domain_ref)
+                if use: stats['admitted_price_view_reuses']+=1; report['admitted_price_view_reuses']+=1
+                else: report['data_read_calls']+=2
+                desc,chunk=_raw(spec,cutoff,days,cache,stats,price_view)
+                if role=='raw_parts': raw_outputs[i][role][n]=desc
+                else: raw_outputs[i][role]=desc
+                del chunk
+            del price_view
+            stats['_price_view_bytes']=0
+        from .stock_compact_batch import read_target
+        for i,(fold,training,inference) in enumerate(plans):
+            parts=raw_outputs[i]['raw_parts']; rows=[]
+            for desc in parts:
+                _,chunk=read_target(store,desc); chunk=list(chunk)
                 chunk_bytes=_measured(stats,chunk); _working(stats,chunk_bytes)
-                stats['_retained_raw_bytes']+=chunk_bytes
-                parts.append(desc); rows.extend(chunk); views.clear()
+                stats['_retained_raw_bytes']+=chunk_bytes; rows.extend(chunk)
             norm,nrows,core_ref,cohort=_normalized(parts,rows,feature,fold['fit_cutoff'],training,cache,stats)
-            ev,erows=_raw(data,spec,fold['evaluation_cutoff'],inference,cache,stats,{})
+            ev=raw_outputs[i]['evaluation']
             positions={d:i for i,d in enumerate(spec['feature_sessions'])}
             training_offsets=[positions[r['feature_session']]*width+spec['universe'].index(r['security_id'])
                 for r in nrows if r['valid']]
@@ -323,13 +359,10 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             records.append({'fold_spec':deepcopy(fold),'raw_parts':parts,'normalized':norm,'evaluation':ev,
                 'training_offsets':training_offsets,'inference_offsets':inference_offsets,'core_ref':core_ref,
                 'cohort_ref':digest(cohort),'training_binding':binding})
-            stats['fold_queries'].append({'fold_spec_ref':digest(fold),
-                'data_read_calls':stats['data_read_calls']-before['data_read_calls'],
-                'admitted_price_view_reuses':stats['admitted_price_view_reuses']-before['admitted_price_view_reuses']})
             if progress: progress({'stage':'compact_labels','completed':len(records),'total':len(plans)})
             # Completed fold facts live in typed targets; release their Python
             # working panels before the next cutoff-specific Data selection.
-            del rows,nrows,erows,selected,joined,chunk,cohort
+            del rows,nrows,selected,joined,chunk,cohort
             stats['_retained_raw_bytes']=0
         target.parent.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='.compact-batch-',dir=target.parent) as temporary:

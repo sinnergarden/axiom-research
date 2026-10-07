@@ -112,6 +112,7 @@ def read_target(store,descriptor,expected=None,raw_rows=None):
                     'compact target endpoint offset mismatch')
             require(0<=int(arrays['source_codes'][i])<len(value['source_dictionary']), 'compact target source code mismatch')
         if not valid: require(float(arrays['values'][i])==0.0,'compact null physical value must be zero')
+        if not at: require(int(arrays['availability'][i])==0,'compact null physical clock must be zero')
         require(not at or int(arrays['availability'][i])<=cutoff, 'compact target clock exceeds cutoff')
     require(raw_rows is None or len(raw_rows)==count,'normalized Raw key alignment mismatch')
     store.check(); return value,TargetRows(value,arrays,raw_rows)
@@ -213,7 +214,10 @@ class CompactState:
             require(bool(np.isfinite(X).all()) and bool(np.isfinite(y).all()) and bool(np.isfinite(P).all()),'compact active matrix must be finite')
             for a in (X,y,P): a.flags.writeable=False
             payload.update(X=X,y=y,P=P)
+            self.store.metrics['training_projection_calls']=self.store.metrics.get('training_projection_calls',0)+1
+            self.store.metrics['matrix_allocated_bytes']=self.store.metrics.get('matrix_allocated_bytes',0)+sum(a.nbytes for a in (X,y,P))
         else:
+            self.store.metrics['evaluation_projection_calls']=self.store.metrics.get('evaluation_projection_calls',0)+1
             dataset=seal({'contract_version':'stock_fold_dataset_v3','prepared_view_ref':self.view['prepared_view_ref'],
                 'feature_ref':features['feature_ref'],'label_ref':labels['label_ref'],'raw_label_refs':raw_refs,
                 'fold_spec_ref':digest(spec),'fit_cutoff':spec['fit_cutoff'],'ordered_features':common['ordered_features'],
@@ -303,7 +307,7 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
             require(nv['definition']['sessions']==training and nv['definition']['cutoff']==spec['fit_cutoff'] and
                     nv['definition']['raw_refs']==[d['target_ref'] for d in record['raw_parts']] and
                     nv['core_ref']==record['core_ref'] and digest(nv['cohort'])==record['cohort_ref'] and
-                    nv['cohort']['feature_view_ref']==feature.identity and nv['cohort']['cutoff']==spec['fit_cutoff'] and
+                    nv['cohort']['feature_view_ref']==fd['definition']['feature_view_ref'] and nv['cohort']['cutoff']==spec['fit_cutoff'] and
                     ev['definition']['sessions']==inference and ev['definition']['cutoff']==spec['evaluation_cutoff'],
                     'compact normalized/cohort/evaluation linkage mismatch')
             require(nv['definition']['universe']==common['universe'] and nv['definition']['calendar']==common['calendar'] and
@@ -359,7 +363,7 @@ def _raw_binding(definition,common,cutoff):
         'compact Raw query/calendar/vintage binding mismatch')
 
 
-def load_compact_projection(inputs,spec):
+def load_compact_projection(inputs,spec,*,evaluation=False):
     # The manifest and view share one actual-byte admission. No preliminary
     # view decode/hash followed by a second independent read.
     descriptor=inputs['prepared_view']; store=OwnedStore()
@@ -369,6 +373,7 @@ def load_compact_projection(inputs,spec):
         state=load_compact_state(manifest,publication_store=store)
     except BaseException: store.close(); raise
     try:
-        projection=state.project(inputs,spec); projection._owned_state=state
+        projection=(state.project_evaluation(inputs,spec,batch_ref=manifest['batch_ref']) if evaluation else state.project(inputs,spec))
+        projection._owned_state=state
         return projection
     except BaseException: state.close(); raise

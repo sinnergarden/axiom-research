@@ -199,7 +199,8 @@ class CompactV3Tests(unittest.TestCase):
                     state=_data(batch)['matrix_state']; record=state.view['fold_targets'][0]
                     normalized=list(state.targets[record['normalized']['target_ref']][1])
                     raws=[]
-                    for wire,desc in zip(data.adjusted,record['raw_parts']):
+                    wire=next(w for w in data.adjusted if next(iter(w['context']['query']['cutoff_by_session'].values()))==fold['fit_cutoff'])
+                    for desc in record['raw_parts']:
                         actual=list(state.targets[desc['target_ref']][1]); days=state.targets[desc['target_ref']][0]['definition']['sessions']
                         old=build_forward_labels(Batch(wire),calendar=f.calendar,feature_sessions=days)
                         for a,b in zip(actual,old['rows']):
@@ -254,7 +255,7 @@ class CompactV3Tests(unittest.TestCase):
                 self.assertNotEqual(again['batch_ref'],manifest['batch_ref'])
                 self.assertEqual((stats['raw_operator_calls'],stats['core_calls']),(0,0))
                 self.assertEqual(stats['raw_cache_hits'],4); self.assertEqual(stats['normalized_cache_hits'],1)
-                self.assertEqual(stats['data_read_calls'],8)
+                self.assertEqual(stats['data_read_calls'],4)
 
     def test_budget_rejects_without_rereading_or_losing_pending_handle(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -458,6 +459,132 @@ class CompactV3Tests(unittest.TestCase):
                 value.pop('target_ref'); value=seal(value,'target_ref'); path=target/(role+'.json'); write_json(path,value)
                 with OwnedStore() as store,self.assertRaises(ValueError):
                     read_target(store,{'path':str(path),'file_digest':file_digest(path),'target_ref':value['target_ref']})
+
+
+    def test_feature_structural_schema_and_masked_physical_bytes_rejected(self):
+        for role in ('schema_keys','schema_missing','masked_value','masked_clock'):
+            with self.subTest(role=role),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp)
+                def unknown(day,rows):
+                    rows[0]['values'][0]=None; rows[0]['validity'][0]=False
+                    rows[0]['availability'][0]=None; rows[0]['reasons'][0]=['synthetic_unknown']
+                _,path=self.fixture(root,transform=unknown); index=_read(path/'index.json')
+                if role=='schema_keys': index['schema'][0].pop('unit')
+                elif role=='schema_missing': index['schema'][0]['missing']='fill_zero'
+                else:
+                    part=index['partitions'][0]; key='values' if role=='masked_value' else 'available_at_utc_us'
+                    old=part['buffers'][key]; code='d' if role=='masked_value' else 'q'
+                    values=list(struct.unpack('<'+code*(old['shape'][0]*old['shape'][1]),Path(old['path']).read_bytes()))
+                    values[0]=7.0 if role=='masked_value' else 7
+                    part['buffers'][key]=write_buffer(path,values,dtype=old['dtype'],shape=old['shape'])
+                    part.pop('partition_ref'); index['partitions'][0]=seal(part,'partition_ref')
+                write_json(path/'index.json',index)
+                with self.assertRaisesRegex(ValueError,'schema|column|physical'):
+                    load_stock_feature_view(path)
+
+    def test_target_masked_clock_rejected_after_validity_and_refs_are_resealed(self):
+        from axiom_research.stock_compact_labels import _publish
+        from test_stock_labels import batch,build,CALENDAR,CUTOFF
+        raw=build(batch()); rows=deepcopy(raw['rows'])
+        for row in rows: row.update(**{'return':None},valid=False,invalid_reason='SYNTHETIC_UNKNOWN',label_available_at=None)
+        definition={'sessions':[CALENDAR[0]],'universe':['A','B'],'calendar':list(CALENDAR),'cutoff':CUTOFF}
+        with tempfile.TemporaryDirectory() as temp:
+            target=Path(temp)/'target'; desc=_publish(target,definition,rows,budgets=limits())
+            value=_read(desc['path']); value['buffers']['availability']=write_buffer(target,[1,0],dtype='int64_le',shape=[2])
+            value.pop('target_ref'); value=seal(value,'target_ref'); path=target/'masked-clock.json'; write_json(path,value)
+            with OwnedStore() as store,self.assertRaisesRegex(ValueError,'null physical clock'):
+                read_target(store,{'path':str(path),'file_digest':file_digest(path),'target_ref':value['target_ref']})
+
+    @unittest.skipUnless(hasattr(os,'fork'),'fork unavailable')
+    def test_fork_inherited_owner_handles_rejected_and_fresh_child_admission_allowed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); f,path=self.fixture(root)
+            with load_stock_feature_view(path) as view:
+                manifest,_=self.prepare(f,view,root,folds=f.folds()[:1]); expected=view.identity; fd=_view_data(view)
+                with load_stock_ml_batch_inputs(manifest,feature_inputs=view) as batch:
+                    read,write=os.pipe(); child=os.fork()
+                    if child==0:
+                        os.close(read); result={}
+                        try:
+                            fold=manifest['folds'][0]
+                            for name,call in (
+                                ('feature',lambda:view.identity),('batch',lambda:batch.identity),
+                                ('borrow',lambda:load_stock_ml_batch_inputs(manifest,feature_inputs=view)),
+                                ('projection',lambda:batch._matrix_project(fold['input_manifest'],fold['fold_spec'])),
+                                ('store',fd['store'].check)):
+                                try: call(); result[name]='ACCEPTED'
+                                except ValueError as error: result[name]=str(error)
+                            with load_stock_feature_view(path) as fresh: result['fresh_identity']=fresh.identity
+                        except BaseException as error: result['error']=repr(error)
+                        os.write(write,json.dumps(result).encode()); os.close(write); os._exit(0)
+                    os.close(write); result=json.loads(os.read(read,8192)); os.close(read); _,status=os.waitpid(child,0)
+                    self.assertEqual(status,0); self.assertNotIn('error',result)
+                    for name in ('feature','batch','borrow','projection','store'):
+                        self.assertIn('another process',result[name])
+                    self.assertEqual(result['fresh_identity'],expected)
+                    self.assertEqual(batch.identity,manifest['batch_ref'])
+
+    def test_cutoff_domain_reads_reused_with_exact_public_query_and_selected_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); f,path=self.fixture(root); stats={}
+            with load_stock_feature_view(path) as view:
+                manifest,data=self.prepare(f,view,root,stats)
+                self.assertEqual(stats['data_read_calls'],10); self.assertEqual(stats['admitted_price_view_reuses'],11)
+                self.assertEqual(len(stats['price_domains']),5)
+                self.assertEqual([q['data_read_calls'] for q in stats['fold_queries']],[4,2,2,2])
+                self.assertEqual([q['admitted_price_view_reuses'] for q in stats['fold_queries']],[2,3,3,3])
+                self.assertEqual(len({digest(query) for query in data.queries}),10)
+                with load_stock_ml_batch_inputs(manifest,feature_inputs=view) as batch:
+                    from axiom_research.stock_batch import _data
+                    state=_data(batch)['matrix_state']; evaluation_refs=[]
+                    for rec in state.view['fold_targets']:
+                        refs=[]
+                        for desc in rec['raw_parts']+[rec['evaluation']]:
+                            value,_=state.targets[desc['target_ref']]; source=value['definition']['price_view']; refs.append(source['price_view_ref'])
+                            wire=next(w for w in data.adjusted if w['context']['query']==source['context']['query'])
+                            self.assertEqual(source['records_ref'],digest(wire['records']))
+                            self.assertEqual(source['field_meta_ref'],digest(wire['field_meta']))
+                        self.assertEqual(len(set(refs[:-1])),1); evaluation_refs.append(refs[-1])
+                    self.assertEqual(len(set(evaluation_refs)),1)
+                    self.assertEqual(len({state.targets[r['raw_parts'][0]['target_ref']][0]['definition']['price_view']['price_view_ref'] for r in state.view['fold_targets']}),4)
+
+    def test_daily_normalization_performs_no_feature_file_stat_in_loop(self):
+        from axiom_research.stock_compact_labels import normalization_section_inputs
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); f,path=self.fixture(root); seen=[]
+            with load_stock_feature_view(path) as view:
+                store=_view_data(view)['store']
+                def daily(*args,**kwargs):
+                    seen.append(store.metrics['source_stat_calls']); return normalization_section_inputs(*args,**kwargs)
+                with patch('axiom_research.stock_compact_labels.normalization_section_inputs',side_effect=daily):
+                    manifest,_=self.prepare(f,view,root,folds=f.folds()[:1])
+                self.assertEqual(len(seen),65); self.assertEqual(len(set(seen)),1)
+                self.assertGreater(store.metrics['source_stat_calls'],seen[-1])
+                with load_stock_ml_batch_inputs(manifest,feature_inputs=view): pass
+
+    def test_standalone_saved_load_uses_evaluation_only_projection(self):
+        from axiom_research.stock_compact_batch import CompactState
+        actual=CompactState.project_evaluation; readings=[]
+        def evaluation(state,*args,**kwargs):
+            result=actual(state,*args,**kwargs); readings.append(deepcopy(state.store.metrics)); return result
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); f,path=self.fixture(root)
+            with load_stock_feature_view(path) as view:
+                manifest,_=self.prepare(f,view,root,folds=f.folds()[:1]); fold=manifest['folds'][0]
+                with load_stock_ml_batch_inputs(manifest,feature_inputs=view) as batch:
+                    with patch('axiom_research.feature_catalog.load_feature_catalog',return_value=f.catalog), \
+                         patch('axiom_research.stock_ml._implementation',return_value=f.implementation), \
+                         patch('axiom_research.stock_ml._environment',return_value=f.environment), \
+                         patch('axiom_research.stock_training.fit_predict_stock_model',side_effect=backend):
+                        run=build_stock_ml_fold_from_saved_inputs(fold['input_manifest'],fold_spec=fold['fold_spec'],destination=root/'folds',batch=batch)
+                with patch.object(CompactState,'project',side_effect=AssertionError('training projection in ordinary load')), \
+                     patch('axiom_research.stock_compact_batch.training_matrix',side_effect=AssertionError('X allocation in ordinary load')), \
+                     patch.object(CompactState,'project_evaluation',new=evaluation):
+                    saved=load_stock_ml_fold(run.path)
+                self.assertEqual(saved.predictions(),run.predictions()); self.assertEqual(len(readings),1)
+                self.assertEqual(readings[0]['evaluation_projection_calls'],1)
+                self.assertEqual(readings[0].get('training_projection_calls',0),0)
+                self.assertEqual(readings[0].get('matrix_allocated_bytes',0),0)
 
 
 class OwnedBytesTests(unittest.TestCase):

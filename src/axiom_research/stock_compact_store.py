@@ -71,22 +71,29 @@ class OwnedStore:
     """
     def __init__(self, budgets=None, resolver=None, shared_bytes=0, shared_source_bytes=0):
         self.limits=limits(budgets); self.resolve=resolver or (lambda p:Path(p))
+        self.owner_pid=os.getpid()
         self.shared_bytes=shared_bytes; self.shared_source_bytes=shared_source_bytes
         self.resident_bytes=0; self.lease_bytes=0
         self.borrowers=0; self.closed=False; self.marks={}; self.hashes={}; self.arrays={}; self.json={}
         self.check_hook=None
         self.metrics={'file_hash_calls':0,'hash_bytes':0,'source_bytes':0,'json_decode_calls':0,
-                      'owned_buffer_bytes':0,'mmap_opens':0,'fold_projection_calls':0,'largest_parent_bytes':0}
+                      'owned_buffer_bytes':0,'mmap_opens':0,'fold_projection_calls':0,'largest_parent_bytes':0,
+                      'source_stat_calls':0,'lifecycle_check_calls':0}
+
+    def _check_owner(self):
+        require(self.owner_pid==os.getpid(),'compact store belongs to another process')
 
     @property
     def maximum_matrix_bytes(self): return self.limits['maximum_matrix_bytes']
 
     def reserve(self, amount):
+        self._check_owner()
         require(type(amount) is int and amount>=0 and
                 self.shared_bytes+self.resident_bytes+self.lease_bytes+amount<=self.maximum_matrix_bytes,
                 'compact resident byte budget exceeded')
 
     def read(self, descriptor, *, retain=False, parent=False):
+        self._check_owner()
         require(not self.closed,'compact store is closed')
         path=descriptor['path']; expected=descriptor.get('file_digest')
         require(type(path) is str and Path(path).is_absolute() and (expected is None or reference(expected)),
@@ -99,6 +106,7 @@ class OwnedStore:
             require(path in self.arrays or path in self.json,'released ingress cannot be readmitted inside a view')
             return None
         mark=file_fingerprint(physical)
+        self.metrics['source_stat_calls']+=1
         require(self.shared_source_bytes+self.metrics['source_bytes']+mark[2]<=self.limits['maximum_source_bytes'],
                 'compact source byte budget exceeded')
         if parent:
@@ -110,6 +118,7 @@ class OwnedStore:
             payload=stream.read(mark[2]+1)
             require(len(payload)==mark[2] and _stat(os.fstat(stream.fileno()))==mark and
                     file_fingerprint(physical)==mark,'compact source changed during read')
+            self.metrics['source_stat_calls']+=1
         actual='sha256:'+sha256(payload).hexdigest()
         require(expected is None or actual==expected,'compact file digest mismatch')
         self.marks[path]=mark; self.hashes[path]=actual
@@ -118,6 +127,7 @@ class OwnedStore:
         return payload
 
     def read_json(self, descriptor, *, key=None, legacy=False, keep=True):
+        self._check_owner()
         path=descriptor['path']
         if path in self.json:
             self.check_path(path); value=self.json[path]
@@ -141,6 +151,7 @@ class OwnedStore:
         return value
 
     def buffer(self, descriptor):
+        self._check_owner()
         fields(descriptor,BUFFER_FIELDS,'exact compact buffer descriptor required')
         require(descriptor['dtype'] in DTYPES and descriptor['file_digest']==descriptor['buffer_digest'] and
                 type(descriptor['shape']) is list and bool(descriptor['shape']) and
@@ -166,14 +177,17 @@ class OwnedStore:
         return array
 
     def check_path(self,path):
+        self._check_owner(); self.metrics['source_stat_calls']+=1
         require(file_fingerprint(self.resolve(path))==self.marks[path], 'compact source changed; fresh admission required')
 
     def check(self):
+        self._check_owner(); self.metrics['lifecycle_check_calls']+=1
         require(not self.closed,'compact store is closed')
         for path in self.marks: self.check_path(path)
         if self.check_hook is not None: self.check_hook()
 
     def close(self):
+        self._check_owner()
         require(self.borrowers==0,'compact backing still borrowed')
         self.arrays.clear(); self.json.clear(); self.closed=True
 
@@ -194,6 +208,7 @@ def _size(value, *, maximum=None,retained=0):
 def _view_data(handle, *, check=True):
     require(type(handle) is StockFeatureView and handle in _VIEWS,'owner-loaded compact Feature handle required')
     value=_VIEWS[handle]; require(not value['closed'],'compact Feature handle is closed')
+    require(value['owner_pid']==os.getpid(),'compact Feature handle belongs to another process')
     if check: value['store'].check()
     return value
 
@@ -201,7 +216,8 @@ def _view_data(handle, *, check=True):
 class StockFeatureView:
     __slots__=('__weakref__',)
     def __init__(self,token,value):
-        require(token is _TOKEN,'Feature view requires owner loader'); _VIEWS[self]=value
+        require(token is _TOKEN,'Feature view requires owner loader')
+        value['owner_pid']=os.getpid(); _VIEWS[self]=value
     @property
     def identity(self): return _view_data(self)['definition']['feature_view_ref']
     @property
@@ -242,8 +258,8 @@ def load_stock_feature_view(path, *, limits=None):
                     'Feature original cutoff must belong to its session')
         require(set(days)<=set(spec['calendar']) and set(spec['cutoff_by_session'])==set(spec['read_sessions']),
                 'Feature calendar/cutoff scope mismatch')
-        schema=index['schema']; require([c['name'] for c in schema]==columns and all(c['dtype']=='float64' for c in schema),
-                                      'Feature typed schema mismatch')
+        from .stock_matrix_reader import _schema
+        schema=index['schema']; _schema(schema,columns)
         owned_path(index['row_index'],path)
         row_index=store.read_json(index['row_index'],key='row_index_ref')
         require(row_index['sessions']==days and row_index['security_ids']==securities and
@@ -299,6 +315,9 @@ def load_stock_feature_view(path, *, limits=None):
                                 (at is None or int(arrays['available_at_utc_us'][i,j])==instant_us(at)),
                                 'Feature buffer/metadata clock or validity mismatch')
                         value=float(arrays['values'][i,j]); require(np.isfinite(value),'Feature physical value must be finite')
+                        require(flag or value==0.0,'Feature null physical value must be zero')
+                        require(at is not None or int(arrays['available_at_utc_us'][i,j])==0,
+                                'Feature null physical clock must be zero')
                         row['values'][k]=value if flag else None
                         require(at is None or _instant(at)<=_instant(row['knowledge_cutoff']),
                                 'Feature field exceeds its original cutoff')

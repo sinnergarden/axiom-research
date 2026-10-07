@@ -8,6 +8,7 @@ from copy import deepcopy
 from collections import Counter
 from pathlib import Path
 from weakref import WeakKeyDictionary
+import os
 import time
 
 from .stock_artifacts import digest
@@ -40,6 +41,7 @@ def _descriptors(inputs):
 def _data(batch):
     require(type(batch) is StockMLBatchInputs and batch in _DATA, 'validated saved batch required')
     value = _DATA[batch]
+    require(value['owner_pid']==os.getpid(), 'saved batch belongs to another process')
     require(not value['closed'], 'saved batch is closed')
     return value
 
@@ -57,6 +59,7 @@ class StockMLBatchInputs:
 
     def __init__(self, token, value):
         require(token is _TOKEN, 'saved batch requires initialization')
+        value['owner_pid']=os.getpid()
         _DATA[self] = value
 
     @property

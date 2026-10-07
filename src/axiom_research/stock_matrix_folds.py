@@ -188,8 +188,11 @@ def _load_matrix_fold(path, *, projection,batch,ingress):
         value=documents[name]; require(value[key]==fold[key],'fold stage reference mismatch'); saved[name]=value
     own=projection is None
     if own:
-        projection=(batch._project_evaluation(inputs,spec) if batch is not None
-                    else _projection(inputs,spec,batch))
+        if batch is not None: projection=batch._project_evaluation(inputs,spec)
+        elif inputs.get('contract_version')=='stock_ml_saved_inputs_v3':
+            from .stock_compact_batch import load_compact_projection
+            projection=load_compact_projection(inputs,spec,evaluation=True)
+        else: projection=_projection(inputs,spec,batch)
     try:
         features,labels=projection.features,projection.labels; common=projection.common
         require(saved['feature-slice.json']==features and saved['label-slice.json']==labels,'saved matrix slice/parent mismatch')
