@@ -10,20 +10,23 @@ import json
 import tempfile
 import time
 
-from .stock_artifacts import digest, file_digest, write_json
+from .stock_artifacts import digest, digest_array_rows, file_digest, write_json
 from .stock_fold_inputs import require, seal, validate_spec
 from .stock_label_contracts import (_eligible_reason, _instant, NORMALIZATION_SPEC,
-    RAW_TARGET_SCHEMA, NORMALIZED_TARGET_SCHEMA, normalization_section_inputs, core_clock)
+    RAW_TARGET_SCHEMA, NORMALIZED_TARGET_SCHEMA, _normalization_sources, core_clock)
 from .stock_matrix_storage import write_buffer, write_part, instant_us
 from .stock_compact_store import (_view_data, StockFeatureView, load_stock_feature_view,
-    feature_rows, OwnedStore, limits, sealed, _size)
+    iter_feature_rows, iter_feature_eligibility, OwnedStore, limits, sealed, _size)
 
 
 def _implementation():
-    return digest({name:file_digest(Path(__file__).with_name(name)) for name in (
+    import inspect
+    sources={name:file_digest(Path(__file__).with_name(name)) for name in (
         'labels.py','stock_label_contracts.py','stock_compact_labels.py',
         'stock_compact_store.py','stock_compact_batch.py','stock_batch.py',
-        'stock_fold_inputs.py','stock_matrix_storage.py')})
+        'stock_fold_inputs.py','stock_matrix_storage.py')}
+    sources['canonical_training_binding']=inspect.getsource(digest_array_rows)
+    return digest(sources)
 
 
 def _input_environment():
@@ -199,13 +202,13 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
     feature_ref=fd['definition']['feature_view_ref']
     positions={d:i for i,d in enumerate(spec['feature_sessions'])}
     offsets=[positions[d]*width+i for d in days for i in range(width)]
-    _working(metrics,len(rows)*(len(spec['ordered_features'])*96+3072))
-    fr=feature_rows(feature,offsets); reasons=[]
-    for row,f in zip(rows,fr):
-        reason=_eligible_reason(row,f,len(spec['ordered_features']),_instant(cutoff))
+    _working(metrics,len(rows)*4096+len(spec['ordered_features'])*96+3072)
+    reasons=[]; instant=_instant(cutoff); cutoff_us=instant_us(cutoff)
+    for row,facts in zip(rows,iter_feature_eligibility(feature,offsets)):
+        reason=_eligible_reason(row,facts,len(spec['ordered_features']),instant)
         if reason is None:
-            require(any(a is not None for a in f['availability']) and
-                    all(a is None or _instant(a)<=_instant(cutoff) for a in f['availability']),
+            require(facts.maximum_available_at_utc_us is not None and
+                    facts.maximum_available_at_utc_us<=cutoff_us,
                     'training Feature native clock exceeds fit')
         reasons.append(reason)
     cohort={'contract_version':'stock_compact_cohort_v1','feature_view_ref':feature_ref,'cutoff':cutoff,
@@ -229,15 +232,12 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
         'selection_cutoff_utc_us':'q','fact_source_codes':'i','reference_source_codes':'i'}.items()}
     dictionary=[None,*sorted({r for r in reasons if r is not None})]; codes={r:i for i,r in enumerate(dictionary)}
     sources={}; calendar_ref=digest({'contract_version':'stock_label_calendar_v1','sessions':spec['calendar']})
-    raw_ref=digest(cohort['raw_refs']); raw_like={'label_ref':raw_ref,'calendar_ref':calendar_ref,
-        'label_spec':{'formula':definition.get('formula','close(f+5) / open(f+1) - 1')},'rows':rows}
-    indexed={(r['security_id'],r['session']):r for r in fr}
-    raw_index={(r['security_id'],r['feature_session']):r for r in rows}
-    _working(metrics,_measured(metrics,[fr,cohort,indexed,raw_index])+len(rows)*4096)
+    raw_ref=digest(cohort['raw_refs'])
+    _working(metrics,_measured(metrics,cohort)+len(rows)*4096)
     for i,day in enumerate(days):
-        section=normalization_section_inputs(raw_like,feature_ref=feature_ref,feature_rows=indexed,
-            session=day,securities=spec['universe'],width=len(spec['ordered_features']),cutoff=cutoff,raw_index=raw_index)
-        sources[day]={'bindings':sorted(section['plan']['sources'],key=lambda r:r['id']),
+        eligible=[[security,day] for j,security in enumerate(spec['universe']) if reasons[i*width+j] is None]
+        bindings=_normalization_sources(raw_ref,feature_ref,day,cutoff,eligible)
+        sources[day]={'bindings':sorted(bindings,key=lambda r:r['id']),
                       'source_sets':[['offline_eligibility'],['raw_labels']]}
         arrays['selection_cutoff_utc_us'].append(instant_us(core_clock(cutoff)))
         for j in range(width):
@@ -257,7 +257,7 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
     # Carrier bytes and per-session bindings are detached from these working
     # panels. Release them before Core takes its own immutable snapshot and
     # before normalized rows/cohort publication are allocated.
-    del arrays,fr,indexed,raw_index,raw_like
+    del arrays
     result=execute_cs_zscore_batch(carrier,params=NORMALIZATION_SPEC['params'])
     metrics['core_calls']+=1; metrics['label_core_calls']+=1
     core_ref=result['metadata']['result_ref']; normalized=[]
@@ -364,19 +364,23 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             training_offsets=[positions[r['feature_session']]*width+spec['universe'].index(r['security_id'])
                 for r in nrows if r['valid']]
             inference_offsets=[positions[d]*width+i for d in inference for i in range(width)]
-            selected=[r for r in nrows if r['valid']]; joined=feature_rows(feature,training_offsets)
-            for f,r in zip(joined,selected):
-                f.update(label=r['return'],raw_return=r['raw_return'],label_available_at=r['raw_available_at'],
-                         normalized_available_at=r['label_available_at'])
-            binding={'training_rows_ref':digest(joined),'training_row_count':len(joined),
-                'training_keys_digest':digest([[r['security_id'],r['session']] for r in joined])}
+            _working(stats,len(spec['ordered_features'])*96+3072)
+            def joined_rows():
+                selected=(r for r in nrows if r['valid'])
+                for f,r in zip(iter_feature_rows(feature,training_offsets),selected):
+                    f.update(label=r['return'],raw_return=r['raw_return'],label_available_at=r['raw_available_at'],
+                             normalized_available_at=r['label_available_at'])
+                    yield f
+            binding={'training_rows_ref':digest_array_rows(joined_rows()),'training_row_count':len(training_offsets),
+                'training_keys_digest':digest_array_rows([spec['universe'][off%width],
+                    spec['feature_sessions'][off//width]] for off in training_offsets)}
             records.append({'fold_spec':deepcopy(fold),'raw_parts':parts,'normalized':norm,'evaluation':ev,
                 'training_offsets':training_offsets,'inference_offsets':inference_offsets,'core_ref':core_ref,
                 'cohort_ref':digest(cohort),'training_binding':binding})
             if progress: progress({'stage':'compact_labels','completed':len(records),'total':len(plans)})
             # Completed fold facts live in typed targets; release their Python
             # working panels before the next cutoff-specific Data selection.
-            del rows,nrows,selected,joined,chunk,cohort
+            del rows,nrows,chunk,cohort
             stats['_retained_raw_bytes']=0
         target.parent.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='.compact-batch-',dir=target.parent) as temporary:

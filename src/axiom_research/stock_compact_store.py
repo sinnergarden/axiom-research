@@ -353,9 +353,8 @@ def load_stock_feature_view(path, *, limits=None):
         store.close(); raise
 
 
-def feature_rows(handle, offsets):
+def iter_feature_rows(handle, offsets):
     value=_view_data(handle); spec=value['definition']['spec']; width=len(spec['universe'])
-    result=[]
     for off in offsets:
         require(type(off) is int and 0<=off<value['row_index']['row_count'],'Feature offset outside view')
         block=next(b for b in value['blocks'] if b['start']<=off<b['start']+b['count']); local=off-block['start']
@@ -364,9 +363,36 @@ def feature_rows(handle, offsets):
             for j,c in enumerate(part['columns']):
                 k=value['column_positions'][c]; flag=bool(arrays['value_validity'][local,j]); flags[k]=flag
                 values[k]=float(arrays['values'][local,j]) if flag else None
-        result.append(block['rows'].row(local,security=spec['universe'][off%width],
-            session=spec['feature_sessions'][off//width],values=values,validity=flags))
-    value['store'].check(); return result
+        yield block['rows'].row(local,security=spec['universe'][off%width],
+            session=spec['feature_sessions'][off//width],values=values,validity=flags)
+    value['store'].check()
+
+
+def feature_rows(handle, offsets):
+    return list(iter_feature_rows(handle,offsets))
+
+
+def iter_feature_eligibility(handle, offsets):
+    """Project checks without materializing values/reasons/clock row panels."""
+    from .stock_label_contracts import _FeatureEligibility
+    import numpy as np
+    value=_view_data(handle)
+    for off in offsets:
+        require(type(off) is int and 0<=off<value['row_index']['row_count'],'Feature offset outside view')
+        block=next(b for b in value['blocks'] if b['start']<=off<b['start']+b['count']); local=off-block['start']
+        compact=block['rows']; complete=True; valid=True; maximum=None
+        for part,arrays in block['parts']:
+            flags=bool(arrays['value_validity'][local].all()); valid=valid and flags
+            # A masked physical zero is logical None, hence FEATURE_MISSING
+            # precedes FEATURE_INVALID exactly as in the original dict route.
+            complete=complete and flags and bool(np.isfinite(arrays['values'][local]).all())
+            known=arrays['available_at_validity'][local].astype(bool)
+            if bool(known.any()):
+                at=int(arrays['available_at_utc_us'][local][known].max())
+                maximum=at if maximum is None else max(maximum,at)
+        yield _FeatureEligibility(bool(compact.member[local]),complete,valid,
+            compact.dictionary[int(compact.knowledge[local])],maximum)
+    value['store'].check()
 
 
 def training_matrix(handle,offsets,cutoff):

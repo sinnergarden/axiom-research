@@ -12,6 +12,17 @@ def digest(value):
         ensure_ascii=False, allow_nan=False).encode()).hexdigest()
 
 
+def digest_array_rows(rows):
+    """Hash the identical canonical JSON array with only one logical row live."""
+    encoder=json.JSONEncoder(sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
+    h=sha256(); h.update(b'['); first=True
+    for row in rows:
+        if not first: h.update(b',')
+        first=False
+        for piece in encoder.iterencode(row): h.update(piece.encode('utf-8'))
+    h.update(b']'); return 'sha256:'+h.hexdigest()
+
+
 def file_digest(path):
     h = sha256()
     with Path(path).open('rb') as f:

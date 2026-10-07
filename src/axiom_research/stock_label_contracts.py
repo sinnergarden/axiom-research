@@ -1,6 +1,7 @@
 """Shared outcome eligibility definitions; no Data/Core/ML runtime imports."""
 from datetime import date, datetime, timezone, timedelta
 from copy import deepcopy
+from dataclasses import dataclass
 import math
 TARGET_SEMANTICS = 'forward_5_session_cs_zscore_prediction'
 from typing import Any
@@ -53,7 +54,17 @@ def _finite(value: Any) -> bool:
     return type(value) in (int, float) and math.isfinite(value)
 
 
-def _eligible_reason(raw: dict, feature: dict | None, width: int, cutoff: datetime) -> str | None:
+@dataclass(frozen=True)
+class _FeatureEligibility:
+    """Facts projected only from an admitted typed Feature row."""
+    member: bool
+    complete_finite: bool
+    validity_all: bool
+    knowledge_cutoff: str
+    maximum_available_at_utc_us: int | None
+
+
+def _eligible_reason(raw: dict, feature: dict | _FeatureEligibility | None, width: int, cutoff: datetime) -> str | None:
     if raw.get("valid") is not True:
         return raw.get("invalid_reason") or "RAW_LABEL_INVALID"
     if not _finite(raw.get("return")):
@@ -67,17 +78,24 @@ def _eligible_reason(raw: dict, feature: dict | None, width: int, cutoff: dateti
         return "LABEL_NOT_MATURE"
     if feature is None:
         return "FEATURE_MISSING"
-    if feature.get("member") is not True:
-        return "NOT_MEMBER" if feature.get("member") is False else "MEMBERSHIP_UNKNOWN"
-    values, validity = feature.get("values"), feature.get("validity")
-    if (not isinstance(values, list) or not isinstance(validity, list) or
-            len(values) != width or len(validity) != width or
-            not all(_finite(value) for value in values)):
-        return "FEATURE_MISSING"
-    if not all(value is True for value in validity):
+    typed = type(feature) is _FeatureEligibility
+    member = feature.member if typed else feature.get('member')
+    if member is not True:
+        return "NOT_MEMBER" if member is False else "MEMBERSHIP_UNKNOWN"
+    if typed:
+        complete, valid = feature.complete_finite, feature.validity_all
+        knowledge = feature.knowledge_cutoff
+    else:
+        values, validity = feature.get("values"), feature.get("validity")
+        complete = (isinstance(values,list) and isinstance(validity,list) and
+                    len(values)==width and len(validity)==width and all(_finite(v) for v in values))
+        valid = isinstance(validity,list) and all(v is True for v in validity)
+        knowledge = feature.get('knowledge_cutoff')
+    if not complete: return "FEATURE_MISSING"
+    if not valid:
         return "FEATURE_INVALID"
     try:
-        if _instant(feature.get("knowledge_cutoff")) > cutoff:
+        if _instant(knowledge) > cutoff:
             return "FEATURE_NOT_AVAILABLE"
     except (ValueError, TypeError):
         return "FEATURE_CLOCK_UNKNOWN"
@@ -92,6 +110,22 @@ def core_clock(value):
     return instant.replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
 
+def _normalization_sources(raw_ref, feature_ref, session, cutoff, eligible):
+    """The existing section binding, shared by dict and typed projections."""
+    from .stock_artifacts import digest
+    section_definition = {"contract_version":"stock_label_section_v1", "feature_session":session,
+        "eligible_keys":eligible, "raw_label_ref":raw_ref, "feature_ref":feature_ref,
+        "cutoff":_instant(cutoff).isoformat().replace('+00:00','Z'), "normalization_spec":deepcopy(NORMALIZATION_SPEC)}
+    section_ref = digest(section_definition)
+    return [
+        {"id":"raw_labels", "data_ref":raw_ref, "view_ref":raw_ref,
+         "revision_policy":"frozen_saved_label_build", "qualification":"observed",
+         "availability_basis":"exact_raw_label_available_at"},
+        {"id":"offline_eligibility", "data_ref":feature_ref, "view_ref":section_ref,
+         "revision_policy":"frozen_feature_membership_and_explicit_outcome_cutoff",
+         "qualification":"observed", "availability_basis":"derived_offline_cutoff_selection"}]
+
+
 def normalization_section_inputs(raw_build, *, feature_ref, feature_rows, session,
                                  securities, width, cutoff, abi='axiom.feature/1',
                                  semantics='axiom.operators/1', raw_index=None):
@@ -100,7 +134,7 @@ def normalization_section_inputs(raw_build, *, feature_ref, feature_rows, sessio
     raw_ref = raw_build['label_ref']; indexed = feature_rows
     if raw_index is None:
         raw_index = {(r['security_id'], r['feature_session']): r for r in raw_build['rows']}
-    instant = _instant(cutoff); cutoff_text = instant.isoformat().replace('+00:00', 'Z')
+    instant = _instant(cutoff)
     core_cutoff = core_clock(cutoff); spec = deepcopy(NORMALIZATION_SPEC)
     recipe_ref = digest({'normalization_spec': spec, 'raw_label_spec': raw_build['label_spec']})
     input_column = {'name': 'raw_return', 'dtype': 'float64', 'unit': 'dimensionless', 'stage': 'fact', 'missing': 'preserve'}
@@ -110,18 +144,8 @@ def normalization_section_inputs(raw_build, *, feature_ref, feature_rows, sessio
     reasons = {key: _eligible_reason(raw_index[key], indexed.get(key), len(columns), instant)
                for key in keys}
     eligible = [list(key) for key in keys if reasons[key] is None]
-    section_definition = {"contract_version": "stock_label_section_v1", "feature_session": session,
-                          "eligible_keys": eligible, "raw_label_ref": raw_ref,
-                          "feature_ref": feature_ref, "cutoff": cutoff_text,
-                          "normalization_spec": spec}
-    section_ref = digest(section_definition)
-    sources = [
-        {"id": "raw_labels", "data_ref": raw_ref, "view_ref": raw_ref,
-         "revision_policy": "frozen_saved_label_build", "qualification": "observed",
-         "availability_basis": "exact_raw_label_available_at"},
-        {"id": "offline_eligibility", "data_ref": feature_ref, "view_ref": section_ref,
-         "revision_policy": "frozen_feature_membership_and_explicit_outcome_cutoff",
-         "qualification": "observed", "availability_basis": "derived_offline_cutoff_selection"}]
+    sources = _normalization_sources(raw_ref,feature_ref,session,cutoff,eligible)
+    section_ref = sources[1]['view_ref']
     plan = ({"abi": ABI, "semantics": SEMANTICS, "recipe_ref": recipe_ref,
         "calendar_ref": raw_build["calendar_ref"], "reference_ref": section_ref,
         "reference_members": {session: {key[0]: None for key in keys if reasons[key] is None}},

@@ -117,26 +117,16 @@ class CompactV3Tests(unittest.TestCase):
     def test_normalization_releases_working_panels_before_core_snapshot(self):
         from axiom_research import stock_compact_labels as owner
         from axiom_engine.core import execute_cs_zscore_batch
-        array_refs=[]; feature_refs=[]; calls=[]
-        original_array=owner.array; original_rows=owner.feature_rows
-
-        class FeatureRow(dict):
-            pass
+        array_refs=[]; calls=[]
+        original_array=owner.array
 
         def tracked_array(code):
             value=original_array(code); array_refs.append(weakref.ref(value)); return value
-
-        def tracked_rows(feature,offsets):
-            rows=[FeatureRow(r) for r in original_rows(feature,offsets)]
-            if rows: feature_refs.append(weakref.ref(rows[0]))
-            return rows
 
         def core(carrier,**kwargs):
             self.assertEqual(len(array_refs),9)
             self.assertTrue(all(ref() is None for ref in array_refs),
                             'mutable arrays overlap Core immutable snapshot')
-            self.assertIsNone(feature_refs[0](),
-                              'full Feature panel/index survives into Core')
             calls.append(1)
             return execute_cs_zscore_batch(carrier,**kwargs)
 
@@ -144,7 +134,7 @@ class CompactV3Tests(unittest.TestCase):
             root=Path(temp); f,path=self.fixture(root); stats={}
             with load_stock_feature_view(path) as view, \
                  patch.object(owner,'array',new=tracked_array), \
-                 patch.object(owner,'feature_rows',new=tracked_rows), \
+                 patch('axiom_research.stock_compact_store.feature_rows',side_effect=AssertionError('producer expanded Feature panel')), \
                  patch('axiom_engine.core.execute_cs_zscore_batch',new=core):
                 manifest,_=self.prepare(f,view,root,stats,folds=f.folds()[:1])
                 self.assertEqual(manifest['status'],'COMPLETE')
@@ -641,14 +631,14 @@ class CompactV3Tests(unittest.TestCase):
                     self.assertEqual(len({state.targets[r['raw_parts'][0]['target_ref']][0]['definition']['price_view']['price_view_ref'] for r in state.view['fold_targets']}),4)
 
     def test_daily_normalization_performs_no_feature_file_stat_in_loop(self):
-        from axiom_research.stock_compact_labels import normalization_section_inputs
+        from axiom_research.stock_compact_labels import _normalization_sources
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); f,path=self.fixture(root); seen=[]
             with load_stock_feature_view(path) as view:
                 store=_view_data(view)['store']
                 def daily(*args,**kwargs):
-                    seen.append(store.metrics['source_stat_calls']); return normalization_section_inputs(*args,**kwargs)
-                with patch('axiom_research.stock_compact_labels.normalization_section_inputs',side_effect=daily):
+                    seen.append(store.metrics['source_stat_calls']); return _normalization_sources(*args,**kwargs)
+                with patch('axiom_research.stock_compact_labels._normalization_sources',side_effect=daily):
                     manifest,_=self.prepare(f,view,root,folds=f.folds()[:1])
                 self.assertEqual(len(seen),65); self.assertEqual(len(set(seen)),1)
                 self.assertGreater(store.metrics['source_stat_calls'],seen[-1])
