@@ -58,12 +58,32 @@ def _owned_bytes(value, seen=None):
     return amount
 
 
+def _header_bytes(*roots):
+    """Visible field lengths only; never descend into a provenance graph."""
+    headers = list(roots)
+    for value in roots:
+        if type(value) is dict:
+            headers.extend(value.values())
+            for child in value.values():
+                if type(child) is dict:
+                    headers.extend(child.values())
+    return sum(sys.getsizeof(value) for value in headers)
+
+
 def _batch_bytes(batch, *, stats=None):
+    """Block charge estimate, not a recursive proof of every provenance byte.
+
+    Data owns source admission. Keep frame dimensions and visible field lengths
+    here; arbitrary nested provenance is covered by the declared estimate/RSS
+    policy, rather than rewalking its graph at each private transformation.
+    """
     tick = time.perf_counter_ns()
-    amount = int(batch.frame.memory_usage(deep=True).sum())+_owned_bytes([batch.field_meta, batch.context])
+    amount = (int(batch.frame.memory_usage(deep=True).sum())+
+              len(batch.frame)*max(1, len(batch.frame.columns))*512+
+              _header_bytes(batch.field_meta, batch.context))
     if stats is not None:
-        stats['reader_batch_size_measurements'] = stats.get('reader_batch_size_measurements',0)+1
-        stats['reader_batch_size_measurement_ns'] = stats.get('reader_batch_size_measurement_ns',0)+time.perf_counter_ns()-tick
+        stats['reader_batch_charge_estimates'] = stats.get('reader_batch_charge_estimates',0)+1
+        stats['reader_batch_charge_estimate_ns'] = stats.get('reader_batch_charge_estimate_ns',0)+time.perf_counter_ns()-tick
     return amount
 
 
@@ -77,8 +97,8 @@ def _caller_bytes(getter):
 
 
 def _guard_resident(owned, *, maximum_resident_bytes, stats, caller_retained_bytes, reason, owner_limit=None):
-    """One combined owned-graph guard; neither counter is a RSS measurement."""
-    owned += _owned_bytes(stats)
+    """Check a block working-set estimate; neither counter measures RSS."""
+    owned += 64*1024  # bounded scalar diagnostics allowance, no graph scan
     caller = _caller_bytes(caller_retained_bytes)
     combined = owned+caller
     stats['working_graph_peak_bytes'] = max(stats.get('working_graph_peak_bytes', 0), owned)
@@ -327,9 +347,10 @@ def _core_memory_bounds(plan, dimensions, *, snapshots, input_sources, reference
     maps = dimensions['history_keys']*512+dimensions['dependency_entries']*192
     scratch = max(dimensions['symbol_count'], dimensions['history_count'])*(
         4096+max((source_bytes(node['name']) for node in plan['nodes']), default=0))
-    source_sets = 2*_owned_bytes([input_sources, reference_sources, sources])
+    source_sets = 2*(sum(512+len(values)*128 for values in sources.values())+
+                     sum(source_bytes(name) for name in sources)+len(reference_sources)*256)
     workspace = 3*snapshots+cells+maps+scratch+source_sets
-    output = 6*(_owned_bytes([plan['sources'], plan['outputs']])+dimensions['symbol_count']*(256+
+    output = 6*(len(plan['sources'])*2048+len(plan['outputs'])*512+dimensions['symbol_count']*(256+
         sum(1024+source_bytes(item['node']) for item in plan['outputs'])))
     return workspace, output
 
@@ -362,7 +383,7 @@ def _core_preflight_bounds(plan, history_count, symbol_count):
     return workspace, output, dimensions
 
 
-def _core_view_bounds(plan, facts, context):
+def _core_view_bounds(plan, facts, context, *, snapshots):
     """Reserve one actual original view's precise dependency dimensions."""
     symbols = {key[0] for key in context['history_keys']}
     dates = context['sessions']
@@ -375,7 +396,7 @@ def _core_view_bounds(plan, facts, context):
     for row in facts['rows']:
         for column, bindings in zip(plan['input_schema'], row['sources']):
             input_sources[column['name']].update(bindings)
-    return _core_memory_bounds(plan, dimensions, snapshots=_owned_bytes([plan, facts, context]),
+    return _core_memory_bounds(plan, dimensions, snapshots=snapshots,
         input_sources=input_sources, reference_sources={row['source'] for row in context['reference']})
 
 
@@ -387,12 +408,15 @@ def _measure_owned_bytes(value, *, stats, kind):
     return amount
 
 
-def _seal_pending_view(request, evidence, members, workspace, output_reserve, *, stats):
+def _seal_pending_view(request, evidence, members, workspace, output_reserve, *, stats, owned_estimate=None):
     # These private objects have no caller alias. Documents are immutable and
     # evidence/members remain read-only until this entry is removed at delivery.
     # Cache only this owned lifetime, never an id/ref for an external graph.
     view = (request, evidence, members, workspace, output_reserve)
-    amount = _measure_owned_bytes(view, stats=stats, kind='pending_view')
+    amount = (_measure_owned_bytes(view, stats=stats, kind='pending_view')
+              if owned_estimate is None else owned_estimate)
+    if owned_estimate is not None:
+        stats['pending_view_charge_estimates'] = stats.get('pending_view_charge_estimates', 0)+1
     # Cover the extra tuple slot, cached integer and accounting scalar headers.
     # Separate views are measured separately: shared children are overcounted.
     return (*view, amount+512)
@@ -481,9 +505,9 @@ def _iter_core_feature_batch(pending, *, resident_base, maximum_resident_bytes,
             if progress is not None:
                 progress({'stage': 'matrix_features', 'completed': completed, 'total': total,
                           'session': day, 'seconds': time.perf_counter()-begin})
-            # Delivered evidence was just mutated; account it and fresh rows
-            # normally. Only untouched, not-yet-delivered entries use charges.
-            live = resident_base+remaining_bytes+charge_controls+_owned_bytes([rows, evidence])
+            # Keep the reserved row/proof allowance through delivery. Private
+            # assembly changes no business checks and needs no graph rewalk.
+            live = resident_base+remaining_bytes+charge_controls+view_charge+output_reserve
             _guard_resident(live, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature yield working graph exceeds resident budget')
             stats['yield_live_bytes'] = live
@@ -539,6 +563,7 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
     stats['group_execution_status'] = 'ORIGINAL_DAILY_VIEWS_PUBLIC_CORE_BATCH'
     stats['core_call_counter_basis'] = 'public_execute_feature_plan_batch_invocations'
     stats['core_reuse_budget_bytes'] = reuse_budget_bytes
+    stats['resource_accounting_basis'] = 'block_owned_estimate_not_process_tree_rss'
     _guard_resident(0, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                     caller_retained_bytes=caller_retained_bytes, reason='one native Feature window exceeds resident budget')
     symbols = tuple(config['symbols'])
@@ -554,8 +579,8 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
     completed = 0
     base = _owned_bytes([config, chosen, catalog.payload, qlib_inputs['view_reference']])
     # Before reading, reserve metadata/wires and possible Core cells as well as
-    # native numbers. Later guards replace these coarse dimensions with actual
-    # Python graphs and exact Plan node/source dimensions.
+    # native numbers. Later checks use exact Plan node/source dimensions and
+    # call-local block estimates, not recursive temporary-graph measurements.
     daily_keys = history_sessions*len(symbols)
     read_estimate = daily_keys*(8192+1024*len(FIELDS))
     pending_estimate = daily_keys*(2048+256*len(FIELDS))
@@ -644,7 +669,8 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
             stats['reader_batch_size_reuses'] = stats.get('reader_batch_size_reuses',0)+1
             factors = window.project(source,
                 view_ref=qlib_inputs['view_reference']['view_id'], stats=stats,
-                maximum_resident_bytes=maximum_resident_bytes, retained_bytes=retained_pending+prices_bytes,
+                maximum_resident_bytes=maximum_resident_bytes,
+                retained_bytes=retained_pending+prices_bytes+_header_bytes(prices.field_meta),
                 caller_retained_bytes=caller_retained_bytes)
             del source
             # Public adjustment serializes source/derivation lineage. Reserve
@@ -655,12 +681,12 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature adjustment/source working set exceeds resident budget')
             tick = time.perf_counter_ns()
             adjusted, adjusted_wire = _adjust_feature(prices, factors, day, _with_wire=True)
-            adjusted_bytes = _batch_bytes(adjusted,stats=stats)
+            adjusted_bytes = 4*(prices_bytes+factors_bytes)
             reader_bytes = prices_bytes+factors_bytes+adjusted_bytes
             stats['reader_batch_size_reuses'] += 2
             # to_json owns this wire. The adapter only reads it and retains
             # provenance aliases; no Data operation receives this private graph.
-            adjusted_wire_bytes = _owned_bytes(adjusted_wire)
+            adjusted_wire_bytes = 2*adjusted_bytes
             _guard_resident(resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes+
                 reader_bytes+adjusted_wire_bytes+read_estimate,
                 maximum_resident_bytes=maximum_resident_bytes, stats=stats,
@@ -677,7 +703,8 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
             _guard_resident(reserve, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature membership/source working set exceeds resident budget')
             membership_wire = membership.to_json()
-            _guard_resident(retained+12*_owned_bytes([adjusted_wire, membership_wire]),
+            wire_estimate = adjusted_wire_bytes+2*membership_bytes
+            _guard_resident(retained+3*wire_estimate,
                 maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature adapter/wire copies exceed resident budget')
             adapted = _adapt_decision_wires(adjusted_wire, membership_wire,
@@ -685,8 +712,11 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                 output_keys=tuple((security, day) for security in symbols), source_granularity='batch_field')
             plan = build_feature_plan(adapted.plan, config['feature_selection'], catalog=catalog, normalized=True)
             documents = [plan, adapted.facts, adapted.context]
-            _guard_resident(retained+_owned_bytes([adjusted_wire, membership_wire, adapted.source_evidence])+
-                12*_owned_bytes(documents), maximum_resident_bytes=maximum_resident_bytes, stats=stats,
+            # Serialized lengths plus an eightfold decoded/header allowance;
+            # Core cell/dependency workspace is reserved separately below.
+            document_estimate = sum(sys.getsizeof(document.payload) for document in documents)*8
+            _guard_resident(retained+wire_estimate+document_estimate,
+                maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature Core snapshot copies exceed resident budget')
             wires = plan.to_dict(), adapted.facts.to_dict(), adapted.context.to_dict()
             signature = _view_signature(plan, adapted.facts, adapted.context, calendar=sessions, _wires=wires)
@@ -699,10 +729,10 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                 for reason in classification['reasons']:
                     counts[reason] = counts.get(reason, 0)+1
             previous = signature
-            previous_bytes = _measure_owned_bytes(signature,stats=stats,kind='signature')
-            owned = base+window.bytes+reuse_budget_bytes+_pending_owned_bytes(pending)+reader_bytes+membership_bytes+_owned_bytes([
-                    previous, adjusted_wire, membership_wire, signature, documents,
-                    adapted.plan, wires, adapted.source_evidence])
+            previous_bytes = len(signature['facts'])*1024+len(signature['reference'])*512+len(sessions)*256
+            stats['signature_charge_estimates'] = stats.get('signature_charge_estimates', 0)+1
+            owned = (base+window.bytes+reuse_budget_bytes+_pending_owned_bytes(pending)+reader_bytes+
+                     membership_bytes+previous_bytes+wire_estimate+3*document_estimate)
             _guard_resident(owned, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature input working graph exceeds resident budget')
             members = {row['security_id']: row['is_member'] for row in membership_wire['records'] if row['session'] == day}
@@ -713,9 +743,10 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                     **{name: value for name, value in source.items() if name != 'provenance_by_key'},
                     'provenance_by_key_ref': digest(source['provenance_by_key'])}
                     for key, source in adapted.source_evidence.items()}}
-            workspace, output_reserve = _core_view_bounds(*wires)
+            workspace, output_reserve = _core_view_bounds(*wires, snapshots=document_estimate)
             current_view = _seal_pending_view((plan, adapted.facts, adapted.context),
-                evidence, members, workspace, output_reserve, stats=stats)
+                evidence, members, workspace, output_reserve, stats=stats,
+                owned_estimate=document_estimate+output_reserve+len(members)*512)
             # Only immutable original Documents and compact saved provenance
             # survive collection. No source DataFrames or full adapter graph do.
             del prices, factors, adjusted, adjusted_wire, membership, membership_wire, adapted, plan

@@ -35,6 +35,41 @@ def arguments(fixture, prepared, **options):
 
 
 class MatrixFeatureBatchTests(unittest.TestCase):
+    def test_two_day_block_estimates_remove_repeated_graph_walks_without_changing_refs(self):
+        import builtins
+        from axiom_research import stock_matrix_feature_producer as producer
+        visits = 0
+        def identify(value):
+            nonlocal visits
+            visits += 1
+            return builtins.id(value)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fixture = MemoryFeatureInputs(root)
+            prepared = prepared_inputs(fixture, root)
+            config = {**fixture.config, 'feature_sessions': fixture.outputs[:2]}
+            stats = {}
+            with patch.object(producer, 'id', identify, create=True), \
+                 patch('axiom_research.qlib_adapter.QlibView.read',
+                       lambda view, **kwargs: fixture.native_read(view, **kwargs)):
+                output = list(producer.iter_matrix_feature_days(fixture.data,
+                    **{**arguments(fixture, prepared, stats=stats), 'config': config}))
+            # Frozen 608cacc count: 301625 nodes for these same two days.
+            self.assertLess(visits, 301625//10)
+            self.assertEqual(digest(output),
+                'sha256:004cb74caf952acf1ec812bf453d43bb7fd6d6dcaf51379bb871aef5df555451')
+            self.assertEqual(sum(len(rows) for rows, _ in output), 6)
+            self.assertEqual((stats['data_read_calls'], stats['core_calls']), (6, 1))
+            self.assertEqual(stats['reader_batch_charge_estimates'], 10)
+            self.assertEqual(stats['pending_view_charge_estimates'], 2)
+            self.assertEqual(stats['signature_charge_estimates'], 2)
+            self.assertEqual(stats['yield_live_bytes'], 0)
+            self.assertEqual(stats['resource_accounting_basis'], 'block_owned_estimate_not_process_tree_rss')
+            _BUDGET_ACCEPTANCE.append({'kind': 'SYNTHETIC_TWO_DAY_RESOURCE_SCAN_COUNT',
+                'baseline_source': '608cacc5c561a96588c2ff9256fd7b9f5135654b',
+                'baseline_node_visits': 301625, 'candidate_node_visits': visits,
+                'full_rows_and_evidence_ref': digest(output), 'real_rss_measured': False})
+
     def test_sealed_private_view_charges_cover_shared_graphs_and_release_without_rescanning(self):
         from axiom_research import stock_matrix_feature_producer as producer
         stats = {}
@@ -111,9 +146,8 @@ class MatrixFeatureBatchTests(unittest.TestCase):
                 self.assertGreater(stats['native_value_reuses'], 0)
                 self.assertLessEqual(stats['combined_working_graph_peak_bytes'], LIMIT)
                 self.assertGreater(stats['pending_view_peak_bytes'], 0)
-                self.assertEqual(stats['pending_view_size_measurements'], 5)
+                self.assertEqual(stats['pending_view_charge_estimates'], 5)
                 self.assertEqual(stats['core_frame_size_measurements'], 5)
-                self.assertGreater(stats['pending_view_size_measurement_ns'], 0)
                 self.assertGreater(stats['core_frame_size_measurement_ns'], 0)
                 self.assertEqual(stats['yield_live_bytes'], 0)
                 if budget == 0:
@@ -234,7 +268,7 @@ class MatrixFeatureBatchTests(unittest.TestCase):
 
             stats = {}
             kwargs = arguments(fixture, prepared, stats=stats, reuse_budget_bytes=0)
-            kwargs['maximum_resident_bytes'] = 12*1024**2
+            kwargs['maximum_resident_bytes'] = 16*1024**2
             pressure = [True]
             kwargs['caller_retained_bytes'] = lambda: 8*1024**2 if pressure[0] and stats.get('pending_view_peak_bytes', 0) else 0
             kwargs['progress'] = lambda update: pressure.__setitem__(0, False)
@@ -420,7 +454,8 @@ class CoreBudgetScopeTargetTests(unittest.TestCase):
                     self.assertEqual(counts['nodes'], {name: len(scope) for name, scope in needed.items()})
                     self.assertEqual(counts['input_cells'], 315)
                     self.assertEqual(counts['node_cells'], 339)
-                    workspace, output = _core_view_bounds(p, facts.to_dict(), c)
+                    workspace, output = _core_view_bounds(p, facts.to_dict(), c,
+                        snapshots=sum(sys.getsizeof(document.payload) for document in request)*8)
                     self.assertGreater(workspace, 3*_owned_bytes([p, facts.to_dict(), c]))
                     self.assertGreater(output, 0)
                     captured.append((request, counts, workspace, output))
@@ -474,16 +509,16 @@ class CoreBudgetScopeTargetTests(unittest.TestCase):
                  patch('axiom_engine.core.execute_feature_plan_batch', wraps=execute_feature_plan_batch) as calls:
                 kwargs = arguments(fixture, prepared, stats=stats, reuse_budget_bytes=0,
                                    caller_retained_bytes=caller, progress=progress)
-                kwargs['maximum_resident_bytes'] = 12*1024**2
+                kwargs['maximum_resident_bytes'] = 16*1024**2
                 actual = list(iter_matrix_feature_days(fixture.data, **kwargs))
             self.assertGreater(stats['batch_budget_flushes'], 0)
             self.assertGreater(calls.call_count, 1)
             self.assertEqual(sum(len(call.args[0]) for call in calls.call_args_list), 5)
             self.assertEqual([proof['session'] for _, proof in actual], fixture.outputs)
-            self.assertLessEqual(stats['combined_working_graph_peak_bytes'], 12*1024**2)
+            self.assertLessEqual(stats['combined_working_graph_peak_bytes'], 16*1024**2)
             self.assertEqual(stats['yield_live_bytes'], 0)
             _BUDGET_ACCEPTANCE.append({'kind': 'SYNTHETIC_CALLER_PRESSURE_FLUSH', 'case_c_admitted': False,
-                'configured_budget_bytes': 12*1024**2, 'caller_pressure_bytes': 8*1024**2,
+                'configured_budget_bytes': 16*1024**2, 'caller_pressure_bytes': 8*1024**2,
                 'batch_view_counts': [len(call.args[0]) for call in calls.call_args_list],
                 'budget_flushes': stats['batch_budget_flushes'],
                 'combined_peak_charge_bytes': stats['combined_working_graph_peak_bytes']})

@@ -372,7 +372,7 @@ def _write_feature_matrix_block(target, *, rows, proof, spec, view, schema, inde
                                 metrics=None, descriptor_mapper=None, path_resolver=None):
     from .stock_matrix_storage import instant_us, write_buffer, write_part, write_partition
     from .stock_native_json import native_digest, make_native_carrier
-    from .stock_matrix_reader import _resident_size, _raw_snapshot_reservation, VerifiedMatrixStore
+    from .stock_matrix_reader import _resident_size
     maximum=options.get('maximum_resident_bytes',512*1024**2)
     def external():
         value=0 if caller_retained_bytes is None else caller_retained_bytes()
@@ -382,11 +382,11 @@ def _write_feature_matrix_block(target, *, rows, proof, spec, view, schema, inde
     # descendants; the pure assembly/validator phase never mutates them.
     incoming=[rows,proof,spec,view,schema]
     original_owned=_resident_size(incoming)
-    with VerifiedMatrixStore(maximum_matrix_bytes=maximum,_caller_retained_bytes=external) as owner:
-        reservation=_raw_snapshot_reservation(incoming,owner)
-        require(owner._native_caller_bytes(incoming)+reservation<=maximum,
-                'Feature writer private snapshot budget exceeded')
-        rows,proof,spec,view,schema=deepcopy(incoming)
+    # One block charge plus copy/memo allowance. This is an owned working-set
+    # estimate; native parser/source admission below keeps its own hard limits.
+    require(external()+6*original_owned+8192<=maximum,
+            'Feature writer private snapshot budget exceeded')
+    rows,proof,spec,view,schema=deepcopy(incoming)
     del incoming
     days = [p['session'] for p in proof]
     # Core's rows may use its documented key order. Storage always keys them into
@@ -394,7 +394,7 @@ def _write_feature_matrix_block(target, *, rows, proof, spec, view, schema, inde
     by_key = {(r['security_id'],r['session']):r for r in rows}
     require(len(by_key) == len(rows), 'duplicate matrix Feature row')
     rows = [by_key[s,d] for d in days for s in spec['universe']]
-    retained=original_owned+_resident_size([rows,proof,spec,view,schema,days,by_key])
+    retained=2*original_owned+len(rows)*512+len(days)*256+8192
     memo={};memo_bytes=0
     def original_digest(value):
         nonlocal memo_bytes
@@ -434,8 +434,7 @@ def _write_feature_matrix_block(target, *, rows, proof, spec, view, schema, inde
         'row_references':{day:{'feature_ref':_feature_wire([by_key[s,day] for s in spec['universe']],
                 [p],spec,view,digest_fn=original_digest)['feature_ref'],'qlib_view_ref':digest(view)} for day,p in zip(days,proof)},
         'input_evidence':proof,'original_feature_ref':original['feature_ref'],'contents':contents}
-    retained=original_owned+_resident_size([rows,proof,spec,view,schema,days,by_key,original,
-                                      contents,feature_rows,metadata])
+    retained+=original_owned+len(rows)*1024+len(days)*512+8192
     metadata['metadata_ref']=original_digest(metadata)
     _validate_feature_matrix_block(metadata,rows,spec,view,universe_id=universe_id,
                                   digest_fn=original_digest,metrics=metrics)
