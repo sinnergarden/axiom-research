@@ -1937,7 +1937,7 @@ def load_matrix_input_projection(inputs,spec,*,limits=None):
         state.close(); raise
 
 
-def _validate_staged_matrix_batch(manifest,*,stage,target):
+def _validate_staged_matrix_batch(manifest,*,stage,target,maximum_matrix_bytes=512*1024**2):
     """Validate a complete staging closure before its one atomic publication.
 
     Saved identities retain the final canonical paths. Only the internal file
@@ -1953,7 +1953,7 @@ def _validate_staged_matrix_batch(manifest,*,stage,target):
         physical=stage/relative
         require(physical.resolve().is_relative_to(stage),'staged matrix file escaped its directory')
         return physical
-    store=VerifiedMatrixStore(_path_resolver=locate)
+    store=VerifiedMatrixStore(_path_resolver=locate,maximum_matrix_bytes=maximum_matrix_bytes)
     state=load_matrix_batch_state(manifest,_store=store)
     try: state.store.check(); return deepcopy(state.store.metrics)
     finally: state.close()

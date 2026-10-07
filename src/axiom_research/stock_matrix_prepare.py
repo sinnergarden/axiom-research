@@ -562,7 +562,8 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                 'prepared_view':view_desc,'folds':outputs,'status':'COMPLETE'}
             batch['batch_ref']=digest(batch); batch=seal(batch,'content_digest'); write_json(stage/'batch.json',batch)
             from .stock_matrix_reader import _validate_staged_matrix_batch
-            stats['staged_validation']=_validate_staged_matrix_batch(batch,stage=stage,target=target)
+            stats['staged_validation']=_validate_staged_matrix_batch(batch,stage=stage,target=target,
+                maximum_matrix_bytes=options['maximum_resident_bytes'])
             feature._store.check()
             publisher.finish()
             try: stage.rename(target)
