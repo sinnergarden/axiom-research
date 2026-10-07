@@ -1480,6 +1480,10 @@ class MatrixFoldProjection:
                 getattr(self,'_lease_bytes',0),owner,values.get('_release_notice'))
         except BaseException:
             store.borrowers-=1
+            # A failed finalizer installation leaves this constructor in the
+            # exception traceback. Detach its own payload aliases as well as
+            # the caller's rollback, so that frame cannot retain X/y/P.
+            self.__dict__.clear(); values.clear()
             raise
     @staticmethod
     def _release(reference,lease_bytes,owner=None,notice=None):

@@ -20,6 +20,25 @@ from axiom_research.stock_matrix_storage import instant_us, write_buffer, write_
 
 
 class SequentialWindowTests(unittest.TestCase):
+    def test_finalizer_construction_failure_drops_owner_traceback_payload(self):
+        from axiom_research.stock_matrix_reader import MatrixFoldProjection
+        store=OwnedStore(); refs=[]
+        def attempt():
+            payload={key:memoryview(bytes(16)) for key in ('X','y','P')}
+            refs.extend(weakref.ref(value) for value in payload.values())
+            try: MatrixFoldProjection(store,**payload)
+            except RuntimeError as error: return error
+            finally: payload.clear()
+        with patch('axiom_research.stock_matrix_reader.weakref.finalize',
+                   side_effect=RuntimeError('explicit finalizer construction failure')):
+            error=attempt()
+        self.assertIsNotNone(error.__traceback__)
+        gc.collect()
+        self.assertTrue(all(ref() is None for ref in refs),
+                        'owner constructor frame retains payload after rollback')
+        self.assertEqual((store.borrowers,store.lease_bytes),(0,0))
+        store.close()
+
     def fixture(self, root, *, folds=2):
         """One day per block: shared values, independently timed metadata."""
         owner=fixtures.CompactV3Tests(); f,path=owner.fixture(root)
