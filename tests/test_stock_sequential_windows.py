@@ -22,14 +22,24 @@ from axiom_research.stock_matrix_storage import instant_us, write_buffer, write_
 class SequentialWindowTests(unittest.TestCase):
     def test_budget_measurement_failure_drops_its_native_item_alias(self):
         from axiom_research.stock_matrix_reader import _bounded_resident_size
+        from axiom_research.stock_compact_store import _size
         refs=[]
-        def attempt():
+        def attempt(measure):
             payload=[memoryview(bytes(16))]; refs.append(weakref.ref(payload[0]))
-            try: _bounded_resident_size(payload,maximum=6500,retained=lambda:0)
+            try: measure(payload)
             except ValueError as error: return error
             finally: payload.clear()
-        error=attempt(); self.assertIsNotNone(error.__traceback__)
-        gc.collect(); self.assertIsNone(refs[0]())
+        # Delete wrapper parameters as well; the source-owner entry below is
+        # the production _size function, not an assertion-only caller alias.
+        def lower(value):
+            try: return _bounded_resident_size(value,maximum=6500,retained=lambda:0)
+            finally: value=None
+        def owner(value):
+            try: return _size(value,maximum=6500)
+            finally: value=None
+        for measure in (lower,owner):
+            error=attempt(measure); self.assertIsNotNone(error.__traceback__)
+            gc.collect(); self.assertTrue(all(ref() is None for ref in refs))
 
     def test_invalid_leaf_tracebacks_drop_bottom_layer_payload_aliases(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -56,8 +56,11 @@ def _working(metrics, amount):
 
 def _measured(metrics,value):
     _sync_feature_charge(metrics)
-    return _size(value,maximum=metrics['_limits']['maximum_matrix_bytes'],
-        retained=metrics['_feature_bytes']+metrics['_store'].resident_bytes+metrics['_retained_raw_bytes']+metrics.get('_price_view_bytes',0))
+    try:
+        return _size(value,maximum=metrics['_limits']['maximum_matrix_bytes'],
+            retained=metrics['_feature_bytes']+metrics['_store'].resident_bytes+metrics['_retained_raw_bytes']+metrics.get('_price_view_bytes',0))
+    finally:
+        value=None
 
 
 def _sync_feature_charge(metrics):

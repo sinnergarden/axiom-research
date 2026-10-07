@@ -244,8 +244,11 @@ def _stat(value): return value.st_dev,value.st_ino,value.st_size,value.st_mtime_
 def _size(value, *, maximum=None,retained=0):
     # One ingress/projection graph measurement, never per-row retained rescans.
     from .stock_matrix_reader import _resident_size,_bounded_resident_size
-    if maximum is None: return _resident_size(value)
-    return _bounded_resident_size(value,maximum=maximum,retained=lambda:retained)
+    try:
+        if maximum is None: return _resident_size(value)
+        return _bounded_resident_size(value,maximum=maximum,retained=lambda:retained)
+    finally:
+        value=None
 
 
 def _view_data(handle, *, check=True):
