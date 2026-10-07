@@ -206,7 +206,7 @@ def load_stock_ml_batch_inputs(batch_manifest, *, feature_inputs=None, limits=No
     begin = time.perf_counter()
     require(residency in ('eager','sequential'),'unknown batch residency mode')
     manifest = deepcopy(batch_manifest)
-    if type(manifest) is dict and manifest.get('contract_version')=='stock_ml_batch_inputs_v3':
+    if type(manifest) is dict and manifest.get('contract_version') in ('stock_ml_batch_inputs_v3','stock_ml_batch_inputs_v4'):
         from .stock_compact_batch import load_compact_state
         from .stock_compact_store import _view_data, sealed, limits as compact_limits
         sealed(manifest,'content_digest')

@@ -52,7 +52,7 @@ def build_stock_ml_fold_from_saved_inputs(input_manifest, *, fold_spec, destinat
     """
     begin = time.perf_counter()
     inputs, spec = deepcopy(input_manifest), deepcopy(fold_spec)
-    if inputs.get('contract_version') in ('stock_ml_saved_inputs_v2','stock_ml_saved_inputs_v3'):
+    if inputs.get('contract_version') in ('stock_ml_saved_inputs_v2','stock_ml_saved_inputs_v3','stock_ml_saved_inputs_v4'):
         from .stock_matrix_folds import build_matrix_fold
         return build_matrix_fold(inputs,spec=spec,destination=destination,metrics=metrics,batch=batch,
                                  training_options=training_options)

@@ -72,7 +72,8 @@ class CompactV3Tests(unittest.TestCase):
         with patch.dict(sys.modules,{'axiom_data':module}),patch('axiom_research.stock_ml._environment',return_value=f.environment):
             result=prepare_stock_ml_batch_inputs(data,feature_inputs=view,fold_specs=folds or f.folds(),
                 destination=root/'prepared',preparation_options={'row_block_sessions':block,'column_block':32,
-                    'maximum_resident_bytes':64*1024**2,'normalization_backend':'core_cs_batch_v1'},metrics=metrics)
+                    'maximum_resident_bytes':64*1024**2,'normalization_backend':'core_cs_batch_v1',
+                    'control_layout':'inline_v3'},metrics=metrics)
         return result,data
 
     def test_native_price_batches_released_before_wire_accounting(self):
@@ -429,7 +430,7 @@ class CompactV3Tests(unittest.TestCase):
             with load_stock_feature_view(path) as view,patch('axiom_research.stock_ml._environment',return_value=f.environment):
                 manifest=prepare_stock_ml_batch_inputs(data,feature_inputs=view,fold_specs=folds,destination=root/'prepared',
                     preparation_options={'row_block_sessions':32,'column_block':32,'maximum_resident_bytes':64*1024**2,
-                        'normalization_backend':'core_cs_batch_v1'},metrics=stats)
+                        'normalization_backend':'core_cs_batch_v1','control_layout':'inline_v3'},metrics=stats)
                 with load_stock_ml_batch_inputs(manifest,feature_inputs=view) as batch:
                     from axiom_research.stock_batch import _data
                     state=_data(batch)['matrix_state']; actual=[]

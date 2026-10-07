@@ -19,7 +19,7 @@ def _projection(inputs,spec,batch):
     if batch is not None:
         from .stock_batch import _data
         _data(batch); return batch._matrix_project(inputs,spec)
-    if inputs.get('contract_version')=='stock_ml_saved_inputs_v3':
+    if inputs.get('contract_version') in ('stock_ml_saved_inputs_v3','stock_ml_saved_inputs_v4'):
         from .stock_compact_batch import load_compact_projection
         return load_compact_projection(inputs,spec)
     from .stock_matrix_reader import load_matrix_input_projection
@@ -60,7 +60,7 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,traini
     from .feature_catalog import load_feature_catalog
     begin=time.perf_counter(); parameters, rounds = training_profile(training_options)
     inputs,spec=deepcopy(inputs),deepcopy(spec)
-    if batch is None and inputs.get('contract_version')=='stock_ml_saved_inputs_v3':
+    if batch is None and inputs.get('contract_version') in ('stock_ml_saved_inputs_v3','stock_ml_saved_inputs_v4'):
         from .stock_compact_batch import load_compact_state_from_inputs
         from .stock_batch import _compact_batch_handle
         state=load_compact_state_from_inputs(inputs)
@@ -70,7 +70,7 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,traini
     definition=None
     zeros=dict(data_read_calls=0,supplier_calls=0,feature_core_calls=0,label_core_calls=0,
         core_calls=0,account_calls=0,train_calls=0,predict_calls=0)
-    if inputs.get('contract_version')=='stock_ml_saved_inputs_v3':
+    if inputs.get('contract_version') in ('stock_ml_saved_inputs_v3','stock_ml_saved_inputs_v4'):
         from .stock_batch import _data
         state=_data(batch)['matrix_state']
         common=state.control_common(inputs,spec)
@@ -218,7 +218,7 @@ def _load_matrix_fold(path, *, projection,batch,ingress):
     own=projection is None
     if own:
         if batch is not None: projection=batch._project_evaluation(inputs,spec)
-        elif inputs.get('contract_version')=='stock_ml_saved_inputs_v3':
+        elif inputs.get('contract_version') in ('stock_ml_saved_inputs_v3','stock_ml_saved_inputs_v4'):
             from .stock_compact_batch import load_compact_projection
             projection=load_compact_projection(inputs,spec,evaluation=True)
         else: projection=_projection(inputs,spec,batch)

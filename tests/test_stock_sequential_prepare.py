@@ -24,7 +24,7 @@ class SequentialPrepareTests(unittest.TestCase):
         data=PublicDataFixture(f.spec); module=types.ModuleType('axiom_data')
         module.QuerySpec=Query; module.adjust_prices=data.adjust
         settings={'row_block_sessions':32,'column_block':32,
-            'maximum_resident_bytes':64*1024**2,'normalization_backend':'core_cs_batch_v1'}
+            'maximum_resident_bytes':64*1024**2,'normalization_backend':'core_cs_batch_v1','control_layout':'inline_v3'}
         settings.update(options or {})
         with patch.dict(sys.modules,{'axiom_data':module}):
             result=prepare_stock_ml_batch_inputs(data,feature_inputs=feature,fold_specs=f.folds(),

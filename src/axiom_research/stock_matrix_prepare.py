@@ -349,7 +349,7 @@ def _selector(publisher, *, view_ref, row_index, schema_ref, role, fold_ref, pay
 
 def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destination,
                                  preparation_options, metrics=None, progress=None):
-    """The only fresh label producer is compact v3; old files load readonly."""
+    """The compact producer writes v4; explicit v3 layout supports old replay."""
     from .stock_compact_labels import prepare_compact_batch
     return prepare_compact_batch(data,feature_inputs=feature_inputs,fold_specs=fold_specs,
         destination=destination,preparation_options=preparation_options,metrics=metrics,progress=progress)

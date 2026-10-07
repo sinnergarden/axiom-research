@@ -24,7 +24,7 @@ def _implementation():
     sources={name:file_digest(Path(__file__).with_name(name)) for name in (
         'labels.py','stock_label_contracts.py','stock_compact_labels.py',
         'stock_compact_store.py','stock_compact_batch.py','stock_batch.py',
-        'stock_fold_inputs.py','stock_matrix_storage.py')}
+        'stock_fold_inputs.py','stock_matrix_storage.py','stock_compact_controls.py')}
     sources['canonical_training_binding']=inspect.getsource(digest_array_rows)
     return digest(sources)
 
@@ -315,10 +315,12 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
     require(not own or isinstance(feature_inputs,(str,Path)),'Feature input must be an owner handle or path')
     options=deepcopy(preparation_options)
     required={'row_block_sessions','column_block','maximum_resident_bytes','normalization_backend'}
-    require(type(options) is dict and required<=set(options)<=required|{'maximum_source_bytes','maximum_parent_bytes'} and
+    require(type(options) is dict and required<=set(options)<=required|{'maximum_source_bytes','maximum_parent_bytes','control_layout'} and
             options['normalization_backend']=='core_cs_batch_v1' and
-            all(type(v) is int and v>0 for k,v in options.items() if k!='normalization_backend'),
+            options.get('control_layout','fold_controls_v1') in ('fold_controls_v1','inline_v3') and
+            all(type(v) is int and v>0 for k,v in options.items() if k not in ('normalization_backend','control_layout')),
             'fixed compact options and positive budgets required')
+    compact=options.get('control_layout','fold_controls_v1')=='fold_controls_v1'
     budgets=limits({'maximum_matrix_bytes':options['maximum_resident_bytes'],
         **{k:options[k] for k in ('maximum_source_bytes','maximum_parent_bytes') if k in options}})
     require(type(_caller_bytes) is int and _caller_bytes>=0 and type(_caller_source_bytes) is int and _caller_source_bytes>=0,
@@ -330,9 +332,10 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
         require(fd['store'].resident_bytes<=budgets['maximum_matrix_bytes'] and
                 fd['store'].metrics['source_bytes']<=budgets['maximum_source_bytes'] and
                 fd['store'].metrics['largest_parent_bytes']<=budgets['maximum_parent_bytes'],'borrowed Feature budget incompatible')
-        definition={'version':'axiom.stock_ml_batch_inputs/3','feature_view':feature.to_dict(),
+        definition={'version':'axiom.stock_ml_batch_inputs/4' if compact else 'axiom.stock_ml_batch_inputs/3','feature_view':feature.to_dict(),
             'fold_specs':deepcopy(fold_specs),'preparation_options':options,'implementation_ref':_implementation(),
             'environment':_input_environment()}
+        if compact: definition['price_domain_plan']='fit_window_evaluation_calendar_blocks_v1'
         definition_ref=digest(definition); target=Path(destination).absolute()/definition_ref[7:]
         store=OwnedStore(budgets,shared_bytes=fd['store'].resident_bytes+_caller_bytes,
             shared_source_bytes=fd['store'].metrics['source_bytes']+_caller_source_bytes)
@@ -371,16 +374,27 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
         cache=Path(destination).absolute()/'compact-cache'; records=[]; domains={}; raw_outputs=[]
         for i,(fold,training,inference) in enumerate(plans):
             chunks=[training[n:n+options['row_block_sessions']] for n in range(0,len(training),options['row_block_sessions'])]
-            raw_outputs.append({'raw_parts':[None]*len(chunks),'evaluation':None})
+            raw_outputs.append({'raw_parts':[None]*len(chunks),
+                **({'evaluation_parts':[]} if compact else {'evaluation':None})})
             stats['fold_queries'].append({'fold_spec_ref':digest(fold),'data_read_calls':0,
                 'admitted_price_view_reuses':0,'price_domain_refs':[]})
             jobs=[('raw_parts',n,days,fold['fit_cutoff']) for n,days in enumerate(chunks)]
-            jobs.append(('evaluation',None,inference,fold['evaluation_cutoff']))
+            if compact:
+                positions={day:n for n,day in enumerate(spec['calendar'])}; evaluation={}
+                for day in inference:
+                    evaluation.setdefault(positions[day]//options['row_block_sessions'],[]).append(day)
+                raw_outputs[i]['evaluation_parts']=[None]*len(evaluation)
+                jobs.extend(('evaluation_parts',n,days,fold['evaluation_cutoff'])
+                    for n,days in enumerate(evaluation.values()))
+            else: jobs.append(('evaluation',None,inference,fold['evaluation_cutoff']))
             for role,n,days,cutoff in jobs:
-                group=domains.setdefault(_instant(cutoff),{'cutoff':cutoff,'days':set(),'jobs':[]})
+                if not compact: key=_instant(cutoff)
+                elif role=='evaluation_parts': key=(_instant(cutoff),'evaluation',positions[days[0]]//options['row_block_sessions'])
+                else: key=(_instant(cutoff),'training')
+                group=domains.setdefault(key,{'cutoff':cutoff,'days':set(),'jobs':[]})
                 group['days'].update(days); group['jobs'].append((i,role,n,days,cutoff))
-        # One public selected price/factor domain per exact cutoff; release it
-        # before selecting the next cutoff. Raw children retain the full query
+        # One full fit domain or fixed evaluation block; release it before
+        # selecting the next domain. Raw children retain the full query
         # identity, never an invented sliced DataBatch contract.
         for group in domains.values():
             stats['_price_view_bytes']=0
@@ -391,7 +405,7 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
                 if use: stats['admitted_price_view_reuses']+=1; report['admitted_price_view_reuses']+=1
                 else: report['data_read_calls']+=2
                 desc,chunk=_raw(spec,cutoff,days,cache,stats,price_view)
-                if role=='raw_parts': raw_outputs[i][role][n]=desc
+                if role in ('raw_parts','evaluation_parts'): raw_outputs[i][role][n]=desc
                 else: raw_outputs[i][role]=desc
                 del chunk
                 # Published descriptors, rather than every historical typed
@@ -415,7 +429,6 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             normalized_bytes=_measured(stats,[nrows,cohort]); _working(stats,normalized_bytes)
             stats['_retained_raw_bytes']+=normalized_bytes
             store.release_payloads()
-            ev=raw_outputs[i]['evaluation']
             training_offsets=[positions[r['feature_session']]*width+spec['universe'].index(r['security_id'])
                 for r in nrows if r['valid']]
             inference_offsets=[positions[d]*width+i for d in inference for i in range(width)]
@@ -429,9 +442,19 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             binding={'training_rows_ref':digest_array_rows(joined_rows()),'training_row_count':len(training_offsets),
                 'training_keys_digest':digest_array_rows([spec['universe'][off%width],
                     spec['feature_sessions'][off//width]] for off in training_offsets)}
-            records.append({'fold_spec':deepcopy(fold),'raw_parts':parts,'normalized':norm,'evaluation':ev,
-                'training_offsets':training_offsets,'inference_offsets':inference_offsets,'core_ref':core_ref,
-                'cohort_ref':digest(cohort),'training_binding':binding})
+            record={'fold_spec':deepcopy(fold),'raw_parts':parts,'normalized':norm,
+                'core_ref':core_ref,'cohort_ref':digest(cohort),'training_binding':binding}
+            if compact:
+                from .stock_compact_controls import selectors_for
+                record.update(contract_version='stock_ml_fold_control_v1',evaluation_parts=raw_outputs[i]['evaluation_parts'])
+                selectors=selectors_for(record,spec,fd['row_index'],training_offsets)
+                record=seal(record,'fold_control_ref')
+                descriptor=write_part(cache/'fold-controls',record,'fold_control_ref')
+                records.append({'fold_spec':record['fold_spec'],'fold_control':descriptor,'selectors':selectors,'core_ref':core_ref})
+                del record,selectors,training_offsets,inference_offsets
+            else:
+                record.update(evaluation=raw_outputs[i]['evaluation'],training_offsets=training_offsets,inference_offsets=inference_offsets)
+                records.append(record)
             if progress: progress({'stage':'compact_labels','completed':len(records),'total':len(plans)})
             # Completed fold facts live in typed targets; release their Python
             # working panels before the next cutoff-specific Data selection.
@@ -446,21 +469,22 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             stage=Path(temporary)/'complete'; stage.mkdir()
             common={k:deepcopy(spec[k]) for k in ('scope','snapshot','pit_policy','calendar','universe',
                 'catalog_ref','feature_selection','ordered_features')}
-            view=seal({'contract_version':'stock_ml_prepared_view_v2','definition':common,
-                'feature_view':feature.to_dict(),'fold_targets':records},'prepared_view_ref')
+            view=seal({'contract_version':'stock_ml_prepared_view_v3' if compact else 'stock_ml_prepared_view_v2',
+                'definition':common,'feature_view':feature.to_dict(),**({} if compact else {'fold_targets':records})},'prepared_view_ref')
             write_json(stage/'view.json',view)
             view_desc={'path':str(target/'view.json'),'file_digest':file_digest(stage/'view.json'),
                        'prepared_view_ref':view['prepared_view_ref']}
             folds=[]
             for record in records:
-                selectors={k:None if k=='validation' else record['training_offsets' if k in
+                selectors=record['selectors'] if compact else {k:None if k=='validation' else record['training_offsets' if k in
                     ('training','training_labels') else 'inference_offsets'] for k in
                     ('training','validation','inference','training_labels','evaluation_labels')}
-                inputs=seal({'contract_version':'stock_ml_saved_inputs_v3','prepared_view':view_desc,
+                inputs=seal({'contract_version':'stock_ml_saved_inputs_v4' if compact else 'stock_ml_saved_inputs_v3','prepared_view':view_desc,
+                    **({'fold_control':record['fold_control']} if compact else {}),
                     'fold_spec_ref':digest(record['fold_spec']),'selectors':selectors,
                     'core_result_refs':[record['core_ref']]},'input_ref')
                 folds.append({'input_manifest':inputs,'fold_spec':record['fold_spec']})
-            batch={'contract_version':'stock_ml_batch_inputs_v3','definition':definition,'definition_ref':definition_ref,
+            batch={'contract_version':'stock_ml_batch_inputs_v4' if compact else 'stock_ml_batch_inputs_v3','definition':definition,'definition_ref':definition_ref,
                 'prepared_view':view_desc,'folds':folds,'status':'COMPLETE'}
             batch['batch_ref']=digest(batch); batch=seal(batch,'content_digest'); write_json(stage/'batch.json',batch)
             state=load_compact_state(batch,feature_inputs=feature,limits=budgets,
