@@ -2,12 +2,14 @@
 from copy import deepcopy
 from pathlib import Path
 import math
+import sys
 
 from .stock_artifacts import digest
 from .stock_fold_inputs import require, seal, validate_spec, feature_available
 from .stock_label_contracts import _instant, NORMALIZATION_SPEC
 from .stock_compact_store import (OwnedStore, _view_data, load_stock_feature_view,
-    feature_rows, training_matrix, sealed, fields, limits, _size, reference)
+    feature_rows, training_matrix, sealed, fields, limits, _size, reference, set_feature_window,
+    clear_feature_window)
 
 
 def _clock(us):
@@ -78,56 +80,197 @@ def read_target(store,descriptor,expected=None,raw_rows=None):
     if not normalized: expected_types.update(start_session='int32_le',end_session='int32_le',source_codes='int32_le')
     require(set(value['buffers'])==set(expected_types) and
         all(v['dtype']==expected_types[k] for k,v in value['buffers'].items()),'compact target physical dtypes mismatch')
-    arrays={k:store.buffer(v) for k,v in value['buffers'].items()}
-    require(set(arrays)==raw|(set() if normalized else {'start_session','end_session','source_codes'}) and
-            all(a.shape==(count,) for a in arrays.values()),'compact target columns/shapes mismatch')
-    dictionary=value['reason_dictionary']; require(dictionary[0] is None and dictionary[1:]==sorted(set(dictionary[1:])),
-                                                 'compact target reason dictionary mismatch')
-    calendar=definition['calendar']
-    require(type(calendar) is list and calendar==sorted(set(calendar)) and set(days)<=set(calendar) and
-            type(value['row_count']) is int and count>0,'compact calendar/row count mismatch')
-    if normalized:
-        require(reference(value['core_ref']) and type(value['cohort']) is dict and value['source_dictionary']==[],
-                'normalized Core/cohort refs required')
-    else:
-        require(value['core_ref'] is None and value['cohort'] is None and type(value['source_dictionary']) is list and
-            bool(value['source_dictionary']) and all(type(s) is list and bool(s) and all(reference(r) for r in s)
-                for s in value['source_dictionary']), 'Raw fixed source refs required')
-    import numpy as np
-    require(bool(np.isfinite(arrays['values']).all()),'compact target physical values must be finite')
-    positions={day:i for i,day in enumerate(calendar)}
-    from .stock_label_contracts import core_clock
-    from .stock_matrix_storage import instant_us
-    cutoff=instant_us(core_clock(definition['cutoff']) if normalized else definition['cutoff'])
-    cutoff_day=_instant(definition['cutoff']).date().isoformat()
-    for i in range(count):
-        code=int(arrays['reason_codes'][i]); valid=bool(arrays['validity'][i]); at=bool(arrays['availability_validity'][i])
-        require(0<=code<len(dictionary) and valid is (code==0) and (not valid or at),
-                'compact target validity/reason/clock mismatch')
-        if not normalized:
-            start,end=int(arrays['start_session'][i]),int(arrays['end_session'][i])
-            pos=positions[days[i//len(universe)]]
-            require(start==(pos+1 if pos+1<len(calendar) else -1) and end==(pos+5 if pos+5<len(calendar) else -1) and
-                    (not valid or start>=0 and end>=0 and calendar[end]<=cutoff_day),
-                    'compact target endpoint offset mismatch')
-            require(0<=int(arrays['source_codes'][i])<len(value['source_dictionary']), 'compact target source code mismatch')
-        if not valid: require(float(arrays['values'][i])==0.0,'compact null physical value must be zero')
-        if not at: require(int(arrays['availability'][i])==0,'compact null physical clock must be zero')
-        require(not at or int(arrays['availability'][i])<=cutoff, 'compact target clock exceeds cutoff')
-    require(raw_rows is None or len(raw_rows)==count,'normalized Raw key alignment mismatch')
-    store.check(); return value,TargetRows(value,arrays,raw_rows)
+    arrays=None
+    try:
+        arrays={k:store.buffer(v) for k,v in value['buffers'].items()}
+        require(set(arrays)==raw|(set() if normalized else {'start_session','end_session','source_codes'}) and
+                all(a.shape==(count,) for a in arrays.values()),'compact target columns/shapes mismatch')
+        dictionary=value['reason_dictionary']; require(dictionary[0] is None and dictionary[1:]==sorted(set(dictionary[1:])),
+                                                     'compact target reason dictionary mismatch')
+        calendar=definition['calendar']
+        require(type(calendar) is list and calendar==sorted(set(calendar)) and set(days)<=set(calendar) and
+                type(value['row_count']) is int and count>0,'compact calendar/row count mismatch')
+        if normalized:
+            require(reference(value['core_ref']) and type(value['cohort']) is dict and value['source_dictionary']==[],
+                    'normalized Core/cohort refs required')
+        else:
+            require(value['core_ref'] is None and value['cohort'] is None and type(value['source_dictionary']) is list and
+                bool(value['source_dictionary']) and all(type(s) is list and bool(s) and all(reference(r) for r in s)
+                    for s in value['source_dictionary']), 'Raw fixed source refs required')
+        import numpy as np
+        require(bool(np.isfinite(arrays['values']).all()),'compact target physical values must be finite')
+        positions={day:i for i,day in enumerate(calendar)}
+        from .stock_label_contracts import core_clock
+        from .stock_matrix_storage import instant_us
+        cutoff=instant_us(core_clock(definition['cutoff']) if normalized else definition['cutoff'])
+        cutoff_day=_instant(definition['cutoff']).date().isoformat()
+        for i in range(count):
+            code=int(arrays['reason_codes'][i]); valid=bool(arrays['validity'][i]); at=bool(arrays['availability_validity'][i])
+            require(0<=code<len(dictionary) and valid is (code==0) and (not valid or at),
+                    'compact target validity/reason/clock mismatch')
+            if not normalized:
+                start,end=int(arrays['start_session'][i]),int(arrays['end_session'][i])
+                pos=positions[days[i//len(universe)]]
+                require(start==(pos+1 if pos+1<len(calendar) else -1) and end==(pos+5 if pos+5<len(calendar) else -1) and
+                        (not valid or start>=0 and end>=0 and calendar[end]<=cutoff_day),
+                        'compact target endpoint offset mismatch')
+                require(0<=int(arrays['source_codes'][i])<len(value['source_dictionary']), 'compact target source code mismatch')
+            if not valid: require(float(arrays['values'][i])==0.0,'compact null physical value must be zero')
+            if not at: require(int(arrays['availability'][i])==0,'compact null physical clock must be zero')
+            require(not at or int(arrays['availability'][i])<=cutoff, 'compact target clock exceeds cutoff')
+        require(raw_rows is None or len(raw_rows)==count,'normalized Raw key alignment mismatch')
+        store.check(); return value,TargetRows(value,arrays,raw_rows)
+    except BaseException:
+        # Tracebacks keep frame locals. Drop array views and decoded aliases
+        # before the owner can release their backing bytes after failed ingress.
+        if arrays is not None: arrays.clear()
+        arrays=value=definition=dictionary=calendar=raw_rows=None
+        raise
+
 
 
 class CompactState:
-    def __init__(self,store,feature,batch,view,targets,own_feature):
+    def __init__(self,store,feature,batch,view,targets,own_feature,*,residency='eager'):
         self.store=store; self.feature=feature; self.batch=batch; self.view=view; self.targets=targets
         self.closed=False; self.own_feature=own_feature; self.active=0; self._batch_ref=batch['batch_ref']
+        self.residency=residency; self._pending_release=False; self._active_record=None
+        self._control_charge=0; self._target_charge=0; self._source_charge=0
         self.selectors={(digest(f['input_manifest']),digest(f['fold_spec'])):f['input_manifest']['selectors'] for f in batch['folds']}
-        _view_data(feature)['borrowers']+=1
-        self.source_records=tuple(sorted({**_view_data(feature)['store'].hashes,**store.hashes}.items()))
+        self.records={(digest(f['input_manifest']),digest(f['fold_spec'])):(f,r)
+            for f,r in zip(batch['folds'],view['fold_targets'])}
+        fd=_view_data(feature); fd['borrowers']+=1
+        self.positions={d:i for i,d in enumerate(fd['definition']['spec']['feature_sessions'])}
+        self._keep_paths={batch['prepared_view']['path']} | {path for path,value in store.json.items()
+            if value.get('contract_version')=='stock_ml_batch_inputs_v3' and value.get('batch_ref')==self._batch_ref}
+        self._source_table={}; self.source_records=()
+        self._verified_folds=set()
+        self._sync_shared()
+
+    def _sync_shared(self):
+        fstore=_view_data(self.feature,check=False)['store']
+        self.store.shared_bytes=fstore.resident_bytes
+        self.store.shared_source_bytes=fstore.metrics['source_bytes']
+        self.store.metrics.update(residency=self.residency,
+            feature_residency=_view_data(self.feature,check=False).get('residency','eager'),
+            resident_bytes=self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes,
+            active_target_count=len(self.targets),active_projection_count=self.active,
+            current_window_fold_ref=self._active_record)
+
+    def _account_controls(self):
+        charge=_size([self.batch,self.selectors,self.positions,{key:None for key in self.records},
+                      self._keep_paths],maximum=self.store.maximum_matrix_bytes,
+                     retained=self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes)
+        self.store.reserve(charge); self.store.resident_bytes+=charge; self._control_charge=charge
+        self._remember_sources()
+
+    def _account_targets(self):
+        if not self.targets:
+            self.store.resident_bytes-=self._target_charge; self._target_charge=0
+            return
+        charge=_size(_target_headers(self.targets),maximum=self.store.maximum_matrix_bytes,
+                     retained=self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes)
+        charge+=sys.getsizeof(self.targets)+sum(sys.getsizeof(pair)+sys.getsizeof(vars(rows))+
+            (sys.getsizeof(vars(rows.raw_rows)) if rows.raw_rows is not None else 0)
+            for pair in self.targets.values() for rows in [pair[1]])
+        delta=charge-self._target_charge
+        if delta>0: self.store.reserve(delta)
+        self.store.resident_bytes+=delta; self._target_charge=charge
+
+    def _remember_sources(self):
+        for store in (_view_data(self.feature,check=False)['store'],self.store):
+            for path,ref in store.hashes.items():
+                require(path not in self._source_table or self._source_table[path]==ref,
+                        'conflicting compact admitted source bytes')
+                self._source_table[path]=ref
+        records=tuple(sorted(self._source_table.items()))
+        charge=_size([self._source_table,records],maximum=self.store.maximum_matrix_bytes,
+                     retained=self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes-self._source_charge)
+        delta=charge-self._source_charge
+        if delta>0: self.store.reserve(delta)
+        self.store.resident_bytes+=delta; self._source_charge=charge; self.source_records=records
+
+    def _activate(self,fold,record):
+        if self.residency=='eager': return
+        require(self.active==0 and self.store.borrowers==0,'sequential fold window still borrowed')
+        spec=fold['fold_spec']; training,inference=validate_spec(spec,self.view['definition']['calendar'])
+        width=len(self.view['definition']['universe'])
+        # Admit the complete declared history, not merely eligible training
+        # rows or a reduced lookback chosen to fit a memory budget.
+        offsets=[self.positions[day]*width+i for day in sorted(set(training+inference)) for i in range(width)]
+        try:
+            keep_refs={desc['target_ref'] for desc in [*record['raw_parts'],record['normalized'],record['evaluation']]}
+            self._trim_targets(keep_refs)
+            fstore=_view_data(self.feature,check=False)['store']
+            previous_shared=(fstore.shared_bytes,fstore.shared_source_bytes)
+            try:
+                fstore.shared_bytes=max(fstore.shared_bytes,self.store.resident_bytes+self.store.lease_bytes)
+                fstore.shared_source_bytes=max(fstore.shared_source_bytes,self.store.metrics['source_bytes'])
+                set_feature_window(self.feature,offsets)
+            finally:
+                fstore.shared_bytes,fstore.shared_source_bytes=previous_shared
+            self._sync_shared(); self.store.reserve(0)
+            _admit_fold(self.store,self.feature,self.view,fold,record,self.targets,self.positions)
+            self._account_targets(); self._remember_sources()
+            self._active_record=digest(spec); self._verified_folds.add(self._active_record)
+            self.store.metrics['fold_window_admissions']=self.store.metrics.get('fold_window_admissions',0)+1
+            self.store.metrics['verified_fold_count']=len(self._verified_folds)
+            self._sync_shared(); self.check()
+        except BaseException:
+            # _admit_fold clears local array aliases before this trim, including
+            # exception traceback frames. Actual bytes are credited afterwards.
+            self._release_window()
+            raise
+
+    def _projection_finalized(self):
+        self.active-=1
+        _view_data(self.feature,check=False)['store'].borrowers-=1
+        require(self.active>=0,'compact projection borrower underflow')
+        if self.residency=='sequential': self._pending_release=True
+
+    def _projection_cleared(self):
+        # Keep exactly the current immutable input window, so an exact HIT or
+        # the next overlapping fold can reuse bytes. X/y/P have been detached;
+        # the next activation trims everything outside its declared closure.
+        self._pending_release=False; self._sync_shared()
+
+    def _trim_targets(self,keep_refs=()):
+        keep_refs=set(keep_refs)
+        for ref in list(self.targets):
+            if ref not in keep_refs: del self.targets[ref]
+        self._account_targets()
+        keep_paths=set(self._keep_paths)
+        for value,_ in self.targets.values():
+            keep_paths.update(item['path'] for item in value['buffers'].values())
+        for record in self.view['fold_targets']:
+            for desc in [*record['raw_parts'],record['normalized'],record['evaluation']]:
+                if desc['target_ref'] in self.targets: keep_paths.add(desc['path'])
+        value=None
+        return self.store.release_payloads(keep_paths=keep_paths)
+
+    def _release_window(self):
+        if self.residency!='sequential' or self.closed: return
+        require(self.active==0 and self.store.borrowers==0,'sequential fold window still borrowed')
+        released=self._trim_targets()
+        clear_feature_window(self.feature)
+        self._active_record=None; self._pending_release=False; self._sync_shared()
+        return released
+
+    def verify_all(self):
+        """Validate every saved fold using one source window and no matrices."""
+        self.check()
+        require(self.active==0 and self.store.borrowers==0,'compact verification window still borrowed')
+        if self.residency=='eager': return
+        try:
+            for fold,record in zip(self.batch['folds'],self.view['fold_targets']):
+                self._activate(fold,record); self.check()
+        finally:
+            self._release_window()
+        require(len(self._verified_folds)==len(self.batch['folds']),'complete compact fold admission required')
 
     def check(self):
-        require(not self.closed,'compact batch is closed'); self.store.check(); _view_data(self.feature)
+        require(not self.closed,'compact batch is closed')
+        if self._pending_release and self.active==0: self._projection_cleared()
+        self._sync_shared(); self.store.check(); _view_data(self.feature)
 
     def _account_resident(self,extra_roots=()):
         self.store.reserve(0); return self.store.shared_bytes+self.store.resident_bytes
@@ -143,17 +286,23 @@ class CompactState:
     def close(self):
         require(self.active==0 and self.store.borrowers==0,'compact batch backing still borrowed')
         if self.closed: return
-        self.store.close(); self.closed=True; fd=_view_data(self.feature,check=False); fd['borrowers']-=1
+        if self.residency=='sequential': self._release_window()
+        self.targets.clear(); self.store.close(); self.closed=True; fd=_view_data(self.feature,check=False); fd['borrowers']-=1
         if self.own_feature: self.feature.close()
 
     def _parts(self,inputs,spec):
         self.check(); key=digest(inputs),digest(spec)
         require(key in self.selectors,'fold outside compact batch definition')
-        record=next(r for r in self.view['fold_targets'] if digest(r['fold_spec'])==digest(spec))
+        record=self.records[key][1]
         require(inputs['selectors']=={k:None if k=='validation' else record['training_offsets' if k in
             ('training','training_labels') else 'inference_offsets'] for k in inputs['selectors']},
             'compact fold selectors mismatch')
         return record
+
+    def control_common(self,inputs,spec):
+        """Return saved common metadata without admitting typed fold inputs."""
+        self._parts(inputs,spec)
+        return deepcopy(self.view['definition'])
 
     def _feature_slice(self,inputs,spec,rows):
         common=self.view['definition']; training,inference=validate_spec(spec,common['calendar'])
@@ -179,61 +328,165 @@ class CompactState:
         from .stock_matrix_reader import MatrixFoldProjection
         from .stock_label_contracts import TARGET_SEMANTICS
         import numpy as np
-        record=self._parts(inputs,spec); common=deepcopy(self.view['definition']); normalized=self.targets[record['normalized']['target_ref']]
-        self.store.reserve(len(record['inference_offsets'])*(len(common['ordered_features'])*96+2048))
-        rows=feature_rows(self.feature,record['inference_offsets']); candidate_keys=[]; candidates=[]
-        for row in rows:
-            if row['member'] and all(row['validity']) and all(type(v) in (int,float) and math.isfinite(v) for v in row['values']) and feature_available(row) is not None:
-                candidates.append(row['values']); candidate_keys.append([row['security_id'],row['session']])
-        features=self._feature_slice(inputs,spec,rows); nrows=normalized[1]
-        fspec=_view_data(self.feature)['definition']['spec']; width=len(common['universe'])
-        keys=[[common['universe'][off%width],fspec['feature_sessions'][off//width]] for off in record['training_offsets']]
-        raw_refs=sorted(d['target_ref'] for d in record['raw_parts'])
-        excluded={}
-        for code,flag in zip(nrows.arrays['reason_codes'],nrows.arrays['validity']):
-            if not flag:
-                reason=nrows.value['reason_dictionary'][int(code)]; excluded[reason]=excluded.get(reason,0)+1
-        labels=seal({'contract_version':'stock_fold_label_slice_v3','input_manifest_ref':digest(inputs),
-            'prepared_view_ref':self.view['prepared_view_ref'],'fold_spec_ref':digest(spec),'cutoff':spec['fit_cutoff'],
-            'selectors':{k:deepcopy(inputs['selectors'][k]) for k in ('training_labels','evaluation_labels')},
-            'core_result_refs':inputs['core_result_refs'],'raw_label_refs':raw_refs,
-            'training_sessions':validate_spec(spec,common['calendar'])[0],'training_row_count':len(keys),'excluded':excluded},'label_ref')
-        erows=list(self.targets[record['evaluation']['target_ref']][1])
-        evaluation=seal({'contract_version':'stock_matrix_evaluation_target_slice_v1',
-            'prepared_view_ref':self.view['prepared_view_ref'],'fold_spec_ref':digest(spec),
-            'selector':deepcopy(inputs['selectors']['evaluation_labels']),'cutoff':spec['evaluation_cutoff'],'rows':erows},'label_ref')
-        bindings=record['training_binding']; training_ref=bindings['training_rows_ref']
-        payload={'common':common,'features':features,'labels':labels,'evaluation':evaluation,
-            'training_keys':keys,'training_rows_ref':training_ref,'excluded':excluded,'raw_refs':raw_refs,
-            'candidate_keys':candidate_keys,'feature_rows':rows,'feature_ref':features['feature_ref'],'label_ref':labels['label_ref']}
-        if training:
-            self.store.reserve((len(keys)+len(candidates))*len(common['ordered_features'])*8+len(keys)*24)
-            X=training_matrix(self.feature,record['training_offsets'],spec['fit_cutoff'])
-            y=nrows.arrays['values'][nrows.arrays['validity'].astype(bool)]
-            P=np.asarray(candidates,dtype='<f8').reshape(len(candidates),len(common['ordered_features']))
-            require(bool(np.isfinite(X).all()) and bool(np.isfinite(y).all()) and bool(np.isfinite(P).all()),'compact active matrix must be finite')
-            for a in (X,y,P): a.flags.writeable=False
-            payload.update(X=X,y=y,P=P)
-            self.store.metrics['training_projection_calls']=self.store.metrics.get('training_projection_calls',0)+1
-            self.store.metrics['matrix_allocated_bytes']=self.store.metrics.get('matrix_allocated_bytes',0)+sum(a.nbytes for a in (X,y,P))
-        else:
-            self.store.metrics['evaluation_projection_calls']=self.store.metrics.get('evaluation_projection_calls',0)+1
-            dataset=seal({'contract_version':'stock_fold_dataset_v3','prepared_view_ref':self.view['prepared_view_ref'],
-                'feature_ref':features['feature_ref'],'label_ref':labels['label_ref'],'raw_label_refs':raw_refs,
-                'fold_spec_ref':digest(spec),'fit_cutoff':spec['fit_cutoff'],'ordered_features':common['ordered_features'],
-                'selectors':inputs['selectors'],'training_keys_digest':digest(keys),'training_rows_ref':training_ref,
-                'training_row_count':len(keys),'excluded':excluded,'target_semantics':TARGET_SEMANTICS,
-                'normalization':NORMALIZATION_SPEC,'validation':'none_fixed_parameters_no_early_stopping'},'dataset_ref')
-            payload['fold_binding']={'dataset':dataset,'labels':labels}
-        lease=_size(payload,maximum=self.store.maximum_matrix_bytes,
-            retained=self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes)+sum(
-            a.nbytes for k,a in payload.items() if k in ('X','y','P'))+4096
-        self.store.reserve(lease); self.check()
-        self.store.lease_bytes+=lease; self.store.metrics['fold_projection_calls']+=1
-        return MatrixFoldProjection(self.store,**payload,_lease_bytes=lease)
+        record=self._parts(inputs,spec)
+        self._activate(self.records[(digest(inputs),digest(spec))][0],record)
+        normalized=nrows=X=y=P=payload=a=None; committed_lease=0; guarded=False
+        try:
+            common=deepcopy(self.view['definition']); normalized=self.targets[record['normalized']['target_ref']]
+            self.store.reserve(len(record['inference_offsets'])*(len(common['ordered_features'])*96+2048))
+            rows=feature_rows(self.feature,record['inference_offsets']); candidate_keys=[]; candidates=[]
+            for row in rows:
+                if row['member'] and all(row['validity']) and all(type(v) in (int,float) and math.isfinite(v) for v in row['values']) and feature_available(row) is not None:
+                    candidates.append(row['values']); candidate_keys.append([row['security_id'],row['session']])
+            features=self._feature_slice(inputs,spec,rows); nrows=normalized[1]
+            fspec=_view_data(self.feature)['definition']['spec']; width=len(common['universe'])
+            keys=[[common['universe'][off%width],fspec['feature_sessions'][off//width]] for off in record['training_offsets']]
+            raw_refs=sorted(d['target_ref'] for d in record['raw_parts'])
+            excluded={}
+            for code,flag in zip(nrows.arrays['reason_codes'],nrows.arrays['validity']):
+                if not flag:
+                    reason=nrows.value['reason_dictionary'][int(code)]; excluded[reason]=excluded.get(reason,0)+1
+            labels=seal({'contract_version':'stock_fold_label_slice_v3','input_manifest_ref':digest(inputs),
+                'prepared_view_ref':self.view['prepared_view_ref'],'fold_spec_ref':digest(spec),'cutoff':spec['fit_cutoff'],
+                'selectors':{k:deepcopy(inputs['selectors'][k]) for k in ('training_labels','evaluation_labels')},
+                'core_result_refs':inputs['core_result_refs'],'raw_label_refs':raw_refs,
+                'training_sessions':validate_spec(spec,common['calendar'])[0],'training_row_count':len(keys),'excluded':excluded},'label_ref')
+            erows=list(self.targets[record['evaluation']['target_ref']][1])
+            evaluation=seal({'contract_version':'stock_matrix_evaluation_target_slice_v1',
+                'prepared_view_ref':self.view['prepared_view_ref'],'fold_spec_ref':digest(spec),
+                'selector':deepcopy(inputs['selectors']['evaluation_labels']),'cutoff':spec['evaluation_cutoff'],'rows':erows},'label_ref')
+            bindings=record['training_binding']; training_ref=bindings['training_rows_ref']
+            payload={'common':common,'features':features,'labels':labels,'evaluation':evaluation,
+                'training_keys':keys,'training_rows_ref':training_ref,'excluded':excluded,'raw_refs':raw_refs,
+                'candidate_keys':candidate_keys,'feature_rows':rows,'feature_ref':features['feature_ref'],'label_ref':labels['label_ref']}
+            if training:
+                gather_rows=min(1024,len(keys)); feature_width=len(common['ordered_features'])
+                workspace=gather_rows*feature_width*8+gather_rows*32+len(nrows)
+                self.store.reserve((len(keys)+len(candidates))*feature_width*8+len(keys)*8+workspace)
+                X=training_matrix(self.feature,record['training_offsets'],spec['fit_cutoff'])
+                y=nrows.arrays['values'][nrows.arrays['validity'].astype(bool)]
+                P=np.asarray(candidates,dtype='<f8').reshape(len(candidates),len(common['ordered_features']))
+                require(bool(np.isfinite(X).all()) and bool(np.isfinite(y).all()) and bool(np.isfinite(P).all()),'compact active matrix must be finite')
+                for a in (X,y,P): a.flags.writeable=False
+                payload.update(X=X,y=y,P=P)
+                self.store.metrics['training_projection_calls']=self.store.metrics.get('training_projection_calls',0)+1
+                self.store.metrics['matrix_allocated_bytes']=self.store.metrics.get('matrix_allocated_bytes',0)+sum(a.nbytes for a in (X,y,P))
+            else:
+                self.store.metrics['evaluation_projection_calls']=self.store.metrics.get('evaluation_projection_calls',0)+1
+                dataset=seal({'contract_version':'stock_fold_dataset_v3','prepared_view_ref':self.view['prepared_view_ref'],
+                    'feature_ref':features['feature_ref'],'label_ref':labels['label_ref'],'raw_label_refs':raw_refs,
+                    'fold_spec_ref':digest(spec),'fit_cutoff':spec['fit_cutoff'],'ordered_features':common['ordered_features'],
+                    'selectors':inputs['selectors'],'training_keys_digest':digest(keys),'training_rows_ref':training_ref,
+                    'training_row_count':len(keys),'excluded':excluded,'target_semantics':TARGET_SEMANTICS,
+                    'normalization':NORMALIZATION_SPEC,'validation':'none_fixed_parameters_no_early_stopping'},'dataset_ref')
+                payload['fold_binding']={'dataset':dataset,'labels':labels}
+            lease=_size(payload,maximum=self.store.maximum_matrix_bytes,
+                retained=self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes)+sum(
+                a.nbytes for k,a in payload.items() if k in ('X','y','P'))+4096
+            self.store.reserve(lease); self.check()
+            self.store.lease_bytes+=lease; committed_lease=lease
+            self.store.metrics['fold_projection_calls']+=1
+            self.active+=1; _view_data(self.feature,check=False)['store'].borrowers+=1
+            guarded=True
+            return MatrixFoldProjection(self.store,**payload,_lease_bytes=lease,
+                _release_notice=self._projection_finalized,_after_clear=self._projection_cleared,
+                _on_failure=self._release_window)
+        except BaseException:
+            if payload is not None: payload.clear()
+            normalized=nrows=X=y=P=payload=a=None
+            common=features=labels=evaluation=rows=candidates=keys=erows=row=None
+            if guarded:
+                self.active-=1; _view_data(self.feature,check=False)['store'].borrowers-=1
+            if committed_lease: self.store.lease_bytes-=committed_lease
+            self._release_window()
+            raise
 
 
-def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,publication_store=None):
+
+def _validate_fold_controls(fold,record,view,manifest):
+    spec,inputs=fold['fold_spec'],fold['input_manifest']; training,inference=validate_spec(spec,view['definition']['calendar'])
+    require(spec==record['fold_spec'],'compact fold definition mismatch')
+    fields(inputs,{'contract_version','prepared_view','fold_spec_ref','selectors','core_result_refs','input_ref'},
+           'exact compact saved inputs required'); sealed(inputs,'input_ref')
+    require(inputs['contract_version']=='stock_ml_saved_inputs_v3' and inputs['fold_spec_ref']==digest(spec) and
+            inputs['prepared_view']==manifest['prepared_view'],'compact fold input linkage mismatch')
+    fields(inputs['selectors'],{'training','training_labels','inference','evaluation_labels','validation'},
+           'exact compact selectors required')
+    require(inputs['selectors']=={k:None if k=='validation' else record['training_offsets' if k in
+        ('training','training_labels') else 'inference_offsets'] for k in inputs['selectors']} and
+        all(type(off) is int for k in ('training_offsets','inference_offsets') for off in record[k]) and
+        reference(record['training_binding']['training_rows_ref']) and
+        reference(record['training_binding']['training_keys_digest']) and
+        record['training_binding']['training_row_count']==len(record['training_offsets']),
+        'compact saved selector/training binding mismatch')
+    return training,inference
+
+
+def _admit_fold(store,feature,view,fold,record,targets,positions=None):
+    """The same actual-byte and PIT checks serve eager and sequential loads."""
+    spec,inputs=fold['fold_spec'],fold['input_manifest']
+    common=view['definition']; training,inference=validate_spec(spec,common['calendar'])
+    fd=_view_data(feature)
+    raw_rows=[]; concatenated=nv=nrows=ev=erows=value=rows=None
+    try:
+        for desc in record['raw_parts']:
+            if desc['target_ref'] not in targets: targets[desc['target_ref']]=read_target(store,desc)
+            value,rows=targets[desc['target_ref']]
+            require(value['definition']['cutoff']==spec['fit_cutoff'] and value['definition']['snapshot']==view['definition']['snapshot'],
+                    'compact Raw cutoff/Snapshot mismatch'); raw_rows.append(rows)
+            _raw_binding(value['definition'],common,spec['fit_cutoff'])
+        concatenated=ConcatRows(raw_rows)
+        require([r['feature_session'] for r in concatenated[::len(view['definition']['universe'])]]==training,
+                'compact Raw training date coverage mismatch')
+        for desc in (record['normalized'],record['evaluation']):
+            if desc['target_ref'] not in targets:
+                targets[desc['target_ref']]=read_target(store,desc,raw_rows=concatenated if desc is record['normalized'] else None)
+        nv,nrows=targets[record['normalized']['target_ref']]; ev,erows=targets[record['evaluation']['target_ref']]
+        _raw_binding(ev['definition'],common,spec['evaluation_cutoff'])
+        require(nv['definition']['sessions']==training and nv['definition']['cutoff']==spec['fit_cutoff'] and
+                nv['definition']['raw_refs']==[d['target_ref'] for d in record['raw_parts']] and
+                nv['core_ref']==record['core_ref'] and digest(nv['cohort'])==record['cohort_ref'] and
+                nv['cohort']['feature_view_ref']==fd['definition']['feature_view_ref'] and nv['cohort']['cutoff']==spec['fit_cutoff'] and
+                ev['definition']['sessions']==inference and ev['definition']['cutoff']==spec['evaluation_cutoff'],
+                'compact normalized/cohort/evaluation linkage mismatch')
+        require(nv['definition']['universe']==common['universe'] and nv['definition']['calendar']==common['calendar'] and
+            nv['definition']['normalization_spec']==NORMALIZATION_SPEC and
+            nv['definition']['cohort_ref']==record['cohort_ref'] and
+            nv['cohort']['sessions']==training and nv['cohort']['universe']==common['universe'] and
+            nv['cohort']['raw_refs']==nv['definition']['raw_refs'] and
+            len(nv['cohort']['eligibility_reasons'])==len(nrows) and
+            nv['cohort']['eligible_keys']==[[r['security_id'],r['feature_session']] for r,reason in
+                zip(concatenated,nv['cohort']['eligibility_reasons']) if reason is None],
+            'compact cohort/schema mismatch')
+        if positions is None: positions={d:i for i,d in enumerate(fd['definition']['spec']['feature_sessions'])}
+        universe=view['definition']['universe']
+        offsets=[positions[training[i//len(universe)]]*len(universe)+i%len(universe)
+                 for i,flag in enumerate(nrows.arrays['validity']) if flag]
+        require(offsets==record['training_offsets'] and record['inference_offsets']==[positions[d]*len(universe)+i for d in inference for i in range(len(universe))],
+                'compact fold key selectors mismatch')
+        require(inputs['core_result_refs']==[record['core_ref']],'compact fold Core ref mismatch')
+        require(record['training_binding']['training_keys_digest']==digest([[universe[o%len(universe)],
+            fd['definition']['spec']['feature_sessions'][o//len(universe)]] for o in offsets]),
+            'compact training keys digest mismatch')
+    except BaseException:
+        raw_rows.clear()
+        concatenated=nv=nrows=ev=erows=value=rows=None
+        raise
+
+
+
+def _target_headers(targets):
+    # JSON definitions and byte payloads have their own per-file charges. Count
+    # only the virtual row wrappers, ndarray headers and container graph here.
+    headers=[]
+    for ref,(_,rows) in targets.items():
+        headers.append([ref,rows,rows.arrays])
+        if rows.raw_rows is not None: headers.append([rows.raw_rows,rows.raw_rows.parts])
+    return headers
+
+
+def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,publication_store=None,residency='eager'):
+    require(residency in ('eager','sequential'),'compact residency must be eager or sequential')
     fields(manifest,{'contract_version','definition','definition_ref','prepared_view','folds','status','batch_ref','content_digest'},
            'exact compact batch manifest required')
     require(manifest['contract_version']=='stock_ml_batch_inputs_v3' and manifest['status']=='COMPLETE',
@@ -241,25 +494,25 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
     sealed(manifest,'content_digest'); require(manifest['batch_ref']==digest({k:v for k,v in manifest.items() if k not in
         ('batch_ref','content_digest')}) and manifest['definition_ref']==digest(manifest['definition']),'compact batch identity mismatch')
     budgets=globals()['limits'](limits); definition=manifest['definition']; expected=definition['feature_view']; own=feature_inputs is None
-    feature=load_stock_feature_view(Path(expected['source_index']['path']).parent,limits=budgets) if own else feature_inputs
-    fd=_view_data(feature); require(feature.to_dict()==expected,'compact Feature view exact identity/cutoff mismatch')
-    require(fd['store'].resident_bytes<=budgets['maximum_matrix_bytes'] and
-            fd['store'].metrics['source_bytes']<=budgets['maximum_source_bytes'] and
-            fd['store'].metrics['largest_parent_bytes']<=budgets['maximum_parent_bytes'],
-            'borrowed Feature budget incompatible')
-    store=publication_store or OwnedStore(budgets,resolver,shared_bytes=fd['store'].resident_bytes,
-                     shared_source_bytes=fd['store'].metrics['source_bytes'])
-    require(type(store) is OwnedStore and not store.closed and store.borrowers==0,'active owner byte admission required')
-    if publication_store is not None:
-        store.shared_bytes=max(store.shared_bytes,fd['store'].resident_bytes)
-        store.shared_source_bytes=max(store.shared_source_bytes,fd['store'].metrics['source_bytes'])
-        store.reserve(0)
-        require(store.shared_source_bytes+store.metrics['source_bytes']<=budgets['maximum_source_bytes'],
-                'compact source byte budget exceeded')
-    if resolver is not None: store.resolve=resolver
-    store.check_hook=fd['store'].check
-    state=None
+    feature=store=state=None
     try:
+        feature=load_stock_feature_view(Path(expected['source_index']['path']).parent,limits=budgets,residency=residency) if own else feature_inputs
+        fd=_view_data(feature); require(feature.to_dict()==expected,'compact Feature view exact identity/cutoff mismatch')
+        require(fd['store'].resident_bytes<=budgets['maximum_matrix_bytes'] and
+                fd['store'].metrics['source_bytes']<=budgets['maximum_source_bytes'] and
+                fd['store'].metrics['largest_parent_bytes']<=budgets['maximum_parent_bytes'],
+                'borrowed Feature budget incompatible')
+        store=publication_store or OwnedStore(budgets,resolver,shared_bytes=fd['store'].resident_bytes,
+                         shared_source_bytes=fd['store'].metrics['source_bytes'])
+        require(type(store) is OwnedStore and not store.closed and store.borrowers==0,'active owner byte admission required')
+        if publication_store is not None:
+            store.shared_bytes=max(store.shared_bytes,fd['store'].resident_bytes)
+            store.shared_source_bytes=max(store.shared_source_bytes,fd['store'].metrics['source_bytes'])
+            store.reserve(0)
+            require(store.shared_source_bytes+store.metrics['source_bytes']<=budgets['maximum_source_bytes'],
+                    'compact source byte budget exceeded')
+        if resolver is not None: store.resolve=resolver
+        store.check_hook=fd['store'].check
         view=store.read_json(manifest['prepared_view'],key='prepared_view_ref')
         fields(view,{'contract_version','definition','feature_view','fold_targets','prepared_view_ref'},
                'exact compact prepared view required')
@@ -271,78 +524,27 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
         require(view['definition']==common and definition['version']=='axiom.stock_ml_batch_inputs/3' and
                 [f['fold_spec'] for f in manifest['folds']]==definition['fold_specs'] and
                 len(manifest['folds'])==len(view['fold_targets'])>0,'compact common/fold definition mismatch')
-        targets={}; previous=None
+        previous=None
         for fold,record in zip(manifest['folds'],view['fold_targets']):
-            spec,inputs=fold['fold_spec'],fold['input_manifest']; training,inference=validate_spec(spec,view['definition']['calendar'])
-            require(spec==record['fold_spec'] and (previous is None or spec['oos_trade_sessions'][0]>previous),
-                    'compact fold chronology/definition mismatch'); previous=spec['oos_trade_sessions'][-1]
-            fields(inputs,{'contract_version','prepared_view','fold_spec_ref','selectors','core_result_refs','input_ref'},
-                   'exact compact saved inputs required'); sealed(inputs,'input_ref')
-            require(inputs['contract_version']=='stock_ml_saved_inputs_v3' and inputs['fold_spec_ref']==digest(spec) and
-                    inputs['prepared_view']==manifest['prepared_view'],'compact fold input linkage mismatch')
-            fields(inputs['selectors'],{'training','training_labels','inference','evaluation_labels','validation'},
-                   'exact compact selectors required')
-            require(inputs['selectors']=={k:None if k=='validation' else record['training_offsets' if k in
-                ('training','training_labels') else 'inference_offsets'] for k in inputs['selectors']} and
-                all(type(off) is int for k in ('training_offsets','inference_offsets') for off in record[k]) and
-                reference(record['training_binding']['training_rows_ref']) and
-                reference(record['training_binding']['training_keys_digest']) and
-                record['training_binding']['training_row_count']==len(record['training_offsets']),
-                'compact saved selector/training binding mismatch')
-            raw_rows=[]
-            for desc in record['raw_parts']:
-                if desc['target_ref'] not in targets: targets[desc['target_ref']]=read_target(store,desc)
-                value,rows=targets[desc['target_ref']]
-                require(value['definition']['cutoff']==spec['fit_cutoff'] and value['definition']['snapshot']==view['definition']['snapshot'],
-                        'compact Raw cutoff/Snapshot mismatch'); raw_rows.append(rows)
-                _raw_binding(value['definition'],common,spec['fit_cutoff'])
-            concatenated=ConcatRows(raw_rows)
-            require([r['feature_session'] for r in concatenated[::len(view['definition']['universe'])]]==training,
-                    'compact Raw training date coverage mismatch')
-            for desc in (record['normalized'],record['evaluation']):
-                if desc['target_ref'] not in targets:
-                    targets[desc['target_ref']]=read_target(store,desc,raw_rows=concatenated if desc is record['normalized'] else None)
-            nv,nrows=targets[record['normalized']['target_ref']]; ev,erows=targets[record['evaluation']['target_ref']]
-            _raw_binding(ev['definition'],common,spec['evaluation_cutoff'])
-            require(nv['definition']['sessions']==training and nv['definition']['cutoff']==spec['fit_cutoff'] and
-                    nv['definition']['raw_refs']==[d['target_ref'] for d in record['raw_parts']] and
-                    nv['core_ref']==record['core_ref'] and digest(nv['cohort'])==record['cohort_ref'] and
-                    nv['cohort']['feature_view_ref']==fd['definition']['feature_view_ref'] and nv['cohort']['cutoff']==spec['fit_cutoff'] and
-                    ev['definition']['sessions']==inference and ev['definition']['cutoff']==spec['evaluation_cutoff'],
-                    'compact normalized/cohort/evaluation linkage mismatch')
-            require(nv['definition']['universe']==common['universe'] and nv['definition']['calendar']==common['calendar'] and
-                nv['definition']['normalization_spec']==NORMALIZATION_SPEC and
-                nv['definition']['cohort_ref']==record['cohort_ref'] and
-                nv['cohort']['sessions']==training and nv['cohort']['universe']==common['universe'] and
-                nv['cohort']['raw_refs']==nv['definition']['raw_refs'] and
-                len(nv['cohort']['eligibility_reasons'])==len(nrows) and
-                nv['cohort']['eligible_keys']==[[r['security_id'],r['feature_session']] for r,reason in
-                    zip(concatenated,nv['cohort']['eligibility_reasons']) if reason is None],
-                'compact cohort/schema mismatch')
-            positions={d:i for i,d in enumerate(fd['definition']['spec']['feature_sessions'])}; universe=view['definition']['universe']
-            offsets=[positions[training[i//len(universe)]]*len(universe)+i%len(universe)
-                     for i,flag in enumerate(nrows.arrays['validity']) if flag]
-            require(offsets==record['training_offsets'] and record['inference_offsets']==[positions[d]*len(universe)+i for d in inference for i in range(len(universe))],
-                    'compact fold key selectors mismatch')
-            require(inputs['core_result_refs']==[record['core_ref']],'compact fold Core ref mismatch')
-            require(record['training_binding']['training_keys_digest']==digest([[universe[o%len(universe)],
-                fd['definition']['spec']['feature_sessions'][o//len(universe)]] for o in offsets]),
-                'compact training keys digest mismatch')
+            _validate_fold_controls(fold,record,view,manifest)
+            spec=fold['fold_spec']
+            require(previous is None or spec['oos_trade_sessions'][0]>previous,
+                    'compact fold chronology/definition mismatch')
+            previous=spec['oos_trade_sessions'][-1]
         require(len(manifest['folds'])==len(view['fold_targets'])==len(definition['fold_specs'])>0,
                 'complete compact fold coverage required')
-        # Row snapshots are owned compact decoded targets, not source/proof
-        # graphs. Account once after ingress, never once per training row.
-        state=CompactState(store,feature,deepcopy(manifest),view,targets,own)
-        charge=_size([targets,state.batch,state.selectors,state.source_records],maximum=store.maximum_matrix_bytes,
-                     retained=store.shared_bytes+store.resident_bytes)
-        store.reserve(charge); store.resident_bytes+=charge
-        store.metrics['resident_bytes']=store.shared_bytes+store.resident_bytes
+        state=CompactState(store,feature,deepcopy(manifest),view,{},own,residency=residency)
+        state._account_controls()
+        if residency=='eager':
+            for fold,record in zip(manifest['folds'],view['fold_targets']):
+                _admit_fold(store,feature,view,fold,record,state.targets,state.positions)
+            state._account_targets(); state._remember_sources()
         state.check(); return state
     except BaseException:
         if state is not None: state.close()
         else:
-            store.close()
-            if own: feature.close()
+            if type(store) is OwnedStore: store.close()
+            if own and feature is not None: feature.close()
         raise
 
 
@@ -363,17 +565,22 @@ def _raw_binding(definition,common,cutoff):
         'compact Raw query/calendar/vintage binding mismatch')
 
 
-def load_compact_projection(inputs,spec,*,evaluation=False):
+def load_compact_state_from_inputs(inputs):
     # The manifest and view share one actual-byte admission. No preliminary
     # view decode/hash followed by a second independent read.
     descriptor=inputs['prepared_view']; store=OwnedStore()
     root=Path(descriptor['path']).parent
     try:
         manifest=store.read_json({'path':str(root/'batch.json')},key='content_digest')
-        state=load_compact_state(manifest,publication_store=store)
+        state=load_compact_state(manifest,publication_store=store,residency='sequential')
     except BaseException: store.close(); raise
+    return state
+
+
+def load_compact_projection(inputs,spec,*,evaluation=False):
+    state=load_compact_state_from_inputs(inputs)
     try:
-        projection=(state.project_evaluation(inputs,spec,batch_ref=manifest['batch_ref']) if evaluation else state.project(inputs,spec))
+        projection=(state.project_evaluation(inputs,spec,batch_ref=state._batch_ref) if evaluation else state.project(inputs,spec))
         projection._owned_state=state
         return projection
     except BaseException: state.close(); raise

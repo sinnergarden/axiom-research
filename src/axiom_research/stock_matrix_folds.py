@@ -38,6 +38,20 @@ def _dataset(projection,inputs,spec):
         'normalization':NORMALIZATION_SPEC,'validation':'none_fixed_parameters_no_early_stopping'},'dataset_ref')
 
 
+def _fold_definition(inputs,spec,common,parameters,rounds):
+    from .stock_ml import _implementation,_environment
+    from .feature_catalog import load_feature_catalog
+    catalog=load_feature_catalog()
+    require(common['catalog_ref']==catalog.identity and common['ordered_features']==[
+        f['id'] for f in catalog.select(common['feature_selection'])], 'current catalog selection mismatch')
+    implementations=_implementation()
+    return {'version':'axiom.stock_ml_fold/3','input_manifest':inputs,'input_manifest_ref':digest(inputs),
+        'fold_spec':spec,'fold_spec_ref':digest(spec),'catalog_ref':common['catalog_ref'],
+        'parameters':parameters,'num_boost_round':rounds,'target_semantics':TARGET_SEMANTICS,
+        'label_normalization':NORMALIZATION_SPEC,'environment':_environment(),
+        'implementation_sources':implementations,'implementation_ref':digest(implementations)}
+
+
 def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,training_options=None):
     from .stock_fold_artifacts import _repath_owned_fold
     from .stock_ml import _implementation,_environment,_signal_evidence
@@ -46,19 +60,33 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,traini
     from .feature_catalog import load_feature_catalog
     begin=time.perf_counter(); parameters, rounds = training_profile(training_options)
     inputs,spec=deepcopy(inputs),deepcopy(spec)
+    if batch is None and inputs.get('contract_version')=='stock_ml_saved_inputs_v3':
+        from .stock_compact_batch import load_compact_state_from_inputs
+        from .stock_batch import _compact_batch_handle
+        state=load_compact_state_from_inputs(inputs)
+        with _compact_batch_handle(state,state.batch,begin) as owned:
+            return build_matrix_fold(inputs,spec=spec,destination=destination,metrics=metrics,
+                batch=owned,training_options=training_options)
+    definition=None
+    zeros=dict(data_read_calls=0,supplier_calls=0,feature_core_calls=0,label_core_calls=0,
+        core_calls=0,account_calls=0,train_calls=0,predict_calls=0)
+    if inputs.get('contract_version')=='stock_ml_saved_inputs_v3':
+        from .stock_batch import _data
+        state=_data(batch)['matrix_state']
+        common=state.control_common(inputs,spec)
+        definition=_fold_definition(inputs,spec,common,parameters,rounds)
+        target=Path(destination)/digest(definition)[7:]
+        if target.exists():
+            # Saved validation uses the same OOS projection and full source
+            # checks; no training X/y/P is allocated for an exact HIT.
+            saved=load_matrix_fold(target,batch=batch)
+            require(saved.to_dict()['definition']==definition,'cached matrix fold definition mismatch')
+            if metrics is not None: metrics.update(zeros,cache_hit=True,total_seconds=time.perf_counter()-begin)
+            return _repath_owned_fold(saved,target,reused=True)
     with _projection(inputs,spec,batch) as projection:
-        common=projection.common; catalog=load_feature_catalog()
-        require(common['catalog_ref']==catalog.identity and common['ordered_features']==[
-            f['id'] for f in catalog.select(common['feature_selection'])], 'current catalog selection mismatch')
-        implementations=_implementation()
-        definition={'version':'axiom.stock_ml_fold/3','input_manifest':inputs,'input_manifest_ref':digest(inputs),
-            'fold_spec':spec,'fold_spec_ref':digest(spec),'catalog_ref':common['catalog_ref'],
-            'parameters':parameters,'num_boost_round':rounds,'target_semantics':TARGET_SEMANTICS,
-            'label_normalization':NORMALIZATION_SPEC,'environment':_environment(),
-            'implementation_sources':implementations,'implementation_ref':digest(implementations)}
+        common=projection.common
+        if definition is None: definition=_fold_definition(inputs,spec,common,parameters,rounds)
         definition_ref=digest(definition); target=Path(destination)/definition_ref[7:]
-        zeros=dict(data_read_calls=0,supplier_calls=0,feature_core_calls=0,label_core_calls=0,
-            core_calls=0,account_calls=0,train_calls=0,predict_calls=0)
         if target.exists():
             saved=load_matrix_fold(target,projection=projection,batch=batch)
             require(saved.to_dict()['definition']==definition,'cached matrix fold definition mismatch')

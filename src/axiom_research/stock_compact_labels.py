@@ -16,7 +16,7 @@ from .stock_label_contracts import (_eligible_reason, _instant, NORMALIZATION_SP
     RAW_TARGET_SCHEMA, NORMALIZED_TARGET_SCHEMA, _normalization_sources, core_clock)
 from .stock_matrix_storage import write_buffer, write_part, instant_us
 from .stock_compact_store import (_view_data, StockFeatureView, load_stock_feature_view,
-    iter_feature_rows, iter_feature_eligibility, OwnedStore, limits, sealed, _size)
+    iter_feature_rows, iter_feature_eligibility, set_feature_window, OwnedStore, limits, sealed, _size)
 
 
 def _implementation():
@@ -48,14 +48,24 @@ def _raw_implementation():
 
 def _working(metrics, amount):
     """Measure each completed chunk once; never rescan an accumulated panel."""
+    _sync_feature_charge(metrics)
     total=metrics['_feature_bytes']+metrics['_store'].resident_bytes+metrics['_retained_raw_bytes']+metrics.get('_price_view_bytes',0)+amount
     require(total<=metrics['_limits']['maximum_matrix_bytes'],'compact producer working byte budget exceeded')
     metrics['maximum_working_bytes']=max(metrics['maximum_working_bytes'],total)
 
 
 def _measured(metrics,value):
+    _sync_feature_charge(metrics)
     return _size(value,maximum=metrics['_limits']['maximum_matrix_bytes'],
         retained=metrics['_feature_bytes']+metrics['_store'].resident_bytes+metrics['_retained_raw_bytes']+metrics.get('_price_view_bytes',0))
+
+
+def _sync_feature_charge(metrics):
+    """A sequential Feature window changes the live shared byte charge."""
+    feature_store=metrics['_feature_store']
+    metrics['_feature_bytes']=feature_store.resident_bytes+metrics['_caller_bytes']
+    metrics['_store'].shared_bytes=metrics['_feature_bytes']
+    metrics['_store'].shared_source_bytes=feature_store.metrics['source_bytes']+metrics['_caller_source_bytes']
 
 
 def _clock(value):
@@ -258,7 +268,12 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
     # panels. Release them before Core takes its own immutable snapshot and
     # before normalized rows/cohort publication are allocated.
     del arrays
-    result=execute_cs_zscore_batch(carrier,params=NORMALIZATION_SPEC['params'])
+    try:
+        result=execute_cs_zscore_batch(carrier,params=NORMALIZATION_SPEC['params'])
+    finally:
+        # A retained exception traceback must not turn the producer frame into
+        # an owner of the detached Core input buffers.
+        del carrier,sources,dictionary
     metrics['core_calls']+=1; metrics['label_core_calls']+=1
     core_ref=result['metadata']['result_ref']; normalized=[]
     for i,row in enumerate(rows):
@@ -267,6 +282,9 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
             'return':float(result['values'][i]) if valid else None,'valid':valid,
             'label_available_at':_clock(result['available_at_utc_us'][i]) if valid else None,
             'invalid_reason':None if valid else reasons[i] or 'NORMALIZATION_UNDEFINED'})
+    # Neither the Core carrier nor its immutable result is a next-fold cache.
+    # Keep only the logical normalized rows and small committed references.
+    del result
     desc=_publish(target,definition,normalized,budgets=metrics['_limits'],normalized=True,core_ref=core_ref,cohort=cohort,
                   store=metrics['_store'])
     fd['store'].check()
@@ -286,31 +304,41 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             'fixed compact options and positive budgets required')
     budgets=limits({'maximum_matrix_bytes':options['maximum_resident_bytes'],
         **{k:options[k] for k in ('maximum_source_bytes','maximum_parent_bytes') if k in options}})
-    feature=load_stock_feature_view(feature_inputs,limits=budgets) if own else feature_inputs
-    fd=_view_data(feature); spec=fd['definition']['spec']; width=len(spec['universe'])
-    require(fd['store'].resident_bytes<=budgets['maximum_matrix_bytes'] and
-            fd['store'].metrics['source_bytes']<=budgets['maximum_source_bytes'] and
-            fd['store'].metrics['largest_parent_bytes']<=budgets['maximum_parent_bytes'],'borrowed Feature budget incompatible')
-    definition={'version':'axiom.stock_ml_batch_inputs/3','feature_view':feature.to_dict(),
-        'fold_specs':deepcopy(fold_specs),'preparation_options':options,'implementation_ref':_implementation(),
-        'environment':_input_environment()}
-    definition_ref=digest(definition); target=Path(destination).absolute()/definition_ref[7:]
     require(type(_caller_bytes) is int and _caller_bytes>=0 and type(_caller_source_bytes) is int and _caller_source_bytes>=0,
             'nonnegative owner audit accounting required')
-    store=OwnedStore(budgets,shared_bytes=fd['store'].resident_bytes+_caller_bytes,
-        shared_source_bytes=fd['store'].metrics['source_bytes']+_caller_source_bytes)
-    store.check_hook=fd['store'].check
+    feature=load_stock_feature_view(feature_inputs,limits=budgets,residency='sequential') if own else feature_inputs
+    store=None
+    try:
+        fd=_view_data(feature); spec=fd['definition']['spec']; width=len(spec['universe'])
+        require(fd['store'].resident_bytes<=budgets['maximum_matrix_bytes'] and
+                fd['store'].metrics['source_bytes']<=budgets['maximum_source_bytes'] and
+                fd['store'].metrics['largest_parent_bytes']<=budgets['maximum_parent_bytes'],'borrowed Feature budget incompatible')
+        definition={'version':'axiom.stock_ml_batch_inputs/3','feature_view':feature.to_dict(),
+            'fold_specs':deepcopy(fold_specs),'preparation_options':options,'implementation_ref':_implementation(),
+            'environment':_input_environment()}
+        definition_ref=digest(definition); target=Path(destination).absolute()/definition_ref[7:]
+        store=OwnedStore(budgets,shared_bytes=fd['store'].resident_bytes+_caller_bytes,
+            shared_source_bytes=fd['store'].metrics['source_bytes']+_caller_source_bytes)
+        store.check_hook=fd['store'].check
+    except BaseException:
+        if store is not None: store.close()
+        if own: feature.close()
+        raise
     transferred=False
     stats={'cache_hit':False,'data_read_calls':0,'supplier_calls':0,'feature_core_calls':0,'core_calls':0,
         'label_core_calls':0,'raw_operator_calls':0,'raw_cache_hits':0,'normalized_cache_hits':0,
         'admitted_price_view_reuses':0,'account_calls':0,'train_calls':0,'predict_calls':0,'fold_queries':[],
         'price_domains':[],
         'maximum_working_bytes':fd['store'].resident_bytes,
-        '_limits':budgets,'_feature_bytes':fd['store'].resident_bytes+_caller_bytes,'_retained_raw_bytes':0,'_store':store}
+        '_limits':budgets,'_feature_bytes':fd['store'].resident_bytes+_caller_bytes,'_retained_raw_bytes':0,'_store':store,
+        '_feature_store':fd['store'],'_caller_bytes':_caller_bytes,'_caller_source_bytes':_caller_source_bytes}
     try:
         if (target/'batch.json').exists():
             value=json.loads((target/'batch.json').read_bytes()); require(value['definition']==definition,'cached compact definition mismatch')
-            state=load_compact_state(value,feature_inputs=feature,limits=budgets)
+            state=load_compact_state(value,feature_inputs=feature,limits=budgets,residency='sequential')
+            try: state.verify_all()
+            except BaseException:
+                state.close(); raise
             if value['batch_ref'] in fd['prepared']: fd['prepared'][value['batch_ref']].close()
             fd['prepared'][value['batch_ref']]=state
             stats.update(cache_hit=True,total_seconds=time.perf_counter()-begin)
@@ -349,18 +377,28 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
                 if role=='raw_parts': raw_outputs[i][role][n]=desc
                 else: raw_outputs[i][role]=desc
                 del chunk
+                # Published descriptors, rather than every historical typed
+                # target, are the retained union between cutoff domains.
+                store.release_payloads()
             del price_view
             stats['_price_view_bytes']=0
         from .stock_compact_batch import read_target
+        positions={d:i for i,d in enumerate(spec['feature_sessions'])}
         for i,(fold,training,inference) in enumerate(plans):
+            window=[positions[d]*width+j for d in training+inference for j in range(width)]
+            set_feature_window(feature,window); _sync_feature_charge(stats)
             parts=raw_outputs[i]['raw_parts']; rows=[]
             for desc in parts:
-                _,chunk=read_target(store,desc); chunk=list(chunk)
+                raw_value,raw_rows=read_target(store,desc); chunk=list(raw_rows)
                 chunk_bytes=_measured(stats,chunk); _working(stats,chunk_bytes)
                 stats['_retained_raw_bytes']+=chunk_bytes; rows.extend(chunk)
+                del raw_value,raw_rows,chunk
+                store.release_payloads()
             norm,nrows,core_ref,cohort=_normalized(parts,rows,feature,fold['fit_cutoff'],training,cache,stats)
+            normalized_bytes=_measured(stats,[nrows,cohort]); _working(stats,normalized_bytes)
+            stats['_retained_raw_bytes']+=normalized_bytes
+            store.release_payloads()
             ev=raw_outputs[i]['evaluation']
-            positions={d:i for i,d in enumerate(spec['feature_sessions'])}
             training_offsets=[positions[r['feature_session']]*width+spec['universe'].index(r['security_id'])
                 for r in nrows if r['valid']]
             inference_offsets=[positions[d]*width+i for d in inference for i in range(width)]
@@ -380,8 +418,12 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             if progress: progress({'stage':'compact_labels','completed':len(records),'total':len(plans)})
             # Completed fold facts live in typed targets; release their Python
             # working panels before the next cutoff-specific Data selection.
-            del rows,nrows,chunk,cohort
+            del rows,nrows,cohort,joined_rows,window
             stats['_retained_raw_bytes']=0
+            store.release_payloads()
+            # Preserve already verified overlap for the next full window;
+            # set_feature_window trims only partitions outside that window.
+        set_feature_window(feature,[]); _sync_feature_charge(stats)
         target.parent.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='.compact-batch-',dir=target.parent) as temporary:
             stage=Path(temporary)/'complete'; stage.mkdir()
@@ -406,9 +448,12 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             batch['batch_ref']=digest(batch); batch=seal(batch,'content_digest'); write_json(stage/'batch.json',batch)
             state=load_compact_state(batch,feature_inputs=feature,limits=budgets,
                 resolver=lambda p:stage/Path(p).relative_to(target) if Path(p).is_relative_to(target) else Path(p),
-                publication_store=store)
-            transferred=True
+                publication_store=store,residency='sequential')
+            # COMPLETE requires the same full saved closure validation, one
+            # active fold at a time, before the directory becomes visible.
             try:
+                state.verify_all()
+                transferred=True
                 stage.rename(target); state.store.resolve=lambda p:Path(p); state.check()
             except BaseException:
                 state.close(); raise
@@ -416,6 +461,7 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
         stats.update(total_seconds=time.perf_counter()-begin,batch_ref=batch['batch_ref'],
             feature_file_hash_calls=fd['store'].metrics['file_hash_calls'],
             label_file_hash_calls=store.metrics['file_hash_calls'],label_hash_bytes=store.metrics['hash_bytes'],
+            label_released_buffer_bytes=store.metrics.get('released_buffer_bytes',0),
             legacy_ancestor_reads=0,legacy_native_hash_calls=0)
         if metrics is not None: metrics.update({k:v for k,v in stats.items() if not k.startswith('_')})
         return batch

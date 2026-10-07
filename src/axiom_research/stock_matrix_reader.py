@@ -1475,25 +1475,42 @@ class MatrixFoldProjection:
     def __init__(self,store,**values):
         self._store=store; self._closed=False; self.__dict__.update(values); store.borrowers+=1
         owner=store if values.get('_close_store_on_release',False) else None
-        self._finalizer=weakref.finalize(self,MatrixFoldProjection._release,weakref.ref(store),getattr(self,'_lease_bytes',0),owner)
+        try:
+            self._finalizer=weakref.finalize(self,MatrixFoldProjection._release,weakref.ref(store),
+                getattr(self,'_lease_bytes',0),owner,values.get('_release_notice'))
+        except BaseException:
+            store.borrowers-=1
+            raise
     @staticmethod
-    def _release(reference,lease_bytes,owner=None):
+    def _release(reference,lease_bytes,owner=None,notice=None):
         store=reference()
         if store is not None:
             store.borrowers-=1; store.lease_bytes-=lease_bytes
+        # A GC finalizer marks the window releasable; it does not credit source
+        # payloads while the dying object's attribute graph may still exist.
+        if notice is not None: notice()
         if owner is not None and not owner.closed: owner.close()
     def close(self):
         if not self._closed:
             owned_state=getattr(self,'_owned_state',None)
-            self._closed=True; self._finalizer()
+            after_clear=getattr(self,'_after_clear',None)
+            self._closed=True
             for name in ('X','y','P','features','labels','common','feature_rows','training_keys',
                          'candidate_keys','evaluation','excluded','raw_refs','raw_provenance',
                          'label_leaf_bindings','fold_binding','source_record_indices','_owned_state',
-                         'raw','storage_binding','source_records','source_fingerprints'):
+                         'raw','storage_binding','source_records','source_fingerprints',
+                         '_release_notice','_after_clear','_on_failure'):
                 setattr(self,name,None)
+            # Release the lease only after its native arrays and row snapshots
+            # are detached. The owner's callback may now trim actual bytes.
+            self._finalizer()
+            if after_clear is not None: after_clear()
             if owned_state is not None: owned_state.close()
     def __enter__(self): require(not self._closed,'matrix fold projection is closed'); return self
-    def __exit__(self,*args): self.close()
+    def __exit__(self,exc_type,exc,traceback):
+        failure=getattr(self,'_on_failure',None)
+        self.close()
+        if exc_type is not None and failure is not None: failure()
 
 
 def _raw_snapshot_reservation(raw, store):

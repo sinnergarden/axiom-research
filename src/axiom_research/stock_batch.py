@@ -71,7 +71,16 @@ class StockMLBatchInputs:
 
     @property
     def metrics(self):
-        return deepcopy(_data(self)['metrics'])
+        value=_data(self); state=value.get('matrix_state')
+        if state is None or getattr(state,'residency','eager')=='eager':
+            return deepcopy(value['metrics'])
+        result=deepcopy(state.store.metrics); feature=state.feature.metrics
+        for key in ('file_hash_calls','hash_bytes','source_bytes','json_decode_calls','released_buffer_bytes'):
+            result[key]=result.get(key,0)+feature.get(key,0)
+        result.update(residency=state.residency,feature_residency=state.store.metrics['feature_residency'],
+            resident_bytes=state.store.shared_bytes+state.store.resident_bytes,
+            lease_bytes=state.store.lease_bytes)
+        return result
 
     def _check_sources(self):
         value = _data(self)
@@ -121,6 +130,8 @@ class StockMLBatchInputs:
         value = _data(self)
         require('matrix_state' in value, 'saved matrix batch required')
         self._check_sources()
+        if getattr(value['matrix_state'],'residency','eager')=='sequential':
+            value['matrix_state'].verify_all()
         return value['matrix_state'].source_records
 
     def _admit_raw_label(self, descriptor):
@@ -162,7 +173,20 @@ class StockMLBatchInputs:
         self.close()
 
 
-def load_stock_ml_batch_inputs(batch_manifest, *, feature_inputs=None, limits=None):
+def _compact_batch_handle(state,manifest,begin):
+    """One handle construction for public and standalone compact ingress."""
+    metrics=deepcopy(state.store.metrics)
+    for key in ('file_hash_calls','hash_bytes','source_bytes','json_decode_calls'):
+        metrics[key]+=state.feature.metrics.get(key,0)
+    metrics.update(initialization_seconds=time.perf_counter()-begin,legacy_ancestor_reads=0,
+        legacy_native_hash_calls=0,common_key_index_builds=1)
+    value={'identity':manifest['batch_ref'],'manifest':manifest,'matrix_state':state,
+        'fold_keys':{(digest(f['input_manifest']),digest(f['fold_spec'])) for f in manifest['folds']},
+        'closed':False,'metrics':metrics}
+    return StockMLBatchInputs(_TOKEN,value)
+
+
+def load_stock_ml_batch_inputs(batch_manifest, *, feature_inputs=None, limits=None, residency='eager'):
     """Verify each unique saved parent once and allocate one readonly matrix.
 
     ``batch_manifest`` is {contract_version: stock_ml_batch_inputs_v1, folds:
@@ -170,9 +194,13 @@ def load_stock_ml_batch_inputs(batch_manifest, *, feature_inputs=None, limits=No
     must have the same complete common-source definition, be chronological and
     have disjoint OOS trade sessions. Per-fit Label descriptors remain distinct.
     Limits are positive integer byte budgets, not an arbitrary fold-count cap.
-    Metrics report initialization only; no fit/predict/account is performed.
+    Compact v3 accepts ``residency='sequential'`` for controls-only initial
+    admission followed by one complete fold window. Saved identities are
+    independent of this owner-local memory choice. No fit/predict/account is
+    performed; sequential metrics include subsequent window admissions.
     """
     begin = time.perf_counter()
+    require(residency in ('eager','sequential'),'unknown batch residency mode')
     manifest = deepcopy(batch_manifest)
     if type(manifest) is dict and manifest.get('contract_version')=='stock_ml_batch_inputs_v3':
         from .stock_compact_batch import load_compact_state
@@ -184,17 +212,13 @@ def load_stock_ml_batch_inputs(batch_manifest, *, feature_inputs=None, limits=No
             state=fd['prepared'].get(manifest['batch_ref'])
             if state is not None:
                 require(state.batch==manifest and state.feature is feature_inputs,'prepared compact handle mismatch')
-                state.check(); state.compatible(compact_limits(limits)); fd['prepared'].pop(manifest['batch_ref'])
-        if state is None: state=load_compact_state(manifest,feature_inputs=feature_inputs,limits=limits)
-        metrics=deepcopy(state.store.metrics)
-        for key in ('file_hash_calls','hash_bytes','source_bytes','json_decode_calls'):
-            metrics[key]+=state.feature.metrics.get(key,0)
-        metrics.update(initialization_seconds=time.perf_counter()-begin,legacy_ancestor_reads=0,
-            legacy_native_hash_calls=0,common_key_index_builds=1)
-        value={'identity':manifest['batch_ref'],'manifest':manifest,'matrix_state':state,
-            'fold_keys':{(digest(f['input_manifest']),digest(f['fold_spec'])) for f in manifest['folds']},
-            'closed':False,'metrics':metrics}
-        return StockMLBatchInputs(_TOKEN,value)
+                state.check(); state.compatible(compact_limits(limits))
+                fd['prepared'].pop(manifest['batch_ref'])
+                if state.residency!=residency:
+                    state.close(); state=None
+        if state is None: state=load_compact_state(manifest,feature_inputs=feature_inputs,limits=limits,residency=residency)
+        return _compact_batch_handle(state,manifest,begin)
+    require(residency=='eager','sequential residency requires compact v3 inputs')
     require(feature_inputs is None,'Feature handle reuse requires compact v3 inputs')
     if type(manifest) is dict and manifest.get('contract_version') == 'stock_ml_batch_inputs_v2':
         from .stock_matrix_reader import load_matrix_batch_state
