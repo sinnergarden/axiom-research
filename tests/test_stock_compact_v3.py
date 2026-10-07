@@ -10,6 +10,7 @@ import sys
 import tempfile
 import types
 import unittest
+import weakref
 from unittest.mock import patch
 
 from axiom_research import (load_stock_feature_view,prepare_stock_ml_batch_inputs,
@@ -73,6 +74,97 @@ class CompactV3Tests(unittest.TestCase):
                 destination=root/'prepared',preparation_options={'row_block_sessions':block,'column_block':32,
                     'maximum_resident_bytes':64*1024**2,'normalization_backend':'core_cs_batch_v1'},metrics=metrics)
         return result,data
+
+    def test_native_price_batches_released_before_wire_accounting(self):
+        from axiom_research import stock_compact_labels as owner
+        from test_stock_matrix_prepare import Batch
+        case=self; read_refs=[]; adjusted_refs=[]; wire_checks=[]
+
+        class AdjustedBatch(Batch):
+            def to_json(self):
+                case.assertTrue(all(ref() is None for ref in read_refs),
+                                'native inputs overlap adjusted JSON conversion')
+                wire_checks.append('conversion')
+                return super().to_json()
+
+        class LifecycleData(PublicDataFixture):
+            def read(self,**kwargs):
+                case.assertTrue(all(ref() is None for ref in adjusted_refs),
+                                'previous adjusted batch survives into next cutoff')
+                value=super().read(**kwargs); read_refs.append(weakref.ref(value))
+                return value
+
+            def adjust(self,*args,**kwargs):
+                value=super().adjust(*args,**kwargs); detached=AdjustedBatch(value.wire)
+                adjusted_refs.append(weakref.ref(detached)); return detached
+
+        original=owner._measured
+        def measured(metrics,value):
+            case.assertTrue(all(ref() is None for ref in adjusted_refs),
+                            'native adjusted batch overlaps wire hash/accounting')
+            wire_checks.append('accounting')
+            return original(metrics,value)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); f,path=self.fixture(root); data=LifecycleData(f.spec)
+            with load_stock_feature_view(path) as view,patch.object(owner,'_measured',new=measured):
+                manifest,_=self.prepare(f,view,root,folds=f.folds()[:1],data=data)
+                self.assertEqual(manifest['status'],'COMPLETE')
+            self.assertEqual(wire_checks.count('conversion'),2)
+            self.assertIn('accounting',wire_checks)
+            self.assertTrue(all(ref() is None for ref in read_refs+adjusted_refs))
+
+    def test_normalization_releases_working_panels_before_core_snapshot(self):
+        from axiom_research import stock_compact_labels as owner
+        from axiom_engine.core import execute_cs_zscore_batch
+        array_refs=[]; feature_refs=[]; calls=[]
+        original_array=owner.array; original_rows=owner.feature_rows
+
+        class FeatureRow(dict):
+            pass
+
+        def tracked_array(code):
+            value=original_array(code); array_refs.append(weakref.ref(value)); return value
+
+        def tracked_rows(feature,offsets):
+            rows=[FeatureRow(r) for r in original_rows(feature,offsets)]
+            if rows: feature_refs.append(weakref.ref(rows[0]))
+            return rows
+
+        def core(carrier,**kwargs):
+            self.assertEqual(len(array_refs),9)
+            self.assertTrue(all(ref() is None for ref in array_refs),
+                            'mutable arrays overlap Core immutable snapshot')
+            self.assertIsNone(feature_refs[0](),
+                              'full Feature panel/index survives into Core')
+            calls.append(1)
+            return execute_cs_zscore_batch(carrier,**kwargs)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); f,path=self.fixture(root); stats={}
+            with load_stock_feature_view(path) as view, \
+                 patch.object(owner,'array',new=tracked_array), \
+                 patch.object(owner,'feature_rows',new=tracked_rows), \
+                 patch('axiom_engine.core.execute_cs_zscore_batch',new=core):
+                manifest,_=self.prepare(f,view,root,stats,folds=f.folds()[:1])
+                self.assertEqual(manifest['status'],'COMPLETE')
+            self.assertEqual((len(calls),stats['core_calls']),(1,1))
+
+    def test_storage_implementation_delta_reuses_frozen_raw_without_operator(self):
+        from axiom_research import stock_compact_labels as owner
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); f,path=self.fixture(root); fold=f.folds()[0]
+            with load_stock_feature_view(path) as view:
+                with patch.object(owner,'_implementation',return_value=digest('prior-storage-code')):
+                    before,_=self.prepare(f,view,root,folds=[fold])
+                saved={p:file_digest(p) for p in (root/'prepared/compact-cache/raw').rglob('*') if p.is_file()}
+                stats={}; after,_=self.prepare(f,view,root,stats,folds=[fold])
+                self.assertNotEqual(before['batch_ref'],after['batch_ref'])
+                self.assertEqual((stats['data_read_calls'],stats['raw_operator_calls'],
+                                  stats['raw_cache_hits'],stats['core_calls'],stats['normalized_cache_hits']),
+                                 (4,0,4,1,0))
+                self.assertEqual({p:file_digest(p) for p in saved},saved)
+                self.assertEqual(len(list((root/'prepared/compact-cache/raw').glob('*/target.json'))),4)
 
     def test_shared_batch_to_saved_prediction_and_hit(self):
         with tempfile.TemporaryDirectory() as temp:

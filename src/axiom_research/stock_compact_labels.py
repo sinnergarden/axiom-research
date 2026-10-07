@@ -86,8 +86,7 @@ def _publish(target,definition,rows,*,budgets,normalized=False,core_ref=None,coh
     with tempfile.TemporaryDirectory(prefix='.compact-target-',dir=target.parent) as temporary:
         stage=Path(temporary)/'complete'; stage.mkdir()
         desc=_write(stage,definition,rows,normalized=normalized,core_ref=core_ref,cohort=cohort,final_root=target)
-        value=json.loads(Path(desc['path']).read_bytes())
-        final={'path':str(target/'target.json'),'file_digest':file_digest(stage/'target.json'),'target_ref':value['target_ref']}
+        final={'path':str(target/'target.json'),'file_digest':file_digest(stage/'target.json'),'target_ref':desc['target_ref']}
         checker=store or OwnedStore(budgets); original=checker.resolve
         checker.resolve=lambda p:stage/Path(p).relative_to(target) if Path(p).is_relative_to(target) else original(p)
         try:
@@ -147,7 +146,11 @@ def _price_view(data,spec,cutoff,days,metrics):
     metrics['data_read_calls']+=2
     adjusted=adjust_prices(price,factors,fields=('open','close'),anchor_session=anchor,
                           decision_session=anchor,factor_field='factor')
+    # The public adjuster returns a detached batch. Native inputs need not
+    # overlap its JSON conversion, canonical hashes or graph accounting.
+    del price,factors
     records,meta,context=_versioned(adjusted,'label_outcomes')
+    del adjusted
     _working(metrics,2*_measured(metrics,[records,meta,context])+len(days)*len(spec['universe'])*1024)
     _query_context(context,spec['calendar']); source=_source_view(records,meta,context)
     metrics['_price_view_bytes']=_measured(metrics,[records,meta,context,source])
@@ -243,6 +246,10 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
         'security_ids':spec['universe'],'reason_dictionary':dictionary,'source_bindings_by_session':sources,
         **{k:memoryview(v.tobytes()).cast('?' if k in ('value_validity','reference_member') else v.typecode)
            for k,v in arrays.items()}}
+    # Carrier bytes and per-session bindings are detached from these working
+    # panels. Release them before Core takes its own immutable snapshot and
+    # before normalized rows/cohort publication are allocated.
+    del arrays,fr,indexed,raw_index,raw_like
     result=execute_cs_zscore_batch(carrier,params=NORMALIZATION_SPEC['params'])
     metrics['core_calls']+=1; metrics['label_core_calls']+=1
     core_ref=result['metadata']['result_ref']; normalized=[]

@@ -127,12 +127,13 @@ def prepare_child(*, consume=False):
             data.read = observed_read
             metrics = {}
             def progress(value): emit(component=value['stage'],completed_folds=value['completed'])
+            prepared_root = Path(cfg.get('prepared_destination', out/'prepared')).absolute()
             manifest = prepare_stock_ml_batch_inputs(data, feature_inputs=feature,
-                fold_specs=cfg['fold_specs'], destination=out/'prepared',
+                fold_specs=cfg['fold_specs'], destination=prepared_root,
                 preparation_options=cfg['prepare_options'], metrics=metrics, progress=progress)
             require(manifest['contract_version']=='stock_ml_batch_inputs_v3' and manifest['status']=='COMPLETE' and
                     manifest['definition']['fold_specs']==cfg['fold_specs'], 'prepared v3 contract differs')
-            path = out/'prepared'/manifest['definition_ref'][7:]/'batch.json'
+            path = prepared_root/manifest['definition_ref'][7:]/'batch.json'
             locator = {'path':str(path),'file_digest':monitor.file_ref(path),'batch_ref':manifest['batch_ref'],
                        'prepared_view_ref':manifest['prepared_view']['prepared_view_ref']}
             save(out/'batch-locator.json',locator)
