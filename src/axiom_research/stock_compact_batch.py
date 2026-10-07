@@ -139,6 +139,8 @@ class CompactState:
         self.records={(digest(f['input_manifest']),digest(f['fold_spec'])):(f,r)
             for f,r in zip(batch['folds'],view['fold_targets'])}
         fd=_view_data(feature); fd['borrowers']+=1
+        self._fixed_shared_bytes=max(0,store.shared_bytes-fd['store'].resident_bytes)
+        self._fixed_shared_source_bytes=max(0,store.shared_source_bytes-fd['store'].metrics['source_bytes'])
         self.positions={d:i for i,d in enumerate(fd['definition']['spec']['feature_sessions'])}
         self._keep_paths={batch['prepared_view']['path']} | {path for path,value in store.json.items()
             if value.get('contract_version')=='stock_ml_batch_inputs_v3' and value.get('batch_ref')==self._batch_ref}
@@ -148,8 +150,8 @@ class CompactState:
 
     def _sync_shared(self):
         fstore=_view_data(self.feature,check=False)['store']
-        self.store.shared_bytes=fstore.resident_bytes
-        self.store.shared_source_bytes=fstore.metrics['source_bytes']
+        self.store.shared_bytes=fstore.resident_bytes+self._fixed_shared_bytes
+        self.store.shared_source_bytes=fstore.metrics['source_bytes']+self._fixed_shared_source_bytes
         self.store.metrics.update(residency=self.residency,
             feature_residency=_view_data(self.feature,check=False).get('residency','eager'),
             resident_bytes=self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes,
@@ -202,12 +204,15 @@ class CompactState:
             self._trim_targets(keep_refs)
             fstore=_view_data(self.feature,check=False)['store']
             previous_shared=(fstore.shared_bytes,fstore.shared_source_bytes)
+            previous_limits=fstore.limits
             try:
-                fstore.shared_bytes=max(fstore.shared_bytes,self.store.resident_bytes+self.store.lease_bytes)
-                fstore.shared_source_bytes=max(fstore.shared_source_bytes,self.store.metrics['source_bytes'])
+                fstore.limits={k:min(v,self.store.limits[k]) for k,v in previous_limits.items()}
+                fstore.shared_bytes=max(fstore.shared_bytes,self._fixed_shared_bytes+self.store.resident_bytes+self.store.lease_bytes)
+                fstore.shared_source_bytes=max(fstore.shared_source_bytes,self._fixed_shared_source_bytes+self.store.metrics['source_bytes'])
                 set_feature_window(self.feature,offsets)
             finally:
                 fstore.shared_bytes,fstore.shared_source_bytes=previous_shared
+                fstore.limits=previous_limits
             self._sync_shared(); self.store.reserve(0)
             _admit_fold(self.store,self.feature,self.view,fold,record,self.targets,self.positions)
             self._account_targets(); self._remember_sources()
@@ -497,7 +502,10 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
     feature=store=state=None
     try:
         feature=load_stock_feature_view(Path(expected['source_index']['path']).parent,limits=budgets,residency=residency) if own else feature_inputs
-        fd=_view_data(feature); require(feature.to_dict()==expected,'compact Feature view exact identity/cutoff mismatch')
+        fd=_view_data(feature)
+        require(residency!='eager' or fd['residency']=='eager',
+                'sequential Feature requires sequential batch residency')
+        require(feature.to_dict()==expected,'compact Feature view exact identity/cutoff mismatch')
         require(fd['store'].resident_bytes<=budgets['maximum_matrix_bytes'] and
                 fd['store'].metrics['source_bytes']<=budgets['maximum_source_bytes'] and
                 fd['store'].metrics['largest_parent_bytes']<=budgets['maximum_parent_bytes'],

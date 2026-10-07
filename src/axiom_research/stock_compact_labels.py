@@ -68,6 +68,20 @@ def _sync_feature_charge(metrics):
     metrics['_store'].shared_source_bytes=feature_store.metrics['source_bytes']+metrics['_caller_source_bytes']
 
 
+def _producer_feature_window(feature, offsets, metrics):
+    feature_store=metrics['_feature_store']; store=metrics['_store']
+    previous=(feature_store.limits,feature_store.shared_bytes,feature_store.shared_source_bytes)
+    try:
+        feature_store.limits={k:min(v,metrics['_limits'][k]) for k,v in previous[0].items()}
+        feature_store.shared_bytes=max(previous[1],metrics['_caller_bytes']+store.resident_bytes+
+            metrics['_retained_raw_bytes']+metrics.get('_price_view_bytes',0))
+        feature_store.shared_source_bytes=max(previous[2],metrics['_caller_source_bytes']+store.metrics['source_bytes'])
+        set_feature_window(feature,offsets)
+    finally:
+        feature_store.limits,feature_store.shared_bytes,feature_store.shared_source_bytes=previous
+    _sync_feature_charge(metrics)
+
+
 def _clock(value):
     return (datetime(1970,1,1,tzinfo=timezone.utc)+timedelta(microseconds=int(value))).isoformat().replace('+00:00','Z')
 
@@ -386,7 +400,7 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
         positions={d:i for i,d in enumerate(spec['feature_sessions'])}
         for i,(fold,training,inference) in enumerate(plans):
             window=[positions[d]*width+j for d in training+inference for j in range(width)]
-            set_feature_window(feature,window); _sync_feature_charge(stats)
+            _producer_feature_window(feature,window,stats)
             parts=raw_outputs[i]['raw_parts']; rows=[]
             for desc in parts:
                 raw_value,raw_rows=read_target(store,desc); chunk=list(raw_rows)
@@ -423,7 +437,7 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             store.release_payloads()
             # Preserve already verified overlap for the next full window;
             # set_feature_window trims only partitions outside that window.
-        set_feature_window(feature,[]); _sync_feature_charge(stats)
+        _producer_feature_window(feature,[],stats)
         target.parent.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='.compact-batch-',dir=target.parent) as temporary:
             stage=Path(temporary)/'complete'; stage.mkdir()

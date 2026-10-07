@@ -74,9 +74,13 @@ class StockMLBatchInputs:
         value=_data(self); state=value.get('matrix_state')
         if state is None or getattr(state,'residency','eager')=='eager':
             return deepcopy(value['metrics'])
-        result=deepcopy(state.store.metrics); feature=state.feature.metrics
+        result=deepcopy(value['metrics']); result.update(deepcopy(state.store.metrics))
+        feature=state.feature.metrics
         for key in ('file_hash_calls','hash_bytes','source_bytes','json_decode_calls','released_buffer_bytes'):
             result[key]=result.get(key,0)+feature.get(key,0)
+        for key in ('feature_block_admissions','eligibility_reduction_calls','block_run_visits',
+                    'training_block_gathers','released_feature_metadata_bytes','active_feature_blocks'):
+            result[key]=feature.get(key,0)
         result.update(residency=state.residency,feature_residency=state.store.metrics['feature_residency'],
             resident_bytes=state.store.shared_bytes+state.store.resident_bytes,
             lease_bytes=state.store.lease_bytes)
@@ -209,6 +213,8 @@ def load_stock_ml_batch_inputs(batch_manifest, *, feature_inputs=None, limits=No
         state=None
         if feature_inputs is not None:
             fd=_view_data(feature_inputs)
+            require(residency!='eager' or fd['residency']=='eager',
+                    'sequential Feature requires sequential batch residency')
             state=fd['prepared'].get(manifest['batch_ref'])
             if state is not None:
                 require(state.batch==manifest and state.feature is feature_inputs,'prepared compact handle mismatch')

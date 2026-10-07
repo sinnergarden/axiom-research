@@ -14,12 +14,130 @@ from axiom_research import (load_stock_feature_view, load_stock_ml_batch_inputs,
     build_stock_ml_fold_from_saved_inputs)
 from axiom_research.stock_artifacts import _read, digest, file_digest, write_json
 from axiom_research.stock_batch import _data
-from axiom_research.stock_compact_store import OwnedStore, _view_data
+from axiom_research.stock_compact_store import OwnedStore, _view_data, set_feature_window
 from axiom_research.stock_fold_inputs import seal, validate_spec
 from axiom_research.stock_matrix_storage import instant_us, write_buffer, write_part
 
 
 class SequentialWindowTests(unittest.TestCase):
+    def test_budget_measurement_failure_drops_its_native_item_alias(self):
+        from axiom_research.stock_matrix_reader import _bounded_resident_size
+        refs=[]
+        def attempt():
+            payload=[memoryview(bytes(16))]; refs.append(weakref.ref(payload[0]))
+            try: _bounded_resident_size(payload,maximum=6500,retained=lambda:0)
+            except ValueError as error: return error
+            finally: payload.clear()
+        error=attempt(); self.assertIsNotNone(error.__traceback__)
+        gc.collect(); self.assertIsNone(refs[0]())
+
+    def test_invalid_leaf_tracebacks_drop_bottom_layer_payload_aliases(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); path=root/'invalid-bool.bin'; path.write_bytes(b'\x02')
+            descriptor={'path':str(path),'file_digest':file_digest(path),'buffer_digest':file_digest(path),
+                        'dtype':'bool_u8','shape':[1]}
+            for kind in ('bool','digest','shape'):
+                store=OwnedStore(); failed=deepcopy(descriptor)
+                if kind=='digest': failed['file_digest']=failed['buffer_digest']='sha256:'+'0'*64
+                if kind=='shape': failed['shape']=[2]
+                try: store.buffer(failed)
+                except ValueError as error:
+                    traceback=error.__traceback__; checked=[]
+                    while traceback is not None:
+                        frame=traceback.tb_frame
+                        if frame.f_code.co_name in ('read','buffer'):
+                            checked.append(frame.f_code.co_name)
+                            self.assertIsNone(frame.f_locals.get('payload'))
+                            self.assertIsNone(frame.f_locals.get('array'))
+                        traceback=traceback.tb_next
+                    self.assertIn('buffer',checked)
+                    if kind=='digest': self.assertIn('read',checked)
+                else: self.fail('invalid leaf admitted')
+                store.release_payloads()
+                self.assertEqual((store.arrays,store.json,store.resident_bytes),({},{},0))
+                store.close()
+            bad=root/'invalid-seal.json'; write_json(bad,{'target_ref':'sha256:'+'0'*64,'rows':[{'value':'kept'}]})
+            store=OwnedStore()
+            try: store.read_json({'path':str(bad)},key='target_ref')
+            except ValueError as error:
+                traceback=error.__traceback__
+                while traceback is not None:
+                    frame=traceback.tb_frame
+                    if frame.f_code.co_name in ('read_json','sealed'):
+                        self.assertIsNone(frame.f_locals.get('value'))
+                        self.assertIsNone(frame.f_locals.get('payload'))
+                    traceback=traceback.tb_next
+            else: self.fail('invalid JSON seal admitted')
+            store.close()
+
+    def test_caller_baseline_and_borrowed_feature_limits_survive_windows(self):
+        from axiom_research.stock_compact_batch import load_compact_state
+        with tempfile.TemporaryDirectory() as temp:
+            f,path,manifest,_=self.fixture(Path(temp),folds=1)
+            with load_stock_feature_view(path,residency='sequential') as feature:
+                fstore=_view_data(feature)['store']; baseline=123456; source_baseline=1234
+                store=OwnedStore(shared_bytes=fstore.resident_bytes+baseline,
+                    shared_source_bytes=fstore.metrics['source_bytes']+source_baseline)
+                state=load_compact_state(manifest,feature_inputs=feature,publication_store=store,residency='sequential')
+                try:
+                    self.assertEqual(store.shared_bytes,fstore.resident_bytes+baseline)
+                    state.verify_all()
+                    self.assertEqual(store.shared_bytes,fstore.resident_bytes+baseline)
+                    self.assertEqual(store.shared_source_bytes,fstore.metrics['source_bytes']+source_baseline)
+                finally: state.close()
+                budgets={'maximum_matrix_bytes':4*1024**2,'maximum_source_bytes':2*1024**2,'maximum_parent_bytes':1024**2}
+                previous=(fstore.limits,fstore.shared_bytes,fstore.shared_source_bytes); observed=[]
+                with load_stock_ml_batch_inputs(manifest,feature_inputs=feature,residency='sequential',limits=budgets) as batch:
+                    def buffer(owner,descriptor):
+                        self.assertIs(owner,fstore); observed.append(dict(owner.limits))
+                        self.assertEqual(owner.limits,budgets)
+                        raise RuntimeError('explicit pre-buffer budget observation')
+                    fold=manifest['folds'][0]
+                    with patch.object(OwnedStore,'buffer',new=buffer),self.assertRaisesRegex(RuntimeError,'pre-buffer budget'):
+                        batch._matrix_project(fold['input_manifest'],fold['fold_spec'])
+                    self.assertEqual(observed,[budgets])
+                    self.assertEqual((fstore.limits,fstore.shared_bytes,fstore.shared_source_bytes),previous)
+
+    def test_sequential_feature_eager_batch_rejects_before_consuming_cache(self):
+        from axiom_research.stock_compact_batch import load_compact_state
+        with tempfile.TemporaryDirectory() as temp:
+            f,path,manifest,_=self.fixture(Path(temp),folds=1)
+            with load_stock_feature_view(path,residency='sequential') as feature:
+                fd=_view_data(feature); pending=load_compact_state(manifest,feature_inputs=feature,residency='sequential')
+                fd['prepared'][manifest['batch_ref']]=pending
+                with self.assertRaisesRegex(ValueError,'sequential Feature requires sequential batch'):
+                    load_stock_ml_batch_inputs(manifest,feature_inputs=feature)
+                self.assertIs(fd['prepared'][manifest['batch_ref']],pending)
+                self.assertFalse(pending.closed)
+                with self.assertRaisesRegex(ValueError,'sequential Feature requires sequential batch'):
+                    load_compact_state(manifest,feature_inputs=feature)
+                with load_stock_ml_batch_inputs(manifest,feature_inputs=feature,residency='sequential') as batch:
+                    self.assertEqual(batch.identity,manifest['batch_ref'])
+
+    def test_window_admits_all_column_metadata_blocks_before_projection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); f,path=fixtures.CompactV3Tests().fixture(root)
+            index=_read(path/'index.json'); original=index['partitions'][0]
+            metadata=_read(original['metadata']['path']); rows=metadata['rows']; parts=[]
+            for ordinal,positions in enumerate((range(3),range(3,6))):
+                chosen=[f.columns[i] for i in positions]; shape=[len(rows),len(chosen)]
+                meta=write_part(path,seal({**{k:deepcopy(v) for k,v in metadata.items() if k!='metadata_ref'},
+                    'synthetic_part':ordinal},'metadata_ref'),'metadata_ref')
+                buffers={name:write_buffer(path,values,dtype=dtype,shape=shape) for name,dtype,values in (
+                    ('values','float64_le',[row['values'][i] for row in rows for i in positions]),
+                    ('value_validity','bool_u8',[row['validity'][i] for row in rows for i in positions]),
+                    ('available_at_utc_us','int64_le',[instant_us(row['availability'][i]) for row in rows for i in positions]),
+                    ('available_at_validity','bool_u8',[True for row in rows for i in positions]))}
+                parts.append(seal({**{k:v for k,v in original.items() if k not in ('partition_ref','metadata','buffers','columns')},
+                    'columns':chosen,'metadata':meta,'buffers':buffers},'partition_ref'))
+            index['partitions']=parts; write_json(path/'index.json',index)
+            bad=Path(parts[1]['buffers']['values']['path']); bad.write_bytes(b'\x01'*bad.stat().st_size)
+            with load_stock_feature_view(path,residency='sequential') as view:
+                with self.assertRaisesRegex(ValueError,'digest mismatch'):
+                    set_feature_window(view,[0])
+                self.assertEqual(_view_data(view)['store'].arrays,{})
+                self.assertTrue(all(block['parts'] is None for block in _view_data(view)['blocks']))
+
     def test_finalizer_construction_failure_drops_owner_traceback_payload(self):
         from axiom_research.stock_matrix_reader import MatrixFoldProjection
         store=OwnedStore(); refs=[]

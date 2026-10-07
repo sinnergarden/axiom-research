@@ -41,8 +41,11 @@ def reference(value):
 
 
 def sealed(value, key):
-    require(reference(value.get(key)) and value[key]==digest({k:v for k,v in value.items() if k!=key}),
-            'compact '+key+' identity mismatch')
+    try:
+        valid=reference(value.get(key)) and value[key]==digest({k:v for k,v in value.items() if k!=key})
+    finally:
+        value=None
+    require(valid,'compact '+key+' identity mismatch')
 
 
 def _json_pairs(items):
@@ -119,72 +122,83 @@ class OwnedStore:
             require(mark[2]<=self.limits['maximum_parent_bytes'],'compact parent byte budget exceeded')
             self.metrics['largest_parent_bytes']=max(self.metrics['largest_parent_bytes'],mark[2])
         self.reserve(mark[2]*(12 if parent else 1)+4096)
-        with physical.open('rb') as stream:
-            require(_stat(os.fstat(stream.fileno()))==mark,'compact source changed before read')
-            payload=stream.read(mark[2]+1)
-            require(len(payload)==mark[2] and _stat(os.fstat(stream.fileno()))==mark and
-                    file_fingerprint(physical)==mark,'compact source changed during read')
-            self.metrics['source_stat_calls']+=1
-        actual='sha256:'+sha256(payload).hexdigest()
-        require(expected is None or actual==expected,'compact file digest mismatch')
+        payload=None
+        try:
+            with physical.open('rb') as stream:
+                require(_stat(os.fstat(stream.fileno()))==mark,'compact source changed before read')
+                payload=stream.read(mark[2]+1)
+                require(len(payload)==mark[2] and _stat(os.fstat(stream.fileno()))==mark and
+                        file_fingerprint(physical)==mark,'compact source changed during read')
+                self.metrics['source_stat_calls']+=1
+            actual='sha256:'+sha256(payload).hexdigest()
+            require(expected is None or actual==expected,'compact file digest mismatch')
+        except BaseException:
+            payload=None
+            raise
         self.marks[path]=mark; self.hashes[path]=actual
         self.metrics['file_hash_calls']+=1; self.metrics['hash_bytes']+=len(payload)
         self.metrics['source_bytes']+=len(payload)
         return payload
 
     def read_json(self, descriptor, *, key=None, legacy=False, keep=True):
-        self._check_owner()
-        path=descriptor['path']
-        if path in self.json:
-            self.check_path(path); value=self.json[path]
-            require(descriptor.get('file_digest',self.hashes[path])==self.hashes[path],
-                    'conflicting compact JSON descriptor')
-        else:
-            payload=self.read(descriptor,parent=True)
-            require(payload is not None,'released compact JSON cannot be revisited')
-            value=json.loads(payload,object_pairs_hook=_json_pairs,parse_constant=_json_constant)
-            self.metrics['json_decode_calls']+=1
-            if legacy and value.get('contract_version') in ('stock_native_json_carrier_v1','stock_native_json_carrier_v2'):
-                # Runtime row facts live in the verified skeleton. Coverage/
-                # wire slots and historical canonical hashes are audit-only.
-                value=value['skeleton']
-            if keep:
-                charge=_size(value,maximum=self.maximum_matrix_bytes,
-                    retained=self.shared_bytes+self.resident_bytes+self.lease_bytes+len(payload))
-                self.reserve(charge); self.resident_bytes+=charge
-                self.json[path]=value; self.charges[path]=charge
-        if key: sealed(value,key)
-        return value
+        value=payload=None
+        try:
+            self._check_owner()
+            path=descriptor['path']
+            if path in self.json:
+                self.check_path(path); value=self.json[path]
+                require(descriptor.get('file_digest',self.hashes[path])==self.hashes[path],
+                        'conflicting compact JSON descriptor')
+            else:
+                payload=self.read(descriptor,parent=True)
+                require(payload is not None,'released compact JSON cannot be revisited')
+                value=json.loads(payload,object_pairs_hook=_json_pairs,parse_constant=_json_constant)
+                self.metrics['json_decode_calls']+=1
+                if legacy and value.get('contract_version') in ('stock_native_json_carrier_v1','stock_native_json_carrier_v2'):
+                    # Runtime row facts live in the verified skeleton. Coverage/
+                    # wire slots and historical canonical hashes are audit-only.
+                    value=value['skeleton']
+                if keep:
+                    charge=_size(value,maximum=self.maximum_matrix_bytes,
+                        retained=self.shared_bytes+self.resident_bytes+self.lease_bytes+len(payload))
+                    self.reserve(charge); self.resident_bytes+=charge
+                    self.json[path]=value; self.charges[path]=charge
+            if key: sealed(value,key)
+            return value
+        except BaseException:
+            value=payload=None
+            raise
 
     def buffer(self, descriptor):
-        self._check_owner()
-        fields(descriptor,BUFFER_FIELDS,'exact compact buffer descriptor required')
-        require(descriptor['dtype'] in DTYPES and descriptor['file_digest']==descriptor['buffer_digest'] and
-                type(descriptor['shape']) is list and bool(descriptor['shape']) and
-                all(type(v) is int and v>=0 for v in descriptor['shape']), 'compact buffer dtype/shape required')
-        path=descriptor['path']; import numpy as np
-        shape=tuple(descriptor['shape']); count=1
-        for size in shape: count*=size
-        dtype={'float64_le':'<f8','bool_u8':'u1','int64_le':'<i8','uint64_le':'<u8',
-               'int32_le':'<i4','uint8':'u1'}[descriptor['dtype']]
-        if path not in self.arrays:
-            payload=self.read(descriptor,retain=True)
-            require(len(payload)==count*np.dtype(dtype).itemsize,'compact buffer byte length mismatch')
-            self.reserve(len(payload)); self.resident_bytes+=len(payload)
-            self.metrics['owned_buffer_bytes']+=len(payload)
-            self.arrays[path]=payload; self.charges[path]=len(payload)
-        else: self.check_path(path)
-        require(self.hashes[path]==descriptor['file_digest'],'conflicting compact buffer digest')
-        payload=self.arrays[path]
-        require(len(payload)==count*np.dtype(dtype).itemsize,'conflicting compact buffer shape')
-        array=np.frombuffer(payload,dtype=dtype).reshape(shape)
+        array=payload=None
         try:
+            self._check_owner()
+            fields(descriptor,BUFFER_FIELDS,'exact compact buffer descriptor required')
+            require(descriptor['dtype'] in DTYPES and descriptor['file_digest']==descriptor['buffer_digest'] and
+                    type(descriptor['shape']) is list and bool(descriptor['shape']) and
+                    all(type(v) is int and v>=0 for v in descriptor['shape']), 'compact buffer dtype/shape required')
+            path=descriptor['path']; import numpy as np
+            shape=tuple(descriptor['shape']); count=1
+            for size in shape: count*=size
+            dtype={'float64_le':'<f8','bool_u8':'u1','int64_le':'<i8','uint64_le':'<u8',
+                   'int32_le':'<i4','uint8':'u1'}[descriptor['dtype']]
+            if path not in self.arrays:
+                payload=self.read(descriptor,retain=True)
+                require(len(payload)==count*np.dtype(dtype).itemsize,'compact buffer byte length mismatch')
+                self.reserve(len(payload)); self.resident_bytes+=len(payload)
+                self.metrics['owned_buffer_bytes']+=len(payload)
+                self.arrays[path]=payload; self.charges[path]=len(payload)
+            else: self.check_path(path)
+            require(self.hashes[path]==descriptor['file_digest'],'conflicting compact buffer digest')
+            payload=self.arrays[path]
+            require(len(payload)==count*np.dtype(dtype).itemsize,'conflicting compact buffer shape')
+            array=np.frombuffer(payload,dtype=dtype).reshape(shape)
             require(not array.flags.writeable,'owned bytes must remain readonly')
             if descriptor['dtype']=='bool_u8': require(bool(((array==0)|(array==1)).all()),'compact bool bytes must be 0/1')
+            return array
         except BaseException:
             array=payload=None
             raise
-        return array
 
     def release(self, paths):
         """Drop owned cache references; callers first drop their array views."""
@@ -324,13 +338,14 @@ def load_stock_feature_view(path, *, limits=None, residency="eager"):
             end=0
             for start,stop in sorted(spans): require(start==end,'Feature coverage gap/overlap'); end=stop
             require(end==row_index['row_count'],'Feature table incomplete')
-        blocks=[]; parents={}; day_blocks=[None]*len(days)
+        blocks=[]; parents={}; day_blocks=[None]*len(days); day_admissions=[[] for _ in days]
         for (start,count,_),group in sorted(groups.items()):
             ordinal=len(blocks)
             blocks.append({'start':start,'count':count,'descriptors':group,'parts':None,'rows':None,
                 'complete_columns':{c for part in group for c in part['columns']}==set(columns),
                 'charge':0,'eligibility':None})
             for day in range(start//len(securities),(start+count)//len(securities)):
+                day_admissions[day].append(ordinal)
                 if day_blocks[day] is None: day_blocks[day]=ordinal
         require(all(i is not None for i in day_blocks),'Feature block index incomplete')
         definition={'contract_version':'stock_feature_table_view_v1','source_index':{
@@ -341,7 +356,7 @@ def load_stock_feature_view(path, *, limits=None, residency="eager"):
         require(definition['historical_content_digest'] is None or reference(definition['historical_content_digest']),
                 'Feature historical content digest must be an explicit ref')
         definition['feature_view_ref']=digest(definition)
-        control=_size([definition,parents,row_index,blocks,day_blocks,column_positions],maximum=store.maximum_matrix_bytes,
+        control=_size([definition,parents,row_index,blocks,day_blocks,day_admissions,column_positions],maximum=store.maximum_matrix_bytes,
                       retained=store.resident_bytes)
         store.reserve(control); store.resident_bytes+=control
         store.metrics.update(initialization_seconds=time.perf_counter()-begin,common_key_index_builds=1,
@@ -349,6 +364,7 @@ def load_stock_feature_view(path, *, limits=None, residency="eager"):
         store.check()
         handle=StockFeatureView(_TOKEN,{'path':path,'definition':definition,'store':store,'blocks':blocks,
             'parents':parents,'row_index':row_index,'column_positions':column_positions,'day_blocks':day_blocks,
+            'day_admissions':day_admissions,
             'control_paths':{index_path,index['row_index']['path']},'residency':residency,
             'closed':False,'borrowers':0,'prepared':{}})
         if residency=='eager':
@@ -442,7 +458,7 @@ def set_feature_window(handle, offsets):
     width=len(value['definition']['spec']['universe']); wanted=set()
     for off in offsets:
         require(type(off) is int and 0<=off<value['row_index']['row_count'],'Feature offset outside view')
-        wanted.add(value['day_blocks'][off//width])
+        wanted.update(value['day_admissions'][off//width])
     _trim_feature_window(value,wanted)
     try:
         for ordinal in sorted(wanted): _admit_feature_block(value,value['blocks'][ordinal])
