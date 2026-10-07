@@ -65,6 +65,7 @@ class VerifiedMatrixStore:
         self._hashes={}; self._decoded={}
         self._native_bindings={}; self._carrier_files={}; self._carrier_storage={}
         self._coverage_verified={}; self._native_verified=set()
+        self._publication_accounting=None
         self.content = {}; self.closed = False; self.borrowers = 0; self.resident_bytes = 0; self.lease_bytes=0
         self.metrics = {'unique_descriptor_admissions': 0, 'file_hash_calls': 0,
             'json_decode_calls': 0, 'mmap_opens': 0, 'source_bytes': 0,
@@ -86,12 +87,87 @@ class VerifiedMatrixStore:
             caller=0 if self._caller_retained_bytes is None else self._caller_retained_bytes()
             require(type(caller) is int and caller>=0,'nonnegative caller retained byte count required')
             return caller+self.resident_bytes+self.lease_bytes
+        if self._publication_accounting is not None:
+            size=self._publication_owned_bytes()
+            values=self._publication_accounting[1]
+            extra=0 if value is None or id(value) in values else _bounded_resident_size(
+                value,maximum=self.maximum_matrix_bytes,retained=lambda:retained()+size)
+            require(retained()+size+extra<=self.maximum_matrix_bytes,
+                    'matrix resident accounting workspace budget exceeded')
+            return retained()+size+extra
         size=_bounded_resident_size([
             self.descriptors,self.fingerprints,self.json,self.arrays,self._hashes,
             self._decoded,self.content,self._native_bindings,self._carrier_files,
             self._carrier_storage,self._coverage_verified,self._native_verified,self.metrics,value],
             maximum=self.maximum_matrix_bytes,retained=retained)
         return retained()+size
+
+    def _publication_maps(self):
+        return (self.descriptors,self.fingerprints,self.json,self.arrays,self._hashes,
+                self._decoded,self.content,self._native_bindings,self._carrier_files,
+                self._carrier_storage,self._coverage_verified)
+
+    def _begin_publication_accounting(self):
+        # Only the builder's empty, unexposed Store uses this mode. Every
+        # retained value is private and read-only until handoff. Public loaders
+        # keep the complete graph walk, including externally mutable aliases.
+        require(self._publication_accounting is None and not self.closed and
+                self.borrowers==0 and not any(self._publication_maps()) and not self._native_verified,
+                'empty private publication Store required')
+        self._publication_accounting=[{}, {}, 0]
+
+    def _publication_owned_bytes(self):
+        entries,values,charge=self._publication_accounting
+        # Container table growth is O(1) to measure. The fixed 512-byte entry
+        # reserve covers ledger keys/records/scalars; root graphs are measured
+        # once, with shared roots reference-counted rather than re-traversed.
+        base=(charge+512*(len(entries)+len(values))+sys.getsizeof(entries)+sys.getsizeof(values)+
+              sys.getsizeof(self._publication_accounting)+sys.getsizeof(self._native_verified)+
+              sum(sys.getsizeof(m) for m in self._publication_maps()))
+        external=0 if self._caller_retained_bytes is None else self._caller_retained_bytes()
+        require(type(external) is int and external>=0,'nonnegative caller retained byte count required')
+        return base+_bounded_resident_size(self.metrics,maximum=self.maximum_matrix_bytes,
+            retained=lambda:external+self.resident_bytes+self.lease_bytes+base)
+
+    def _retain_entry(self, mapping, key, value):
+        if self._publication_accounting is None:
+            mapping[key]=value; return
+        entries,values,_=self._publication_accounting
+        token=(id(mapping),key)
+        if token in entries and mapping[key] is value: return
+        # Charge the replacement while the old graph is still live. Both the
+        # accounting workspace and the new private ledger entry fit the same
+        # budget; an admission failure never publishes a checkpoint.
+        # Dict resizing can temporarily retain old and new tables. Reserve
+        # their growth without enumerating the existing entries.
+        growth=2048+2*(sys.getsizeof(mapping)+sys.getsizeof(entries)+sys.getsizeof(values))
+        retained=lambda:self._native_caller_bytes()+growth
+        key_bytes=_bounded_resident_size(key,maximum=self.maximum_matrix_bytes,retained=retained)
+        oid=id(value); record=values.get(oid)
+        value_bytes=0 if record is not None else _bounded_resident_size(value,
+            maximum=self.maximum_matrix_bytes,retained=lambda:retained()+key_bytes)
+        require(retained()+key_bytes+value_bytes<=self.maximum_matrix_bytes,
+                'matrix publication entry budget exceeded')
+        self._release_entry(mapping,key)
+        if record is None or oid not in values:
+            # A replacement can release the last alias of this root.
+            values[oid]=[value,value_bytes if record is None else record[1],0]
+            self._publication_accounting[2]+=values[oid][1]
+        values[oid][2]+=1; entries[token]=(oid,key_bytes)
+        self._publication_accounting[2]+=key_bytes
+        mapping[key]=value
+        self._native_caller_bytes()
+
+    def _release_entry(self, mapping, key):
+        if self._publication_accounting is not None:
+            entries,values,_=self._publication_accounting
+            previous=entries.pop((id(mapping),key),None)
+            if previous is not None:
+                oid,key_bytes=previous; record=values[oid]; record[2]-=1
+                self._publication_accounting[2]-=key_bytes
+                if record[2]==0:
+                    self._publication_accounting[2]-=record[1]; del values[oid]
+        mapping.pop(key,None)
 
     def native_digest(self, value, *, exclude_ref_key=None):
         from .stock_native_json import native_digest
@@ -157,9 +233,9 @@ class VerifiedMatrixStore:
         self.metrics['coverage_validation_bytes']=self.metrics.get('coverage_validation_bytes',0)+result['size']
         self.metrics['coverage_workspace_peak_bytes']=max(self.metrics.get('coverage_workspace_peak_bytes',0),
                                                         result['peak_workspace_bytes'])
-        self._hashes[path]=result['digest']; self.fingerprints[path]=mark
-        self.descriptors.setdefault(path,deepcopy(descriptor))
-        self._coverage_verified[path]=(result['digest'],result['size'],mark)
+        self._retain_entry(self._hashes,path,result['digest']); self._retain_entry(self.fingerprints,path,mark)
+        if path not in self.descriptors: self._retain_entry(self.descriptors,path,deepcopy(descriptor))
+        self._retain_entry(self._coverage_verified,path,(result['digest'],result['size'],mark))
         require(self._native_caller_bytes(parent)<=self.maximum_matrix_bytes,
                 'coverage admission metadata budget exceeded')
 
@@ -210,7 +286,7 @@ class VerifiedMatrixStore:
         mark = file_fingerprint(self._resolve(path))
         require(self._hash_once(path) == descriptor['file_digest'], 'matrix file digest mismatch')
         require(file_fingerprint(self._resolve(path)) == mark, 'matrix file changed during hash')
-        self.descriptors[path] = deepcopy(descriptor); self.fingerprints[path] = mark
+        self._retain_entry(self.descriptors,path,deepcopy(descriptor)); self._retain_entry(self.fingerprints,path,mark)
         return True
 
     def _hash_once(self,path):
@@ -222,7 +298,7 @@ class VerifiedMatrixStore:
             require(self.metrics['source_bytes']+mark[2]<=self.maximum_source_bytes,'matrix source byte budget exceeded')
             value=file_digest(physical)
             require(file_fingerprint(physical)==mark,'matrix file changed during hash')
-            self._hashes[path]=value; self.fingerprints[path]=mark
+            self._retain_entry(self._hashes,path,value); self._retain_entry(self.fingerprints,path,mark)
             self.metrics['source_bytes']+=mark[2]; self.metrics['hash_bytes']+=mark[2]; self.metrics['file_hash_calls']+=1
             self.metrics['unique_descriptor_admissions']+=1
         require(file_fingerprint(physical)==self.fingerprints[path],'saved matrix source changed')
@@ -243,11 +319,12 @@ class VerifiedMatrixStore:
                 require(type(size) is int and size>=0,'nonnegative caller retained byte count required')
                 return size
             owned=self.resident_bytes+self.lease_bytes
-            base=owned+_bounded_resident_size([
-                self.descriptors,self.fingerprints,self.json,self.arrays,self._hashes,
-                self._decoded,self.content,self._native_bindings,self._carrier_files,
-                self._carrier_storage,self._coverage_verified,self._native_verified,self.metrics],
-                maximum=self.maximum_matrix_bytes,retained=lambda:owned+external())
+            base=owned+(self._publication_owned_bytes() if self._publication_accounting is not None else
+                _bounded_resident_size([
+                    self.descriptors,self.fingerprints,self.json,self.arrays,self._hashes,
+                    self._decoded,self.content,self._native_bindings,self._carrier_files,
+                    self._carrier_storage,self._coverage_verified,self._native_verified,self.metrics],
+                    maximum=self.maximum_matrix_bytes,retained=lambda:owned+external()))
             def retained():
                 return base+external()
             require(file_fingerprint(physical)==mark,'matrix parent changed before preflight')
@@ -271,9 +348,10 @@ class VerifiedMatrixStore:
                             _expected_digest=admission['digest'])
                 require(stat_identity(os.fstat(watch.fileno()))==mark and file_fingerprint(physical)==mark,
                         'matrix parent changed during decode')
-            require(self._native_caller_bytes(value)<=self.maximum_matrix_bytes,
-                    'decoded matrix parent resident budget exceeded')
-            self._decoded[path]=value
+            if self._publication_accounting is None:
+                require(self._native_caller_bytes(value)<=self.maximum_matrix_bytes,
+                        'decoded matrix parent resident budget exceeded')
+            self._retain_entry(self._decoded,path,value)
         return self._decoded[path]
 
     def read_json(self, descriptor, ref_key, *, _revisit=False,_raw_bundle=False):
@@ -286,6 +364,9 @@ class VerifiedMatrixStore:
             require(file_fingerprint(self._resolve(path)) == self.fingerprints[path], 'matrix parent changed during decode')
             carried=(type(value) is dict and value.get('contract_version')=='stock_native_json_carrier_v1')
             if carried:
+                # Legacy carrier restoration mutates skeleton holes and has
+                # different ownership. It retains the original full accounting.
+                self._publication_accounting=None
                 from .stock_native_json import validate_carrier_shape,verify_carrier_native
                 base=self._native_caller_bytes(value)
                 bindings=validate_carrier_shape(value,ref_key,maximum_workspace_bytes=self.maximum_matrix_bytes,
@@ -325,8 +406,8 @@ class VerifiedMatrixStore:
                 require(self.content[content_key] == value, 'conflicting canonical matrix content')
                 value = self.content[content_key]
             else:
-                self.content[content_key] = value
-            self.json[path] = value
+                self._retain_entry(self.content,content_key,value)
+            self._retain_entry(self.json,path,value)
         require(path in self.json, 'released matrix proof cannot be readmitted inside a batch')
         require(all(file_fingerprint(self._resolve(blob))==self.fingerprints[blob]
                     for blob in self._carrier_files.get(path,())),
@@ -335,10 +416,10 @@ class VerifiedMatrixStore:
 
     def drop_json(self, descriptor, ref_key):
         """Release a large proof after its compact admission has been built."""
-        self.json.pop(descriptor['path'], None)
-        self._decoded.pop(descriptor['path'],None)
-        self.content.pop((ref_key, descriptor[ref_key]), None)
-        self._native_bindings.pop(descriptor['path'],None)
+        self._release_entry(self.json,descriptor['path'])
+        self._release_entry(self._decoded,descriptor['path'])
+        self._release_entry(self.content,(ref_key,descriptor[ref_key]))
+        self._release_entry(self._native_bindings,descriptor['path'])
 
     def buffer(self, descriptor):
         _fields(descriptor, BUFFER_FIELDS, 'exact matrix buffer descriptor required')
@@ -360,7 +441,7 @@ class VerifiedMatrixStore:
             require(not array.flags.writeable, 'readonly matrix buffer required')
             if descriptor['dtype'] == 'bool_u8':
                 require(bool(((array == 0) | (array == 1)).all()), 'matrix bool bytes must be 0/1')
-            self.arrays[key] = array
+            self._retain_entry(self.arrays,key,array)
         return self.arrays[key]
 
     def check(self):
@@ -376,6 +457,7 @@ class VerifiedMatrixStore:
         self.arrays.clear(); self.json.clear(); self.content.clear(); self._decoded.clear(); self.closed = True
         self._native_bindings.clear(); self._carrier_files.clear(); self._carrier_storage.clear()
         self._coverage_verified.clear(); self._native_verified.clear()
+        self._publication_accounting=None
 
     def __enter__(self): self.check(); return self
     def __exit__(self,*args): self.close()
@@ -721,8 +803,9 @@ def _published_feature_matrix(path, value, store, row_index, blocks, reachable, 
         'published Feature selection changed')
     require([r['session'] for r in selection['feature_rows']]==row_index['sessions'],
             'published Feature day coverage mismatch')
-    store.json[name]=expected; store.check(); store.metrics['common_key_index_builds']+=1
+    store._retain_entry(store.json,name,expected); store.check(); store.metrics['common_key_index_builds']+=1
     store._caller_retained_bytes=None  # Builder state must not outlive handoff.
+    store._publication_accounting=None  # Public aliases require full accounting.
     result=FeatureMatrixInputs(_TOKEN,path=path,index=expected,store=store,row_index=row_index,blocks=blocks)
     result._source_hashes=set(reachable); result._parents_by_session=parentrefs
     return result

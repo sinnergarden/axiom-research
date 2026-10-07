@@ -67,6 +67,79 @@ def replace_metadata(saved, meta, contexts=None):
 
 
 class CompactSourceTests(unittest.TestCase):
+    def test_publication_new_blocks_are_measured_once_without_revisiting_history(self):
+        import axiom_research.stock_feature_inputs as owner
+        measure=owner._object_upper_bytes; visits={}; updates=[]
+        def counted(value):
+            if type(value) is dict and set(value)>={'start','count','parts','rows','_source_selection_rows'}:
+                visits[id(value)]=visits.get(id(value),0)+1
+            return measure(value)
+        with tempfile.TemporaryDirectory() as temp:
+            f=SourceFixture(Path(temp),6)
+            def progress(update):
+                if update['stage']=='feature_matrix_block':
+                    updates.append(deepcopy(visits))
+                    update['producer_stats']['core_calls']=999
+            with patch.object(owner,'_object_upper_bytes',side_effect=counted):
+                saved=f.matrix(options=options(),progress=progress)
+            try:
+                self.assertEqual([len(u) for u in updates],[1,2,3])
+                self.assertEqual(list(visits.values()),[1,1,1])
+                self.assertIsNone(saved._store._publication_accounting)
+                self.assertIsNone(saved._store._caller_retained_bytes)
+                self.assertEqual(saved.row_metadata(list(range(9))),[r for d in f.days for r in f.day(d)[0]])
+            finally: saved.close()
+
+    def test_publication_store_charges_private_roots_once_and_releases_last_alias(self):
+        import axiom_research.stock_matrix_reader as reader
+        maximum=4*1024**2
+        with tempfile.TemporaryDirectory() as temp, reader.VerifiedMatrixStore(maximum_matrix_bytes=maximum) as store:
+            store._begin_publication_accounting()
+            desc=write_part(temp,seal({'contract_version':'synthetic_private_json','rows':['first']*80},'metadata_ref'),'metadata_ref')
+            first=store.read_json(desc,'metadata_ref'); before=store._native_caller_bytes()
+            visits=[]; getsizeof=sys.getsizeof
+            def counted(value,*args):
+                if value is first or value is first['rows']: visits.append(id(value))
+                return getsizeof(value,*args)
+            second_desc=write_part(temp,seal({'contract_version':'synthetic_private_json','rows':['second']*80},'metadata_ref'),'metadata_ref')
+            with patch.object(reader.sys,'getsizeof',side_effect=counted):
+                for _ in range(3): self.assertEqual(store._native_caller_bytes(first),before)
+                second=store.read_json(second_desc,'metadata_ref')
+                for _ in range(3): store._native_caller_bytes(second)
+            self.assertEqual(visits,[])
+            self.assertEqual(store._publication_accounting[1][id(first)][2],3)
+            self.assertEqual(store._publication_accounting[1][id(second)][2],3)
+            with_both=store._native_caller_bytes()
+            roots=[*store._publication_maps(),store._native_verified,store.metrics]
+            self.assertGreaterEqual(with_both,reader._resident_size(roots))
+            store.drop_json(desc,'metadata_ref')
+            self.assertNotIn(id(first),store._publication_accounting[1])
+            self.assertLess(store._native_caller_bytes(),with_both)
+            store.drop_json(second_desc,'metadata_ref')
+            self.assertNotIn(id(second),store._publication_accounting[1])
+            self.assertEqual(store.json,{}); self.assertEqual(store._decoded,{}); self.assertEqual(store.content,{})
+
+    def test_publication_incremental_budget_includes_external_state_and_replacement(self):
+        from axiom_research.stock_matrix_reader import VerifiedMatrixStore
+        with VerifiedMatrixStore(maximum_matrix_bytes=2*1024**2) as store:
+            store._begin_publication_accounting()
+            value={'private':['x']*100}; store._retain_entry(store.json,'private',value)
+            before=store._native_caller_bytes()
+            store._caller_retained_bytes=lambda:1234
+            self.assertEqual(store._native_caller_bytes(),before+1234)
+            store.maximum_matrix_bytes=before+1234+1024
+            with self.assertRaises(ValueError): store._retain_entry(store.json,'private',{'private':['new']*200})
+            self.assertIs(store.json['private'],value)
+            store.maximum_matrix_bytes=2*1024**2
+            replacement={'private':['replacement']*200}
+            store._retain_entry(store.json,'private',replacement)
+            self.assertNotIn(id(value),store._publication_accounting[1])
+            self.assertIs(store.json['private'],replacement)
+            store._release_entry(store.json,'private')
+            self.assertEqual(store._publication_accounting[0],{}); self.assertEqual(store._publication_accounting[1],{})
+            self.assertEqual(store._publication_accounting[2],0)
+            self.assertGreaterEqual(store._native_caller_bytes(),1234)
+
     def test_public_memory_producer_preserves_original_core_rows_and_proof(self):
         from test_stock_matrix_feature_producer import MemoryFeatureInputs
         from test_stock_matrix_feature_batch import prepared_inputs, arguments

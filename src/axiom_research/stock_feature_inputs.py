@@ -521,6 +521,7 @@ def _build_feature_matrix(data, *, spec, destination, storage_options, progress)
     from .stock_matrix_reader import VerifiedMatrixStore
     store=VerifiedMatrixStore(maximum_matrix_bytes=options['maximum_resident_bytes'],
                               maximum_parent_bytes=DEFAULT_LIMITS['maximum_parent_bytes'])
+    store._begin_publication_accounting()
     try:
         result=_build_feature_matrix_impl(data,spec=spec,destination=destination,
             storage_options=options,progress=progress,_publication_store=store)
@@ -574,9 +575,12 @@ def _build_feature_matrix_impl(data, *, spec, destination, storage_options, prog
     row_wire=row_index(spec['feature_sessions'],spec['universe']); rid=write_part(target,row_wire,'row_index_ref')
     if compact:
         _spec(spec,reader=_publication_store.read_json)
-        require(_qlib(qdesc,DEFAULT_LIMITS,fingerprints=_publication_store.fingerprints,
+        qmarks={}
+        require(_qlib(qdesc,DEFAULT_LIMITS,fingerprints=qmarks,
             _file_hasher=_publication_store._hash_once,_json_reader=_publication_store._decode_once)==view,
             'compact Feature publication Qlib mismatch')
+        for path,mark in qmarks.items(): _publication_store._retain_entry(_publication_store.fingerprints,path,mark)
+        del qmarks
         require(_publication_store.read_json(rid,'row_index_ref')==row_wire,'compact Feature publication row index mismatch')
     partitions=[]; feature_rows=[]; rows=[]; proof=[]; completed=[]; pending_bytes=0
     checkpoint=target/'checkpoint.json'
@@ -618,6 +622,7 @@ def _build_feature_matrix_impl(data, *, spec, destination, storage_options, prog
         definition,spec,config,view])
     published_retained_bytes=_object_upper_bytes([partitions,feature_rows])
     publication_retained_bytes=0; publication_external_bytes=0
+    compact_block_bytes=sum(_object_upper_bytes(block) for block in compact_blocks)
     if compact:
         # Admission shares the producer's live budget, then relinquishes this
         # private callback before the Store becomes the returned backing.
@@ -628,11 +633,11 @@ def _build_feature_matrix_impl(data, *, spec, destination, storage_options, prog
     if compact:
         publication_external_bytes=caller_retained_bytes()
         publication_retained_bytes=(_publication_store._native_caller_bytes()-publication_external_bytes+
-                                    _object_upper_bytes(compact_blocks))
+                                    compact_block_bytes+sys.getsizeof(compact_blocks))
         publication_external_bytes=0
     def publish_block():
         nonlocal rows, proof, pending_bytes, published_retained_bytes
-        nonlocal publication_retained_bytes, publication_external_bytes
+        nonlocal publication_retained_bytes, publication_external_bytes, compact_block_bytes
         # The producer is suspended at yield and still owns its native window
         # and compatibility signature. Reserve the writer's proof/metadata,
         # encoder copies and one column buffer before publishing any child.
@@ -656,9 +661,10 @@ def _build_feature_matrix_impl(data, *, spec, destination, storage_options, prog
                 metadata_version='stock_matrix_feature_metadata_v2')
             require(new_sources==[r for b in new_blocks for r in b['_source_selection_rows']],
                     'published compact Feature source-selection mismatch')
+            compact_block_bytes+=sum(_object_upper_bytes(block) for block in new_blocks)
             compact_blocks.extend(new_blocks); compact_sources.update(new_hashes); compact_parents.update(new_parents)
             publication_retained_bytes=(_publication_store._native_caller_bytes()-publication_external_bytes+
-                                        _object_upper_bytes(compact_blocks))
+                                        compact_block_bytes+sys.getsizeof(compact_blocks))
             publication_external_bytes=0
             stats['feature_publication_retained_peak_bytes']=max(
                 stats.get('feature_publication_retained_peak_bytes',0),publication_retained_bytes)
