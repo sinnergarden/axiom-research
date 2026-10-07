@@ -39,18 +39,24 @@ def prediction_rows(features, spec, model, scores):
     return rows
 
 
-def build_stock_ml_fold_from_saved_inputs(input_manifest, *, fold_spec, destination, metrics=None, batch=None):
+def build_stock_ml_fold_from_saved_inputs(input_manifest, *, fold_spec, destination, metrics=None, batch=None,
+                                        training_options=None):
     """Fit/predict once; an exact, fully validated definition alone permits HIT.
 
     Parent paths are explicit and remain required. An initialized batch reuses
     verified common parents and a shared Feature matrix within this process.
     A separate public loader always verifies the complete saved closure.
+    Saved matrix inputs also accept training_options containing only
+    learning_rate and/or num_boost_round. All other existing profile values
+    remain fixed; these options change the model identity, not prepared inputs.
     """
     begin = time.perf_counter()
     inputs, spec = deepcopy(input_manifest), deepcopy(fold_spec)
     if inputs.get('contract_version') in ('stock_ml_saved_inputs_v2','stock_ml_saved_inputs_v3'):
         from .stock_matrix_folds import build_matrix_fold
-        return build_matrix_fold(inputs,spec=spec,destination=destination,metrics=metrics,batch=batch)
+        return build_matrix_fold(inputs,spec=spec,destination=destination,metrics=metrics,batch=batch,
+                                 training_options=training_options)
+    require(training_options is None, 'training_options requires saved matrix inputs')
     if batch is not None:
         from .stock_batch import _data
         _data(batch)  # Reject a caller-created object or a skip-validation flag.

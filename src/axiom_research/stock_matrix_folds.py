@@ -8,7 +8,7 @@ import time
 from .stock_artifacts import digest, file_digest, write_json, _read, _verify_ref
 from .stock_fold_inputs import require, seal, _finite, _instant, feature_available
 from .stock_label_contracts import NORMALIZATION_SPEC
-from .stock_training import LGBM_PARAMETERS, TREES, TARGET_SEMANTICS
+from .stock_training import TARGET_SEMANTICS, training_profile, validate_training_profile
 
 OUTPUTS={'feature-slice.json':'feature_ref','label-slice.json':'label_ref',
     'dataset.json':'dataset_ref','model.json':'model_ref','predictions.json':'signal_run_ref',
@@ -38,13 +38,14 @@ def _dataset(projection,inputs,spec):
         'normalization':NORMALIZATION_SPEC,'validation':'none_fixed_parameters_no_early_stopping'},'dataset_ref')
 
 
-def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None):
+def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,training_options=None):
     from .stock_fold_artifacts import _repath_owned_fold
     from .stock_ml import _implementation,_environment,_signal_evidence
     from .stock_folds import prediction_rows
     from .stock_training import fit_predict_stock_model
     from .feature_catalog import load_feature_catalog
-    begin=time.perf_counter(); inputs,spec=deepcopy(inputs),deepcopy(spec)
+    begin=time.perf_counter(); parameters, rounds = training_profile(training_options)
+    inputs,spec=deepcopy(inputs),deepcopy(spec)
     with _projection(inputs,spec,batch) as projection:
         common=projection.common; catalog=load_feature_catalog()
         require(common['catalog_ref']==catalog.identity and common['ordered_features']==[
@@ -52,7 +53,7 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None):
         implementations=_implementation()
         definition={'version':'axiom.stock_ml_fold/3','input_manifest':inputs,'input_manifest_ref':digest(inputs),
             'fold_spec':spec,'fold_spec_ref':digest(spec),'catalog_ref':common['catalog_ref'],
-            'parameters':LGBM_PARAMETERS,'num_boost_round':TREES,'target_semantics':TARGET_SEMANTICS,
+            'parameters':parameters,'num_boost_round':rounds,'target_semantics':TARGET_SEMANTICS,
             'label_normalization':NORMALIZATION_SPEC,'environment':_environment(),
             'implementation_sources':implementations,'implementation_ref':digest(implementations)}
         definition_ref=digest(definition); target=Path(destination)/definition_ref[7:]
@@ -67,7 +68,7 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None):
         dataset=_dataset(projection,inputs,spec); features,labels=projection.features,projection.labels
         stats={**zeros,'cache_hit':False,'saved_input_validation_seconds':time.perf_counter()-begin}
         booster,scores=fit_predict_stock_model(projection.X,projection.y,projection.P,
-            ordered_features=common['ordered_features'],parameters=LGBM_PARAMETERS,num_boost_round=TREES,metrics=stats)
+            ordered_features=common['ordered_features'],parameters=parameters,num_boost_round=rounds,metrics=stats)
         require(len(scores)==len(projection.candidate_keys) and all(_finite(float(s)) for s in scores),
                 'invalid native model scores')
         score_map={tuple(key):float(score) for key,score in zip(projection.candidate_keys,scores)}
@@ -79,7 +80,7 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None):
                 'fit_cutoff':spec['fit_cutoff'],'simulated_available_at':spec['simulated_model_available_at'],
                 'clock_basis':'declared_simulation','ordered_features':common['ordered_features'],
                 'feature_selection':common['feature_selection'],'catalog_ref':common['catalog_ref'],
-                'target_semantics':TARGET_SEMANTICS,'parameters':LGBM_PARAMETERS,'num_boost_round':TREES,
+                'target_semantics':TARGET_SEMANTICS,'parameters':parameters,'num_boost_round':rounds,
                 'environment':definition['environment'],'implementation_ref':definition['implementation_ref'],
                 'booster_digest':file_digest(stage/'booster.txt'),
                 'feature_normalization':'same_date_visible_members_cs_zscore_no_fit',
@@ -174,9 +175,9 @@ def _load_matrix_fold(path, *, projection,batch,ingress):
         else: documents[name]=ingress.read_json(descriptor,key='content_digest' if name=='fold.json' else OUTPUTS[name])
     fold=documents['fold.json']; definition=fold['definition']
     require(fold['contract_version']=='stock_ml_fold_v3' and fold['status']=='COMPLETE' and
-        definition['version']=='axiom.stock_ml_fold/3' and definition['parameters']==LGBM_PARAMETERS and
-        definition['num_boost_round']==TREES and definition['target_semantics']==TARGET_SEMANTICS and
+        definition['version']=='axiom.stock_ml_fold/3' and definition['target_semantics']==TARGET_SEMANTICS and
         definition['label_normalization']==NORMALIZATION_SPEC,'unsupported compact fold profile')
+    parameters, rounds = validate_training_profile(definition['parameters'], definition['num_boost_round'])
     spec,inputs=definition['fold_spec'],definition['input_manifest']
     require(fold['definition_ref']==digest(definition) and definition['input_manifest_ref']==digest(inputs) and
         definition['fold_spec_ref']==digest(spec) and definition['implementation_ref']==digest(definition['implementation_sources']),
@@ -208,7 +209,7 @@ def _load_matrix_fold(path, *, projection,batch,ingress):
             (model['fit_cutoff'],spec['fit_cutoff']),(model['simulated_available_at'],spec['simulated_model_available_at']),
             (model['clock_basis'],'declared_simulation'),(model['ordered_features'],common['ordered_features']),
             (model['feature_selection'],common['feature_selection']),(model['catalog_ref'],common['catalog_ref']),
-            (model['parameters'],LGBM_PARAMETERS),(model['num_boost_round'],TREES),
+            (model['parameters'],parameters),(model['num_boost_round'],rounds),
             (model['target_semantics'],TARGET_SEMANTICS),(model['label_normalization'],NORMALIZATION_SPEC),
             (model['environment'],definition['environment']),(model['implementation_ref'],definition['implementation_ref']),
             (model['booster_digest'],manifest['files']['booster.txt'])):

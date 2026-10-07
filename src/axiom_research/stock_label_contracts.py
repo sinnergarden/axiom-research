@@ -2,6 +2,7 @@
 from datetime import date, datetime, timezone, timedelta
 from copy import deepcopy
 import math
+TARGET_SEMANTICS = 'forward_5_session_cs_zscore_prediction'
 from typing import Any
 
 

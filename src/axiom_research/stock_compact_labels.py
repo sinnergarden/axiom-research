@@ -23,7 +23,15 @@ def _implementation():
     return digest({name:file_digest(Path(__file__).with_name(name)) for name in (
         'labels.py','stock_label_contracts.py','stock_compact_labels.py',
         'stock_compact_store.py','stock_compact_batch.py','stock_batch.py',
-        'stock_matrix_folds.py','stock_fold_artifacts.py','stock_fold_inputs.py','stock_matrix_storage.py')})
+        'stock_fold_inputs.py','stock_matrix_storage.py')})
+
+
+def _input_environment():
+    """Only libraries used to prepare inputs; model versions are downstream."""
+    import platform
+    import importlib.metadata
+    return {'python':platform.python_version(), 'packages':{
+        p:importlib.metadata.version(p) for p in ('numpy','pandas','pyarrow')}}
 
 
 def _raw_implementation():
@@ -268,7 +276,6 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
 def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,preparation_options,metrics=None,progress=None,
                           _caller_bytes=0,_caller_source_bytes=0):
     from .stock_compact_batch import load_compact_state
-    from .stock_ml import _environment
     begin=time.perf_counter(); own=type(feature_inputs) is not StockFeatureView
     require(not own or isinstance(feature_inputs,(str,Path)),'Feature input must be an owner handle or path')
     options=deepcopy(preparation_options)
@@ -286,7 +293,7 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             fd['store'].metrics['largest_parent_bytes']<=budgets['maximum_parent_bytes'],'borrowed Feature budget incompatible')
     definition={'version':'axiom.stock_ml_batch_inputs/3','feature_view':feature.to_dict(),
         'fold_specs':deepcopy(fold_specs),'preparation_options':options,'implementation_ref':_implementation(),
-        'environment':_environment()}
+        'environment':_input_environment()}
     definition_ref=digest(definition); target=Path(destination).absolute()/definition_ref[7:]
     require(type(_caller_bytes) is int and _caller_bytes>=0 and type(_caller_source_bytes) is int and _caller_source_bytes>=0,
             'nonnegative owner audit accounting required')

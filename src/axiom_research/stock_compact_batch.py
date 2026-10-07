@@ -177,7 +177,7 @@ class CompactState:
 
     def _project(self,inputs,spec,*,training):
         from .stock_matrix_reader import MatrixFoldProjection
-        from .stock_training import TARGET_SEMANTICS
+        from .stock_label_contracts import TARGET_SEMANTICS
         import numpy as np
         record=self._parts(inputs,spec); common=deepcopy(self.view['definition']); normalized=self.targets[record['normalized']['target_ref']]
         self.store.reserve(len(record['inference_offsets'])*(len(common['ordered_features'])*96+2048))
