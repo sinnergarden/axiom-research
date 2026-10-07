@@ -79,6 +79,7 @@ class _Validator:
         self.value_done()
 
     def value_done(self):
+        self._value_end()
         if not self.stack:
             self.root = "done"
         else:
@@ -86,6 +87,18 @@ class _Validator:
             if frame[1] not in ("value", "first"):
                 raise ValueError("Invalid JSON value position")
             frame[1] = "after"
+
+    def _span(self, chunk, start, end):
+        """Private observation hook; the canonical grammar still owns admission."""
+
+    def _value_start(self):
+        pass
+
+    def _value_end(self):
+        pass
+
+    def _scalar_value(self, value):
+        pass
 
     def start_token(self, kind, is_key=False):
         self.reserve(128)
@@ -101,6 +114,7 @@ class _Validator:
         # with the sliced input span. Reserve before either allocation.
         self.reserve(2 * (len(self.token) + length) + length + 256)
         self.token.extend(chunk[start:end])
+        self._span(chunk, start, end)
 
     def finish_token(self):
         # CPython scalar decode/parse/reencode can hold several Unicode copies,
@@ -141,6 +155,7 @@ class _Validator:
                 frame[2] = value
                 frame[1] = "colon"
             else:
+                self._scalar_value(value)
                 self.value_done()
             self.tokens += 1
         finally:
@@ -187,6 +202,7 @@ class _Validator:
         return end
 
     def begin_value(self, byte):
+        self._value_start()
         if byte == 123:
             self.push("object")
         elif byte == 91:
@@ -221,6 +237,7 @@ class _Validator:
             if frame is not None and frame[0] == "object":
                 if state in ("first", "key"):
                     if byte == 125 and state == "first":
+                        self._span(chunk, cursor, cursor + 1)
                         self.pop()
                     elif byte == 34:
                         self.start_token("string", is_key=True)
@@ -230,7 +247,9 @@ class _Validator:
                     if byte != 58:
                         raise ValueError("Expected JSON colon")
                     frame[1] = "value"
+                    self._span(chunk, cursor, cursor + 1)
                 elif state == "after":
+                    self._span(chunk, cursor, cursor + 1)
                     if byte == 125:
                         self.pop()
                     elif byte == 44:
@@ -239,7 +258,10 @@ class _Validator:
                         raise ValueError("Expected JSON object separator")
                 else:
                     self.begin_value(byte)
+                    if self.token_kind is None:
+                        self._span(chunk, cursor, cursor + 1)
             elif frame is not None and state == "after":
+                self._span(chunk, cursor, cursor + 1)
                 if byte == 93:
                     self.pop()
                 elif byte == 44:
@@ -247,9 +269,12 @@ class _Validator:
                 else:
                     raise ValueError("Expected JSON array separator")
             elif frame is not None and state == "first" and byte == 93:
+                self._span(chunk, cursor, cursor + 1)
                 self.pop()
             else:
                 self.begin_value(byte)
+                if self.token_kind is None:
+                    self._span(chunk, cursor, cursor + 1)
             if self.token_kind == "bare":
                 cursor = self.scan_bare(chunk, cursor)
             elif self.token_kind == "string":

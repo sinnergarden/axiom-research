@@ -16,6 +16,7 @@ import tempfile
 
 
 VERSION = 'stock_native_json_carrier_v1'
+LABEL_WIRE_VERSION = 'stock_native_json_carrier_v2'
 BUFFER_FIELDS = {'path', 'file_digest', 'dtype', 'shape', 'buffer_digest'}
 REFS = {'stock_label_build_v1': 'label_ref', 'stock_matrix_label_metadata_v1': 'metadata_ref',
         'stock_matrix_feature_metadata_v1': 'metadata_ref'}
@@ -23,7 +24,8 @@ _SHA = re.compile(r'^sha256:[0-9a-f]{64}$')
 _SCALAR_COUNTERS = ('peak_workspace_bytes', 'peak_combined_workspace_bytes',
     'native_hash_calls', 'native_hash_bytes', 'carrier_hash_calls', 'carrier_hash_bytes',
     'coverage_replay_calls', 'coverage_replay_bytes', 'coverage_encode_calls',
-    'coverage_encode_bytes', 'created_coverage_source_bytes', 'ordinary_encode_calls', 'ordinary_encode_bytes')
+    'coverage_encode_bytes', 'created_coverage_source_bytes', 'ordinary_encode_calls', 'ordinary_encode_bytes',
+    'label_wire_encode_calls', 'label_wire_encode_bytes', 'created_label_wire_source_bytes')
 _REF_COUNTERS = ('native_hash_calls_by_ref', 'carrier_hash_calls_by_ref')
 
 
@@ -242,7 +244,7 @@ def _string(value, budget):
     yield b'"'
 
 
-def _registry(bindings, budget):
+def _registry(bindings, budget, wire_bindings=()):
     out = {}
     for context, desc in bindings:
         _require(type(context) is dict and 'coverage' not in context, 'binding requires a small context without coverage')
@@ -252,6 +254,13 @@ def _registry(bindings, budget):
         if previous is None:
             budget.reserve(128+_graph_bytes(desc))
             out[id(context)] = context, desc
+    for wire, desc in wire_bindings:
+        _require(type(wire) is dict and set(wire) == {'context'} and type(wire['context']) is dict
+                 and 'coverage' not in wire['context'], 'exact Label wire placeholder required')
+        _buffer(desc)
+        _require(id(wire) not in out, 'conflicting Label wire object binding')
+        budget.reserve(128+_graph_bytes(desc))
+        out[id(wire)] = wire, desc, 'label_wire'
     return out
 
 
@@ -306,6 +315,12 @@ def _ordinary_reservation(value, budget, registry, *, exclude=None):
 
 def _json_chunks(value, *, budget, registry, path_resolver, exclude=None, root=True):
     with budget.hold(256):
+        binding = registry.get(id(value))
+        if binding is not None and len(binding) == 3:
+            _require(binding[0] is value and not (root and exclude is not None),
+                     'Label wire replay object identity mismatch')
+            yield from _replay(binding[1], budget=budget, metrics=budget.metrics, path_resolver=path_resolver)
+            return
         reservation=_ordinary_reservation(value,budget,registry,exclude=exclude if root else None)
         if reservation is not None:
             # Unicode construction/join, UTF-8 bytes, sorted-key storage and
@@ -369,14 +384,14 @@ def _hash(value, *, budget, registry, exclude=None, path_resolver=None, kind='na
     return result
 
 
-def native_digest(value, *, coverage_bindings=(), exclude_ref_key=None, maximum_workspace_bytes,
+def native_digest(value, *, coverage_bindings=(), wire_bindings=(), exclude_ref_key=None, maximum_workspace_bytes,
                   caller_retained_bytes=None, metrics=None, path_resolver=None):
     """Restore the original H from ordinary values or admitted coverage bytes."""
     if exclude_ref_key is not None:
         _require(type(value) is dict and REFS.get(value.get('contract_version')) == exclude_ref_key,
                  'unsupported native self-reference exclusion')
     budget = _Budget(maximum_workspace_bytes, caller_retained_bytes, _metrics(metrics))
-    registry = _registry(coverage_bindings, budget)
+    registry = _registry(coverage_bindings, budget, wire_bindings)
     return _hash(value, budget=budget, registry=registry, exclude=exclude_ref_key, path_resolver=path_resolver)
 
 
@@ -448,8 +463,10 @@ def _parent(value, path):
 
 
 def _shape(carrier, ref_key, budget):
-    _require(type(carrier) is dict and set(carrier) == {'contract_version', 'native_ref', 'skeleton', 'coverage_slots', 'carrier_ref'}
-             and carrier['contract_version'] == VERSION, 'exact native JSON carrier required')
+    fields = {'contract_version', 'native_ref', 'skeleton', 'coverage_slots', 'carrier_ref'}
+    v2 = type(carrier) is dict and carrier.get('contract_version') == LABEL_WIRE_VERSION
+    _require(type(carrier) is dict and set(carrier) == (fields|{'wire_slots'} if v2 else fields)
+             and carrier['contract_version'] in (VERSION, LABEL_WIRE_VERSION), 'exact native JSON carrier required')
     skeleton = carrier['skeleton']
     _holder(skeleton, ref_key)
     _require(carrier['native_ref'] == skeleton[ref_key], 'carrier/native self reference mismatch')
@@ -460,7 +477,7 @@ def _shape(carrier, ref_key, budget):
             budget.reserve(128+_graph_bytes(path))
             allowed.add(path)
     slots = carrier['coverage_slots']
-    _require(type(slots) is list and bool(slots), 'nonempty coverage slots required')
+    _require(type(slots) is list and (bool(slots) or v2), 'nonempty coverage slots required')
     keys, bindings, paths = [], [], []
     budget.reserve(192+len(slots)*192)
     for slot in slots:
@@ -475,7 +492,39 @@ def _shape(carrier, ref_key, budget):
         budget.reserve(_graph_bytes(key)+sys.getsizeof(path))
         paths.append(path); keys.append(key); bindings.append((context, slot['bytes']))
     _require(all(left < right for left, right in zip(keys, keys[1:])), 'coverage slots must be canonically sorted')
+    if v2:
+        _wire_shape(carrier, budget)
     return bindings
+
+
+def _wire_shape(carrier, budget):
+    skeleton = carrier['skeleton']
+    _require(skeleton.get('contract_version') == 'stock_matrix_label_metadata_v1'
+             and type(skeleton.get('contents')) is dict, 'Label-only wire carrier required')
+    slots = carrier.get('wire_slots')
+    _require(type(slots) is list and len(slots) == 1, 'exactly one selected Label wire slot required')
+    slot = slots[0]
+    _require(type(slot) is dict and set(slot) == {'path', 'bytes'}, 'exact Label wire slot required')
+    path = slot['path']
+    _require(type(path) is list and len(path) == 2 and path[0] == 'contents'
+             and type(path[1]) is str and bool(_SHA.fullmatch(path[1]))
+             and path[1] in skeleton['contents'], 'Label wire slot outside fixed allowlist')
+    wire = skeleton['contents'][path[1]]
+    _require(type(wire) is dict and set(wire) == {'context'} and type(wire['context']) is dict
+             and 'coverage' not in wire['context'], 'exact Label wire placeholder required')
+    _buffer(slot['bytes'])
+    _require(slot['bytes']['buffer_digest'] == path[1], 'Label wire blob must bind original contents key')
+    _require(not carrier['coverage_slots'], 'Label wire carrier cannot overlap coverage slots')
+    budget.reserve(256+_graph_bytes(slot))
+    return [(wire, slot['bytes'])]
+
+
+def label_wire_bindings(carrier, *, maximum_workspace_bytes, caller_retained_bytes=None, metrics=None):
+    """Exact physical v2 slots only; their real bytes are admitted by Store."""
+    if carrier.get('contract_version') != LABEL_WIRE_VERSION:
+        return []
+    budget = _Budget(maximum_workspace_bytes, caller_retained_bytes, _metrics(metrics))
+    return _wire_shape(carrier, budget)
 
 
 def validate_carrier_shape(carrier, ref_key, *, maximum_workspace_bytes,
@@ -486,11 +535,13 @@ def validate_carrier_shape(carrier, ref_key, *, maximum_workspace_bytes,
     return _shape(carrier, ref_key, budget)
 
 
-def _verify(carrier, ref_key, coverage_bindings, budget, path_resolver):
+def _verify(carrier, ref_key, coverage_bindings, budget, path_resolver, wire_bindings=()):
     expected = _shape(carrier, ref_key, budget)
-    supplied = _registry(coverage_bindings, budget)
+    expected_wires = _wire_shape(carrier, budget) if carrier['contract_version'] == LABEL_WIRE_VERSION else []
+    supplied = _registry(coverage_bindings, budget, wire_bindings)
     _require(all(id(context) in supplied and supplied[id(context)][0] is context and supplied[id(context)][1] == desc
-                 for context, desc in expected) and set(supplied) == {id(context) for context, desc in expected},
+                 for context, desc in expected+expected_wires)
+             and set(supplied) == {id(context) for context, desc in expected+expected_wires},
              'admitted coverage bindings differ from carrier')
     skeleton = carrier['skeleton']
     _require(_hash(skeleton, budget=budget, registry=supplied, exclude=ref_key, path_resolver=path_resolver)
@@ -498,7 +549,8 @@ def _verify(carrier, ref_key, coverage_bindings, budget, path_resolver):
     budget.reserve(128+len(skeleton.get('contents', {}))*128)
     if skeleton['contract_version'] == 'stock_matrix_label_metadata_v1':
         children = [(ref, child) for ref, child in skeleton['contents'].items()
-                    if type(child) is dict and set(child) == {'context', 'records', 'field_meta'}]
+                    if type(child) is dict and (set(child) == {'context', 'records', 'field_meta'}
+                    or id(child) in supplied and len(supplied[id(child)]) == 3)]
     elif skeleton['contract_version'] == 'stock_matrix_feature_metadata_v1':
         children = [(ref, child) for ref, child in skeleton['contents'].items()
                     if any(child == proof['source_evidence'] for proof in skeleton['input_evidence'])]
@@ -509,21 +561,23 @@ def _verify(carrier, ref_key, coverage_bindings, budget, path_resolver):
                  'restored original child reference mismatch')
 
 
-def verify_carrier_native(carrier, ref_key, *, coverage_bindings, maximum_workspace_bytes,
+def verify_carrier_native(carrier, ref_key, *, coverage_bindings, wire_bindings=(), maximum_workspace_bytes,
                           caller_retained_bytes=None, metrics=None, path_resolver=None):
     """After Store admission, verify native identity and original child refs."""
     budget = _Budget(maximum_workspace_bytes, caller_retained_bytes, _metrics(metrics))
     budget.reserve(_measure(carrier, budget))
-    _verify(carrier, ref_key, coverage_bindings, budget, path_resolver)
+    _verify(carrier, ref_key, coverage_bindings, budget, path_resolver, wire_bindings)
 
 
-def _clone(value, path, omitted, budget):
+def _clone(value, path, omitted, budget, replacements=None):
+    if replacements is not None and path in replacements:
+        return _clone(replacements[path], (), set(), budget)
     if type(value) is dict:
         budget.reserve(128+len(value)*96)
-        return {key: _clone(child, path+(key,), omitted, budget) for key, child in value.items() if path+(key,) not in omitted}
+        return {key: _clone(child, path+(key,), omitted, budget, replacements) for key, child in value.items() if path+(key,) not in omitted}
     if type(value) is list:
         budget.reserve(64+len(value)*16)
-        return [_clone(child, path+(index,), omitted, budget) for index, child in enumerate(value)]
+        return [_clone(child, path+(index,), omitted, budget, replacements) for index, child in enumerate(value)]
     budget.reserve(sys.getsizeof(value))
     return value
 
@@ -559,14 +613,19 @@ def _file_hash(path, budget):
 
 def make_native_carrier(root, value, ref_key, *, maximum_source_bytes, maximum_parent_bytes,
                         maximum_workspace_bytes, caller_retained_bytes=None, metrics=None,
-                        descriptor_mapper=None, path_resolver=None, coverage_bindings=()):
+                        descriptor_mapper=None, path_resolver=None, coverage_bindings=(),
+                        wire_bindings=(), externalize_label_wire=False):
     """Write immutable canonical coverage CAS and the one physical carrier."""
     _holder(value, ref_key)
     for maximum in (maximum_source_bytes, maximum_parent_bytes):
         _require(type(maximum) is int and maximum > 0, 'positive source/parent budget required')
     metrics = _metrics(metrics)
     budget = _Budget(maximum_workspace_bytes, caller_retained_bytes, metrics)
-    existing = _registry(coverage_bindings, budget)
+    existing = _registry(coverage_bindings, budget, wire_bindings)
+    if externalize_label_wire and value['contract_version'] == 'stock_matrix_label_metadata_v1':
+        return _make_label_wire_carrier(root, value, ref_key, budget=budget, registry=existing,
+            maximum_source_bytes=maximum_source_bytes, maximum_parent_bytes=maximum_parent_bytes,
+            descriptor_mapper=descriptor_mapper, path_resolver=path_resolver)
     contexts = []
     for path, context in _contexts(value, budget):
         if 'coverage' in context or id(context) in existing and existing[id(context)][0] is context:
@@ -639,5 +698,78 @@ def make_native_carrier(root, value, ref_key, *, maximum_source_bytes, maximum_p
         _publish(temporary, final)
         _require(final.stat().st_size == size+1 and _file_hash(final, budget) == file_ref, 'published carrier bytes mismatch')
         return {'path': str(final.resolve()), 'file_digest': file_ref, ref_key: value[ref_key]}
+    finally:
+        if temporary is not None: temporary.unlink(missing_ok=True)
+
+
+def _make_label_wire_carrier(root, value, ref_key, *, budget, registry,
+                             maximum_source_bytes, maximum_parent_bytes,
+                             descriptor_mapper, path_resolver):
+    """Only the original selected-wire child; no business identity changes."""
+    _require(type(value.get('contents')) is dict, 'Label contents required')
+    selected = [(ref, child) for ref, child in value['contents'].items()
+        if type(child) is dict and (set(child) == {'context', 'records', 'field_meta'}
+        or id(child) in registry and len(registry[id(child)]) == 3)]
+    _require(len(selected) == 1, 'exactly one selected Label wire required')
+    ref, wire = selected[0]
+    _require(type(ref) is str and bool(_SHA.fullmatch(ref)) and type(wire['context']) is dict,
+             'selected Label wire identity/context required')
+    if set(wire) == {'context', 'records', 'field_meta'}:
+        _require(type(wire['records']) is list and type(wire['field_meta']) is dict,
+                 'exact selected Label wire containers required')
+    _require(_hash(value, budget=budget, registry=registry, exclude=ref_key, path_resolver=path_resolver)
+             == value[ref_key], 'original native reference mismatch')
+    root = Path(root); buffers = root/'buffers'; buffers.mkdir(parents=True, exist_ok=True)
+    binding = registry.get(id(wire))
+    if binding is not None and len(binding) == 3:
+        desc = binding[1]
+        _require(desc['buffer_digest'] == ref and desc['shape'][0] <= maximum_source_bytes,
+                 'Label wire original content/source mismatch')
+    else:
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix='.label-wire-', dir=buffers, delete=False) as stream:
+                temporary = Path(stream.name); h, size = sha256(), 0
+                budget.increment('label_wire_encode_calls')
+                for chunk in _json_chunks(wire, budget=budget, registry=registry, path_resolver=path_resolver):
+                    size += len(chunk)
+                    _require(size <= maximum_source_bytes, 'Label wire source byte budget exceeded')
+                    stream.write(chunk); h.update(chunk)
+                    budget.increment('label_wire_encode_bytes', len(chunk))
+            _require('sha256:'+h.hexdigest() == ref, 'Label wire original child reference mismatch')
+            actual = buffers/(ref[7:]+'.bin')
+            created = _publish(temporary, actual)
+            _require(actual.stat().st_size == size and _file_hash(actual, budget) == ref,
+                     'published Label wire bytes mismatch')
+            if created: budget.increment('created_label_wire_source_bytes', size)
+            desc = {'path':str(actual.resolve()), 'file_digest':ref, 'dtype':'uint8',
+                    'shape':[size], 'buffer_digest':ref}
+            if descriptor_mapper is not None: desc = descriptor_mapper(desc)
+        finally:
+            if temporary is not None: temporary.unlink(missing_ok=True)
+    placeholder = {'context':{k:v for k,v in wire['context'].items() if k != 'coverage'}}
+    path = ('contents', ref)
+    skeleton = _clone(value, (), set(), budget, replacements={path:placeholder})
+    carrier = {'contract_version':LABEL_WIRE_VERSION, 'native_ref':value[ref_key],
+        'skeleton':skeleton, 'coverage_slots':[], 'wire_slots':[{'path':list(path), 'bytes':desc}]}
+    wires = [(skeleton['contents'][ref], desc)]
+    carrier['carrier_ref'] = _hash(carrier, budget=budget, registry={}, kind='carrier')
+    _verify(carrier, ref_key, [], budget, path_resolver, wires)
+    directory = root/'metadata'; directory.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix='.carrier-', dir=directory, delete=False) as stream:
+            temporary = Path(stream.name); size, h = 0, sha256()
+            for chunk in _json_chunks(carrier, budget=budget, registry={}, path_resolver=None):
+                size += len(chunk)
+                _require(size+1 <= maximum_parent_bytes, 'carrier parent byte budget exceeded')
+                stream.write(chunk); h.update(chunk)
+            stream.write(b'\n'); h.update(b'\n')
+        file_ref = 'sha256:'+h.hexdigest()
+        final = directory/(carrier['carrier_ref'][7:]+'.json')
+        _publish(temporary, final)
+        _require(final.stat().st_size == size+1 and _file_hash(final, budget) == file_ref,
+                 'published carrier bytes mismatch')
+        return {'path':str(final.resolve()), 'file_digest':file_ref, ref_key:value[ref_key]}
     finally:
         if temporary is not None: temporary.unlink(missing_ok=True)

@@ -25,6 +25,25 @@ from test_stock_feature_inputs import SyntheticInputs
 from test_stock_matrix_storage import SyntheticWideInputs
 
 
+def fixture_native(descriptor, ref_key):
+    """Independent full restoration only for these tiny synthetic oracles."""
+    assert file_digest(descriptor['path']) == descriptor['file_digest']
+    value=_read(descriptor['path'])
+    if value.get('contract_version') in ('stock_native_json_carrier_v1','stock_native_json_carrier_v2'):
+        _verify_ref(value,'carrier_ref')
+        wrapper=value; value=deepcopy(wrapper['skeleton'])
+        for slot in wrapper['coverage_slots']+wrapper.get('wire_slots',[]):
+            blob=slot['bytes']
+            assert file_digest(blob['path']) == blob['buffer_digest'] == blob['file_digest']
+            assert Path(blob['path']).stat().st_size == blob['shape'][0]
+            parent=value
+            for step in slot['path'][:-1]: parent=parent[step]
+            parent[slot['path'][-1]]=_read(blob['path'])
+    _verify_ref(value,ref_key)
+    assert value[ref_key] == descriptor[ref_key]
+    return value
+
+
 @dataclass(frozen=True)
 class Query:
     domain: str
@@ -161,7 +180,7 @@ class MatrixPrepareTests(unittest.TestCase):
                     candidates=[]
                     for partition in view['partitions']:
                         if partition['table']!='training_normalized_labels': continue
-                        metadata=_read(partition['metadata']['path'])
+                        metadata=fixture_native(partition['metadata'],'metadata_ref')
                         if wrapper['result']['metadata']['result_ref'] not in metadata['core_result_refs']: continue
                         for content in metadata['contents'].values():
                             if type(content) is dict and set(content)=={'input','buffers'}:
@@ -176,7 +195,7 @@ class MatrixPrepareTests(unittest.TestCase):
                     _verify_ref(partition,'partition_ref')
                     for desc in partition['buffers'].values(): self.assertEqual(file_digest(desc['path']),desc['buffer_digest'])
                     if partition['table']!='training_normalized_labels': continue
-                    metadata=_read(partition['metadata']['path']); raw=_read(metadata['raw_build']['path'])
+                    metadata=fixture_native(partition['metadata'],'metadata_ref'); raw=_read(metadata['raw_build']['path'])
                     days=sorted({r['feature_session'] for r in raw['rows']})
                     feature_rows=[r for day in days for r in feature.day(day)[0]]
                     original=_feature_wire(feature_rows,[feature.day(d)[1] for d in days],feature.spec,feature.view)
@@ -191,7 +210,7 @@ class MatrixPrepareTests(unittest.TestCase):
                         else: self.assertEqual(_instant(actual['normalized_available_at']),_instant(expected['normalized_available_at']))
                 children={content['path'] for partition in view['partitions']
                     if partition['table']=='training_normalized_labels'
-                    for content in _read(partition['metadata']['path'])['contents'].values()
+                    for content in fixture_native(partition['metadata'],'metadata_ref')['contents'].values()
                     if type(content) is dict and set(content)=={'path','file_digest','core_input_artifact_ref'}}
                 self.assertEqual(len(children),len(folds))
                 self.assertEqual(metrics['maximum_completed_fit_working_bytes'],0)
@@ -401,16 +420,16 @@ class PublicMemoryMatrixPrepareTests(unittest.TestCase):
                     # independent oracle; production admission remains bounded.
                     self.assertEqual(file_digest(descriptor['path']), descriptor['file_digest'])
                     wire = _read(descriptor['path'])
-                    if wire.get('contract_version') == 'stock_native_json_carrier_v1':
+                    if wire.get('contract_version') in ('stock_native_json_carrier_v1','stock_native_json_carrier_v2'):
                         _verify_ref(wire, 'carrier_ref')
                         original = deepcopy(wire['skeleton'])
-                        for slot in wire['coverage_slots']:
+                        for slot in wire['coverage_slots']+wire.get('wire_slots',[]):
                             blob = slot['bytes']
                             self.assertEqual(file_digest(blob['path']), blob['buffer_digest'])
                             self.assertEqual(Path(blob['path']).stat().st_size, blob['shape'][0])
                             parent = original
                             for key in slot['path'][:-1]: parent = parent[key]
-                            parent['coverage'] = _read(blob['path'])
+                            parent[slot['path'][-1]] = _read(blob['path'])
                         wire = original
                     _verify_ref(wire, ref_key)
                     self.assertEqual(wire[ref_key], descriptor[ref_key])

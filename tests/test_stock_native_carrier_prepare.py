@@ -101,9 +101,9 @@ class NativeCarrierPrepareTests(unittest.TestCase):
         return publisher
 
     def assert_final_blob_paths(self, wrapper, target):
-        self.assertEqual(wrapper['contract_version'], CARRIER)
-        self.assertTrue(wrapper['coverage_slots'])
-        for slot in wrapper['coverage_slots']:
+        self.assertIn(wrapper['contract_version'], (CARRIER,'stock_native_json_carrier_v2'))
+        self.assertTrue(wrapper['coverage_slots']+wrapper.get('wire_slots',[]))
+        for slot in wrapper['coverage_slots']+wrapper.get('wire_slots',[]):
             self.assertTrue(Path(slot['bytes']['path']).is_relative_to(target))
             self.assertNotIn('/stage/', slot['bytes']['path'])
 
@@ -160,7 +160,7 @@ class NativeCarrierPrepareTests(unittest.TestCase):
         self.assertNotIn('coverage', reread['contents'][selected_ref]['context'])
         self.assertEqual(publisher.native_digest(reread, exclude_ref_key='metadata_ref'),
                          normalized_desc['metadata_ref'])
-        self.assertEqual(publisher.store.metrics['coverage_validation_calls'], 1)
+        self.assertEqual(publisher.store.metrics['label_wire_validation_calls'], 1)
         publisher.finish()
         publisher.stage.rename(publisher.target)
         for saved in (raw_desc, desc, normalized_desc):
@@ -244,9 +244,9 @@ class NativeCarrierPrepareTests(unittest.TestCase):
             raw_descriptors = {}
             for descriptor in metadata_descriptors:
                 wrapper = _read(descriptor['path'])
-                if wrapper.get('contract_version') == CARRIER:
+                if wrapper.get('contract_version') in (CARRIER,'stock_native_json_carrier_v2'):
                     holder_kinds.add(wrapper['skeleton']['contract_version'])
-                    for slot in wrapper['coverage_slots']:
+                    for slot in wrapper['coverage_slots']+wrapper.get('wire_slots',[]):
                         all_blobs.add(slot['bytes']['path'])
                         self.assertTrue(Path(slot['bytes']['path']).is_file())
                         self.assertNotIn('/.stock-matrix-', slot['bytes']['path'])
@@ -257,7 +257,7 @@ class NativeCarrierPrepareTests(unittest.TestCase):
                     raw_descriptors[body['raw_build']['path']] = body['raw_build']
             for descriptor in raw_descriptors.values():
                 wrapper = _read(descriptor['path'])
-                if wrapper.get('contract_version') == CARRIER:
+                if wrapper.get('contract_version') in (CARRIER,'stock_native_json_carrier_v2'):
                     holder_kinds.add(wrapper['skeleton']['contract_version'])
                     self.assert_final_blob_paths(wrapper, target)
                     carried_raw[descriptor['label_ref']] = {

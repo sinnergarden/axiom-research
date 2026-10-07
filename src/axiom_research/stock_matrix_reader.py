@@ -64,6 +64,7 @@ class VerifiedMatrixStore:
         self.descriptors = {}; self.fingerprints = {}; self.json = {}; self.arrays = {}
         self._hashes={}; self._decoded={}
         self._native_bindings={}; self._carrier_files={}; self._carrier_storage={}
+        self._wire_bindings={}; self._wire_verified={}
         self._coverage_verified={}; self._native_verified=set()
         self._publication_accounting=None
         self.content = {}; self.closed = False; self.borrowers = 0; self.resident_bytes = 0; self.lease_bytes=0
@@ -98,14 +99,15 @@ class VerifiedMatrixStore:
         size=_bounded_resident_size([
             self.descriptors,self.fingerprints,self.json,self.arrays,self._hashes,
             self._decoded,self.content,self._native_bindings,self._carrier_files,
-            self._carrier_storage,self._coverage_verified,self._native_verified,self.metrics,value],
+            self._carrier_storage,self._wire_bindings,self._wire_verified,
+            self._coverage_verified,self._native_verified,self.metrics,value],
             maximum=self.maximum_matrix_bytes,retained=retained)
         return retained()+size
 
     def _publication_maps(self):
         return (self.descriptors,self.fingerprints,self.json,self.arrays,self._hashes,
                 self._decoded,self.content,self._native_bindings,self._carrier_files,
-                self._carrier_storage,self._coverage_verified)
+                self._carrier_storage,self._coverage_verified,self._wire_bindings,self._wire_verified)
 
     def _begin_publication_accounting(self):
         # Only the builder's empty, unexposed Store uses this mode. Every
@@ -172,15 +174,18 @@ class VerifiedMatrixStore:
     def native_digest(self, value, *, exclude_ref_key=None):
         from .stock_native_json import native_digest
         bindings=tuple(pair for pairs in self._native_bindings.values() for pair in pairs)
-        base=self._native_caller_bytes(value)+sys.getsizeof(bindings)
+        wires=tuple(pair for pairs in self._wire_bindings.values() for pair in pairs)
+        require(all(self._wire_verified[desc['path']]['context']==wire['context'] for wire,desc in wires),
+                'Label wire placeholder changed after admission')
+        base=self._native_caller_bytes(value)+sys.getsizeof(bindings)+sys.getsizeof(wires)
         self.check()
-        result=native_digest(value,coverage_bindings=bindings,exclude_ref_key=exclude_ref_key,
+        result=native_digest(value,coverage_bindings=bindings,wire_bindings=wires,exclude_ref_key=exclude_ref_key,
             maximum_workspace_bytes=self.maximum_matrix_bytes,caller_retained_bytes=lambda:base,
             path_resolver=self._resolve,metrics=self.metrics)
         self.check()
         return result
 
-    def _admit_coverage(self, descriptor, *, parent):
+    def _admit_coverage(self, descriptor, *, parent, _label_wire=False, _endpoint_keys=None):
         from .stock_canonical_json import validate_canonical_chunks
         _fields(descriptor,BUFFER_FIELDS,'exact coverage BufferDesc required')
         require(descriptor['dtype']=='uint8' and type(descriptor['shape']) is list and
@@ -196,7 +201,9 @@ class VerifiedMatrixStore:
         require(old is None or old==descriptor or (set(old)==BUFFER_FIELDS and
                 old['file_digest']==descriptor['file_digest'] and old['buffer_digest']==descriptor['buffer_digest']),
                 'conflicting coverage descriptor')
-        if path in self._coverage_verified:
+        reusable_wire=(path in self._wire_verified and (_endpoint_keys is None or
+            _endpoint_keys <= set(self._wire_verified[path].get('endpoint_keys',()))))
+        if path in self._coverage_verified and (not _label_wire or reusable_wire):
             require(self._coverage_verified[path]==(descriptor['file_digest'],mark[2],mark) and
                     self.fingerprints[path]==mark,'saved coverage source changed')
             return
@@ -221,23 +228,43 @@ class VerifiedMatrixStore:
                 require((after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,
                          after.st_ctime_ns)==mark and file_fingerprint(physical)==mark,
                         'coverage changed during validation')
-        result=validate_canonical_chunks(chunks(),maximum_workspace_bytes=self.maximum_matrix_bytes,
-                                        caller_retained_bytes=lambda:base)
+        if _label_wire:
+            from .stock_label_wire import validate_label_wire_chunks
+            result=validate_label_wire_chunks(chunks(),maximum_workspace_bytes=self.maximum_matrix_bytes,
+                caller_retained_bytes=lambda:base,endpoint_keys=_endpoint_keys)
+        else:
+            result=validate_canonical_chunks(chunks(),maximum_workspace_bytes=self.maximum_matrix_bytes,
+                                            caller_retained_bytes=lambda:base)
         require(result['digest']==descriptor['file_digest'] and result['size']==mark[2] and
                 file_fingerprint(physical)==mark,'coverage identity mismatch')
         # Only successful syntax/hash/mutation checks enter this Store's cache.
         if path not in self._hashes:
             self.metrics['source_bytes']+=mark[2]; self.metrics['unique_descriptor_admissions']+=1
         self.metrics['file_hash_calls']+=1; self.metrics['hash_bytes']+=result['size']
-        self.metrics['coverage_validation_calls']=self.metrics.get('coverage_validation_calls',0)+1
-        self.metrics['coverage_validation_bytes']=self.metrics.get('coverage_validation_bytes',0)+result['size']
+        kind='label_wire' if _label_wire else 'coverage'
+        self.metrics[kind+'_validation_calls']=self.metrics.get(kind+'_validation_calls',0)+1
+        self.metrics[kind+'_validation_bytes']=self.metrics.get(kind+'_validation_bytes',0)+result['size']
         self.metrics['coverage_workspace_peak_bytes']=max(self.metrics.get('coverage_workspace_peak_bytes',0),
                                                         result['peak_workspace_bytes'])
         self._retain_entry(self._hashes,path,result['digest']); self._retain_entry(self.fingerprints,path,mark)
         if path not in self.descriptors: self._retain_entry(self.descriptors,path,deepcopy(descriptor))
         self._retain_entry(self._coverage_verified,path,(result['digest'],result['size'],mark))
+        if _label_wire:
+            self._retain_entry(self._wire_verified,path,result)
         require(self._native_caller_bytes(parent)<=self.maximum_matrix_bytes,
                 'coverage admission metadata budget exceeded')
+
+    def _label_wire_proof(self, wire):
+        """Private evidence from this Store's real canonical byte admission."""
+        for pairs in self._wire_bindings.values():
+            for original,descriptor in pairs:
+                if original is wire:
+                    require(file_fingerprint(self._resolve(descriptor['path']))==self.fingerprints[descriptor['path']],
+                            'saved Label wire source changed')
+                    require(self._wire_verified[descriptor['path']]['context']==wire['context'],
+                            'Label wire placeholder changed after admission')
+                    return self._wire_verified[descriptor['path']]
+        return None
 
     def source_paths(self, descriptor):
         path=descriptor['path']
@@ -251,15 +278,21 @@ class VerifiedMatrixStore:
             for original,descriptor in pairs:
                 if original is context:
                     return True,descriptor['buffer_digest']
+        for pairs in self._wire_bindings.values():
+            for wire,descriptor in pairs:
+                if wire['context'] is context:
+                    return self._wire_verified[descriptor['path']]['coverage_identity']
         if 'coverage' in context:
             return True,self.native_digest(context['coverage'])
         return False,None
 
     def context_equal(self, left, right, *, right_coverage_identity=None):
         left_bound=any(original is left for pairs in self._native_bindings.values()
-                       for original,_ in pairs)
+                       for original,_ in pairs) or any(wire['context'] is left
+                       for pairs in self._wire_bindings.values() for wire,_ in pairs)
         right_bound=any(original is right for pairs in self._native_bindings.values()
-                       for original,_ in pairs)
+                       for original,_ in pairs) or any(wire['context'] is right
+                       for pairs in self._wire_bindings.values() for wire,_ in pairs)
         if not left_bound and not right_bound and right_coverage_identity is None:
             return left==right
         return ({k:v for k,v in left.items() if k!='coverage'}==
@@ -323,7 +356,8 @@ class VerifiedMatrixStore:
                 _bounded_resident_size([
                     self.descriptors,self.fingerprints,self.json,self.arrays,self._hashes,
                     self._decoded,self.content,self._native_bindings,self._carrier_files,
-                    self._carrier_storage,self._coverage_verified,self._native_verified,self.metrics],
+                    self._carrier_storage,self._wire_bindings,self._wire_verified,
+                    self._coverage_verified,self._native_verified,self.metrics],
                     maximum=self.maximum_matrix_bytes,retained=lambda:owned+external()))
             def retained():
                 return base+external()
@@ -362,29 +396,43 @@ class VerifiedMatrixStore:
             require(self.fingerprints[path][2] <= self.maximum_parent_bytes, 'matrix parent byte budget exceeded')
             value = self._decode_once(path)
             require(file_fingerprint(self._resolve(path)) == self.fingerprints[path], 'matrix parent changed during decode')
-            carried=(type(value) is dict and value.get('contract_version')=='stock_native_json_carrier_v1')
+            carried=(type(value) is dict and value.get('contract_version') in
+                     ('stock_native_json_carrier_v1','stock_native_json_carrier_v2'))
             if carried:
                 # Legacy carrier restoration mutates skeleton holes and has
                 # different ownership. It retains the original full accounting.
                 self._publication_accounting=None
-                from .stock_native_json import validate_carrier_shape,verify_carrier_native
+                from .stock_native_json import validate_carrier_shape,verify_carrier_native,label_wire_bindings
                 base=self._native_caller_bytes(value)
                 bindings=validate_carrier_shape(value,ref_key,maximum_workspace_bytes=self.maximum_matrix_bytes,
                     caller_retained_bytes=lambda:base,metrics=self.metrics)
                 require(descriptor[ref_key]==value['native_ref']==value['skeleton'][ref_key],
                         'matrix carrier original content mismatch')
                 for _,blob in bindings: self._admit_coverage(blob,parent=value)
+                wires=label_wire_bindings(value,maximum_workspace_bytes=self.maximum_matrix_bytes,
+                    caller_retained_bytes=lambda:base,metrics=self.metrics)
+                endpoints=None
+                if wires and value['skeleton'].get('role')=='evaluation':
+                    require(base+512*len(value['skeleton']['rows'])<=self.maximum_matrix_bytes,
+                            'Label endpoint request workspace budget exceeded')
+                    endpoints={(r['security_id'],r[name]) for r in value['skeleton']['rows']
+                               for name in ('start_session','end_session') if r[name] is not None}
+                for wire,blob in wires:
+                    self._admit_coverage(blob,parent=value,_label_wire=True,_endpoint_keys=endpoints)
+                    require(self._wire_verified[blob['path']]['context']==wire['context'],
+                            'Label wire placeholder differs from actual query context')
                 self._native_bindings[path]=tuple(bindings)
+                self._wire_bindings[path]=tuple(wires)
                 base=self._native_caller_bytes(value)
                 self.check()
                 if path not in self._native_verified:
-                    verify_carrier_native(value,ref_key,coverage_bindings=bindings,
+                    verify_carrier_native(value,ref_key,coverage_bindings=bindings,wire_bindings=wires,
                         maximum_workspace_bytes=self.maximum_matrix_bytes,caller_retained_bytes=lambda:base,
                         path_resolver=self._resolve,metrics=self.metrics)
                     self._native_verified.add(path)
                 self.check()
-                self._carrier_files[path]=tuple(sorted({blob['path'] for _,blob in bindings}))
-                self._carrier_storage[path]={'representation':'stock_native_json_carrier_v1',
+                self._carrier_files[path]=tuple(sorted({blob['path'] for _,blob in bindings+wires}))
+                self._carrier_storage[path]={'representation':value['contract_version'],
                                              'carrier':deepcopy(descriptor)}
                 value=value['skeleton']
             else:
@@ -420,6 +468,7 @@ class VerifiedMatrixStore:
         self._release_entry(self._decoded,descriptor['path'])
         self._release_entry(self.content,(ref_key,descriptor[ref_key]))
         self._release_entry(self._native_bindings,descriptor['path'])
+        self._release_entry(self._wire_bindings,descriptor['path'])
 
     def buffer(self, descriptor):
         _fields(descriptor, BUFFER_FIELDS, 'exact matrix buffer descriptor required')
@@ -456,6 +505,7 @@ class VerifiedMatrixStore:
             if hasattr(array, '_mmap'): array._mmap.close()
         self.arrays.clear(); self.json.clear(); self.content.clear(); self._decoded.clear(); self.closed = True
         self._native_bindings.clear(); self._carrier_files.clear(); self._carrier_storage.clear()
+        self._wire_bindings.clear(); self._wire_verified.clear()
         self._coverage_verified.clear(); self._native_verified.clear()
         self._publication_accounting=None
 
@@ -1250,12 +1300,18 @@ def _label_admission(partitions, *, view,feature,store,row_index,core_wrappers,c
             for ref,content in metadata['contents'].items():
                 require(_ref(ref) and store.native_digest(content)==ref,'Target source evidence content hash mismatch'); reachable.add(ref)
             selected=[(ref,content) for ref,content in metadata['contents'].items() if type(content) is dict and
-                      set(content)=={'context','records','field_meta'} and store.context_equal(content['context'],
+                      (set(content)=={'context','records','field_meta'} or store._label_wire_proof(content) is not None)
+                      and store.context_equal(content['context'],
                         raw['source_evidence']['context'],right_coverage_identity=raw_index.coverage_identity)]
             require(len(selected)==1,'Target actual selected-version evidence missing or ambiguous')
             selected_ref,selected_wire=selected[0]
-            require(store.native_digest(selected_wire)==raw['source_ref'] and digest(selected_wire['records'])==raw['source_evidence']['records_ref'] and
-                    digest(selected_wire['field_meta'])==raw['source_evidence']['field_meta_ref'], 'Target source evidence/raw original refs mismatch')
+            wire_proof=store._label_wire_proof(selected_wire)
+            records_ref=(digest(selected_wire['records']) if wire_proof is None
+                         else wire_proof['component_refs']['records'])
+            field_meta_ref=(digest(selected_wire['field_meta']) if wire_proof is None
+                            else wire_proof['component_refs']['field_meta'])
+            require(store.native_digest(selected_wire)==raw['source_ref'] and records_ref==raw['source_evidence']['records_ref'] and
+                    field_meta_ref==raw['source_evidence']['field_meta_ref'], 'Target source evidence/raw original refs mismatch')
             qref=digest(query); require(metadata['contents'].get(qref)==query,'Target original logical Query not reachable')
             cohorts=[(ref,c) for ref,c in metadata['contents'].items() if type(c) is dict and
                      c.get('contract_version')=='stock_matrix_label_cohort_v1']
@@ -1350,7 +1406,8 @@ def _label_admission(partitions, *, view,feature,store,row_index,core_wrappers,c
                         (at is None or int(arrays['available_at_utc_us'][i,0])==_us(at)), 'Target binary values/flags/clocks mismatch')
                 if refs: training_streams[fold_ref].add(offset,row,group_features[i],spec,common['calendar'])
             if role=='evaluation':
-                leaves=_label_leaves(rows,selected_wire,raw_ref=raw['label_ref'],source_ref=raw['source_ref'],
+                endpoint_wire=selected_wire if wire_proof is None else wire_proof['endpoint_wire']
+                leaves=_label_leaves(rows,endpoint_wire,raw_ref=raw['label_ref'],source_ref=raw['source_ref'],
                     query_ref=qref,anchor=anchor,store=store,contents=leaf_contents)
                 saved_leaves=leaf_rows.setdefault(fold_ref,{})
                 previous_size=sys.getsizeof(saved_leaves); added_bytes=0
@@ -1361,6 +1418,9 @@ def _label_admission(partitions, *, view,feature,store,row_index,core_wrappers,c
                 store.resident_bytes+=sys.getsizeof(saved_leaves)-previous_size+added_bytes
                 require(store.resident_bytes<=store.maximum_matrix_bytes,'OOS leaf row resident byte budget exceeded')
                 del leaves
+                if wire_proof is not None:
+                    wire_proof.pop('endpoint_wire',None); wire_proof.pop('endpoint_keys',None)
+                endpoint_wire=None
             if refs:
                 current_size=_resident_size(vars(training_streams[fold_ref]))
                 store.resident_bytes+=current_size-stream_bytes[fold_ref]; stream_bytes[fold_ref]=current_size
@@ -1475,7 +1535,8 @@ def _admit_raw_label(descriptor, *, store=None, limits=None):
     own=store is None
     if own:
         budgets={'maximum_source_bytes':8*1024**3,'maximum_matrix_bytes':512*1024**2} if limits is None else deepcopy(limits)
-        _fields(budgets,{'maximum_source_bytes','maximum_matrix_bytes'},'exact matrix byte limits required')
+        require(type(budgets) is dict and {'maximum_source_bytes','maximum_matrix_bytes'} <= set(budgets) <=
+            {'maximum_source_bytes','maximum_matrix_bytes','maximum_parent_bytes'},'exact matrix byte limits required')
         store=VerifiedMatrixStore(**budgets)
     else:
         require(limits is None,'existing Store owns Raw admission limits')
@@ -1761,7 +1822,8 @@ class MatrixBatchState:
 
 def _admit_matrix_view(descriptor,folds,*,limits=None,_store=None):
     budgets={'maximum_source_bytes':8*1024**3,'maximum_matrix_bytes':512*1024**2} if limits is None else deepcopy(limits)
-    _fields(budgets,{'maximum_source_bytes','maximum_matrix_bytes'},'exact matrix batch byte limits required')
+    require(type(budgets) is dict and {'maximum_source_bytes','maximum_matrix_bytes'} <= set(budgets) <=
+        {'maximum_source_bytes','maximum_matrix_bytes','maximum_parent_bytes'},'exact matrix batch byte limits required')
     store=_store or VerifiedMatrixStore(**budgets)
     try:
         view=store.read_json(descriptor,'prepared_view_ref')
@@ -1889,7 +1951,7 @@ def _admit_matrix_view(descriptor,folds,*,limits=None,_store=None):
         # aliases or complete Core source-binding graphs.
         wrappers.clear(); wrapper=None; result=None; selection=None; label_selection=None; entries=None
         for block in feature._blocks: del block['_source_selection_rows']
-        store.json.clear(); store.content.clear(); store._decoded.clear()
+        store.json.clear(); store.content.clear(); store._decoded.clear(); store._wire_verified.clear()
         store.check()
         return MatrixBatchState(_TOKEN,store=store,view=view,feature=feature,row_index=row_index,targets=targets,
                                 raw_refs=raw_refs,raw_provenance=raw_provenance,training_bindings=training_bindings,
@@ -1911,7 +1973,9 @@ def load_matrix_batch_state(manifest,*,limits=None,_store=None):
         'implementation_sources','implementation_ref','environment'},'exact matrix batch definition required')
     require(definition['version']=='axiom.stock_ml_batch_inputs/2' and manifest['definition_ref']==digest(definition) and
             definition['implementation_ref']==digest(definition['implementation_sources']),'matrix batch definition/implementation mismatch')
-    options=definition['preparation_options']; _fields(options,{'row_block_sessions','column_block','maximum_resident_bytes','normalization_backend'},'exact preparation options required')
+    options=definition['preparation_options']
+    from .stock_matrix_prepare import _options
+    _options(options)
     require(options['normalization_backend']=='core_cs_batch_v1' and all(type(options[k]) is int and options[k]>0 for k in options if k!='normalization_backend'),
             'positive preparation budgets required')
     require(type(manifest['folds']) is list and bool(manifest['folds']),'matrix batch folds required')
@@ -1937,7 +2001,8 @@ def load_matrix_input_projection(inputs,spec,*,limits=None):
         state.close(); raise
 
 
-def _validate_staged_matrix_batch(manifest,*,stage,target,maximum_matrix_bytes=512*1024**2):
+def _validate_staged_matrix_batch(manifest,*,stage,target,maximum_matrix_bytes=512*1024**2,
+                                maximum_source_bytes=8*1024**3,maximum_parent_bytes=64*1024**2):
     """Validate a complete staging closure before its one atomic publication.
 
     Saved identities retain the final canonical paths. Only the internal file
@@ -1953,7 +2018,8 @@ def _validate_staged_matrix_batch(manifest,*,stage,target,maximum_matrix_bytes=5
         physical=stage/relative
         require(physical.resolve().is_relative_to(stage),'staged matrix file escaped its directory')
         return physical
-    store=VerifiedMatrixStore(_path_resolver=locate,maximum_matrix_bytes=maximum_matrix_bytes)
+    store=VerifiedMatrixStore(_path_resolver=locate,maximum_matrix_bytes=maximum_matrix_bytes,
+        maximum_source_bytes=maximum_source_bytes,maximum_parent_bytes=maximum_parent_bytes)
     state=load_matrix_batch_state(manifest,_store=store)
     try: state.store.check(); return deepcopy(state.store.metrics)
     finally: state.close()

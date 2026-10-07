@@ -35,8 +35,9 @@ CORE_TYPES = {'values':('float64','float64_le','d'),
 
 
 def _options(value):
-    require(type(value) is dict and set(value)=={'row_block_sessions','column_block',
-        'maximum_resident_bytes','normalization_backend'}, 'exact preparation options required')
+    required={'row_block_sessions','column_block','maximum_resident_bytes','normalization_backend'}
+    require(type(value) is dict and required <= set(value) <= required|{'maximum_source_bytes','maximum_parent_bytes'},
+        'exact preparation options required')
     require(value['normalization_backend']=='core_cs_batch_v1' and all(
         type(value[k]) is int and value[k]>0 for k in value if k!='normalization_backend'),
         'positive preparation budgets and fixed Core backend required')
@@ -45,15 +46,28 @@ def _options(value):
 
 class _Publisher:
     """Write staging bytes with immutable final paths before one directory rename."""
-    def __init__(self, stage, target, *, maximum_resident_bytes=512*1024**2, metrics=None):
+    def __init__(self, stage, target, *, maximum_resident_bytes=512*1024**2,
+                 maximum_source_bytes=8*1024**3,maximum_parent_bytes=64*1024**2,
+                 known_source_bytes=0,metrics=None):
         from .stock_matrix_reader import VerifiedMatrixStore
         self.stage,self.target=Path(stage),Path(target)
         self.maximum=maximum_resident_bytes; self.metrics={} if metrics is None else metrics
         self.live_bytes=0
-        self.store=VerifiedMatrixStore(maximum_matrix_bytes=self.maximum,_path_resolver=self.resolve,
-                                      _caller_retained_bytes=lambda:self.live_bytes)
+        require(type(known_source_bytes) is int and 0<=known_source_bytes<=maximum_source_bytes,
+                'prepared known source byte budget exceeded')
+        self.known_source_bytes=known_source_bytes; self.written={}; self.written_bytes=0
+        self.store=VerifiedMatrixStore(maximum_matrix_bytes=self.maximum,maximum_source_bytes=maximum_source_bytes,
+                                      maximum_parent_bytes=maximum_parent_bytes,_path_resolver=self.resolve,
+                                      _caller_retained_bytes=lambda:self.live_bytes+_graph_bytes(self.written))
     def _desc(self, desc):
         desc=deepcopy(desc)
+        physical=Path(desc['path']); path=str(physical.resolve()); size=physical.stat().st_size
+        if path not in self.written:
+            require(self.known_source_bytes+self.written_bytes+size<=self.store.maximum_source_bytes,
+                    'prepared cumulative source byte budget exceeded')
+            self.written[path]=size; self.written_bytes+=size
+            self.metrics['publisher_unique_written_bytes']=self.written_bytes
+            self.metrics['publisher_known_source_bytes']=self.known_source_bytes
         desc['path']=str((self.target/Path(desc['path']).relative_to(self.stage.resolve())).resolve())
         return desc
     def resolve(self,path):
@@ -62,13 +76,16 @@ class _Publisher:
         except ValueError: return path
     def _bindings(self):
         return tuple(pair for pairs in self.store._native_bindings.values() for pair in pairs)
+    def _wire_bindings(self):
+        return tuple(pair for pairs in self.store._wire_bindings.values() for pair in pairs)
     def _retained(self,value):
         return self.store._native_caller_bytes(value)
     def native_digest(self,value,*,exclude_ref_key=None):
         from .stock_native_json import native_digest
-        bindings=self._bindings(); retained=self._retained(value)+sys.getsizeof(bindings)
+        bindings=self._bindings(); wires=self._wire_bindings()
+        retained=self._retained(value)+sys.getsizeof(bindings)+sys.getsizeof(wires)
         self.store.check()
-        result=native_digest(value,coverage_bindings=bindings,exclude_ref_key=exclude_ref_key,
+        result=native_digest(value,coverage_bindings=bindings,wire_bindings=wires,exclude_ref_key=exclude_ref_key,
             maximum_workspace_bytes=self.maximum,caller_retained_bytes=lambda:retained,
             metrics=self.metrics,path_resolver=self.resolve)
         self.store.check(); return result
@@ -79,11 +96,13 @@ class _Publisher:
         from .stock_native_json import REFS,make_native_carrier
         descriptor=None
         if REFS.get(value.get('contract_version'))==key:
-            bindings=self._bindings(); retained=self._retained(value)+sys.getsizeof(bindings)
+            bindings=self._bindings(); wires=self._wire_bindings()
+            retained=self._retained(value)+sys.getsizeof(bindings)+sys.getsizeof(wires)
             descriptor=make_native_carrier(self.stage,value,key,maximum_source_bytes=self.store.maximum_source_bytes,
                 maximum_parent_bytes=self.store.maximum_parent_bytes,maximum_workspace_bytes=self.maximum,
                 caller_retained_bytes=lambda:retained,metrics=self.metrics,
-                descriptor_mapper=self._desc,path_resolver=self.resolve,coverage_bindings=bindings)
+                descriptor_mapper=self._desc,path_resolver=self.resolve,coverage_bindings=bindings,
+                wire_bindings=wires,externalize_label_wire=True)
         return self._desc(write_part(self.stage,value,key) if descriptor is None else descriptor)
     def read_part(self,descriptor,key):
         require(self.store._native_caller_bytes()<=self.maximum,
@@ -96,7 +115,7 @@ class _Publisher:
     def finish(self):
         self.store.check()
         for key,value in self.store.metrics.items():
-            if key.startswith(('native_','carrier_','coverage_','peak_workspace','peak_combined_workspace')):
+            if key.startswith(('native_','carrier_','coverage_','label_wire_','peak_workspace','peak_combined_workspace')):
                 if isinstance(value,dict):
                     counts=self.metrics.setdefault(key,{})
                     for ref,count in value.items(): counts[ref]=counts.get(ref,0)+count
@@ -259,6 +278,38 @@ def _query_for(spec, cutoff, days):
         spec['pit_policy'],{d:cutoff for d in sessions},purpose='label_outcomes'),anchor
 
 
+def _request_ranges(requests, working, positions):
+    """The one physical split rule used by preparation and its observer plan."""
+    for ref,role,days,cutoff in requests:
+        wanted=[d for d in working if d in days]; groups=[]
+        for day in wanted:
+            if not groups or positions[day]!=positions[groups[-1][-1]]+1: groups.append([])
+            groups[-1].append(day)
+        for group in groups:
+            yield ref,role,cutoff,group
+
+
+def _label_work_plan(spec, fold_specs, row_block_sessions):
+    """Pure counts for the exact physical plan; no Data/Feature/Label execution."""
+    require(type(row_block_sessions) is int and row_block_sessions>0,'positive row block sessions required')
+    requests=[]
+    for fold in fold_specs:
+        training,inference=validate_spec(fold,spec['calendar']); ref=digest(fold)
+        requests.extend([(ref,'training',training,fold['fit_cutoff']),
+                         (ref,'evaluation',inference,fold['evaluation_cutoff'])])
+    needed=sorted({d for _,_,days,_ in requests for d in days})
+    positions={d:i for i,d in enumerate(spec['feature_sessions'])}; width=len(spec['universe'])
+    raw_calls=raw_rows=query_rows=maximum_query_rows=0
+    for start in range(0,len(needed),row_block_sessions):
+        for ref,role,cutoff,days in _request_ranges(requests,needed[start:start+row_block_sessions],positions):
+            query,_=_query_for(spec,cutoff,days)
+            raw_calls+=1; raw_rows+=len(days)*width
+            count=len(query.sessions)*width; query_rows+=count; maximum_query_rows=max(maximum_query_rows,count)
+    return {'row_block_sessions':row_block_sessions,'raw_calls':raw_calls,'data_calls':2*raw_calls,
+        'core_calls':len(fold_specs),'raw_rows':raw_rows,'selected_query_rows':query_rows,
+        'maximum_query_rows':maximum_query_rows,'complete_business_grid':True}
+
+
 def _source_contents(wire, raw, cohort=None, *, digest_fn=digest):
     # Actual adjusted Query/selected endpoint provenance is retained, rather
     # than claiming a logical whole-window DataBatch that was never queried.
@@ -305,16 +356,19 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
     Feature execution, model training, predictions or account is performed.
     """
     from .stock_feature_inputs import load_stock_feature_inputs
-    from .stock_matrix_reader import load_feature_matrix_index
+    from .stock_matrix_reader import load_feature_matrix_index,VerifiedMatrixStore
     from .stock_ml import _implementation, _environment
     from .labels import build_forward_labels
     from axiom_data import adjust_prices
     from axiom_engine.core import execute_cs_zscore_batch
     begin=time.perf_counter(); options=_options(preparation_options); read_work=False; publisher=None
+    limits={'maximum_matrix_bytes':options['maximum_resident_bytes'],
+        'maximum_source_bytes':options.get('maximum_source_bytes',8*1024**3),
+        'maximum_parent_bytes':options.get('maximum_parent_bytes',64*1024**2)}
     path=feature_inputs.path if hasattr(feature_inputs,'path') else Path(feature_inputs)
     # A public object is a locator, never a trusted skip-validation marker.
     locator=_read(Path(path)/'index.json')
-    feature=(load_feature_matrix_index(path) if locator.get('contract_version') in ('stock_feature_inputs_v2','stock_feature_inputs_v3')
+    feature=(load_feature_matrix_index(path,store=VerifiedMatrixStore(**limits)) if locator.get('contract_version') in ('stock_feature_inputs_v2','stock_feature_inputs_v3')
              else _V1FeatureAccess(load_stock_feature_inputs(path)))
     try:
         index=feature.to_dict(); spec=index['definition']['spec']; row_index=feature._row_index
@@ -350,7 +404,7 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
             saved=_read(target/'batch.json')
             require(saved['definition']==definition,'cached matrix batch definition mismatch')
             from .stock_batch import load_stock_ml_batch_inputs
-            with load_stock_ml_batch_inputs(saved): pass
+            with load_stock_ml_batch_inputs(saved,limits=limits): pass
             if metrics is not None: metrics.update(cache_hit=True,data_read_calls=0,core_calls=0,
                 feature_core_calls=0,train_calls=0,predict_calls=0,account_calls=0,total_seconds=time.perf_counter()-begin)
             return saved
@@ -362,7 +416,9 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
             'physical_metrics_reason':'public Data API does not expose physical Reader counters'}
         with tempfile.TemporaryDirectory(prefix='.stock-matrix-',dir=target.parent) as temporary:
             stage=Path(temporary)/'complete'; stage.mkdir()
-            publisher=_Publisher(stage,target,maximum_resident_bytes=options['maximum_resident_bytes'],metrics=stats)
+            publisher=_Publisher(stage,target,maximum_resident_bytes=options['maximum_resident_bytes'],
+                maximum_source_bytes=limits['maximum_source_bytes'],maximum_parent_bytes=limits['maximum_parent_bytes'],
+                known_source_bytes=getattr(feature,'metrics',{}).get('source_bytes',0),metrics=stats)
             if index['contract_version'] in ('stock_feature_inputs_v2','stock_feature_inputs_v3'):
                 partitions=list(index['partitions']); feature_selection=_read(index['source_selection']['path'])['feature_rows']
                 feature_schema=index['schema']; row_desc=index['row_index']
@@ -374,17 +430,9 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
             for start in range(0,len(needed),options['row_block_sessions']):
                 working=needed[start:start+options['row_block_sessions']]; stats['date_working_groups']+=1
                 active=[]
-                for ref,role,days,cutoff in requests:
-                    wanted=[d for d in working if d in days]
-                    # Split at gaps in the fixed row index, preserving exact
-                    # partition ranges even if fit windows do not all overlap.
-                    groups=[]
-                    for day in wanted:
-                        if not groups or positions[day]!=positions[groups[-1][-1]]+1: groups.append([])
-                        groups[-1].append(day)
-                    for group in groups:
-                        query,anchor=_query_for(spec,cutoff,group)
-                        active.append((ref,role,cutoff,group,query,anchor))
+                for ref,role,cutoff,group in _request_ranges(requests,working,positions):
+                    query,anchor=_query_for(spec,cutoff,group)
+                    active.append((ref,role,cutoff,group,query,anchor))
                 # Fixed symbols/columns across fits. Market is read for all
                 # related cutoffs before factor reads advance this working set.
                 read_work=True
@@ -561,9 +609,10 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
             batch={'contract_version':'stock_ml_batch_inputs_v2','definition':definition,'definition_ref':definition_ref,
                 'prepared_view':view_desc,'folds':outputs,'status':'COMPLETE'}
             batch['batch_ref']=digest(batch); batch=seal(batch,'content_digest'); write_json(stage/'batch.json',batch)
+            publisher._desc({'path':str((stage/'batch.json').resolve())})
             from .stock_matrix_reader import _validate_staged_matrix_batch
             stats['staged_validation']=_validate_staged_matrix_batch(batch,stage=stage,target=target,
-                maximum_matrix_bytes=options['maximum_resident_bytes'])
+                **limits)
             feature._store.check()
             publisher.finish()
             try: stage.rename(target)
@@ -574,7 +623,7 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
                 # children exist or retain their digests. This uncommon path
                 # must admit the actual winner, rather than trust our stage.
                 from .stock_batch import load_stock_ml_batch_inputs
-                with load_stock_ml_batch_inputs(batch): pass
+                with load_stock_ml_batch_inputs(batch,limits=limits): pass
         # The complete closure was admitted before rename. Only exact staged
         # bytes are published; repeat full disk admission belongs to the next
         # explicit public batch load or to a future HIT.
