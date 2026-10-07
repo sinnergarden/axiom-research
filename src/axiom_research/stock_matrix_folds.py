@@ -39,7 +39,7 @@ def _dataset(projection,inputs,spec):
 
 
 def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None):
-    from .stock_fold_artifacts import StockMLFold
+    from .stock_fold_artifacts import _repath_owned_fold
     from .stock_ml import _implementation,_environment,_signal_evidence
     from .stock_folds import prediction_rows
     from .stock_training import fit_predict_stock_model
@@ -62,7 +62,7 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None):
             saved=load_matrix_fold(target,projection=projection,batch=batch)
             require(saved.to_dict()['definition']==definition,'cached matrix fold definition mismatch')
             if metrics is not None: metrics.update(zeros,cache_hit=True,total_seconds=time.perf_counter()-begin)
-            return StockMLFold(target,True)
+            return _repath_owned_fold(saved,target,reused=True)
         require(len(projection.training_keys)>=40,'insufficient mature finite training rows')
         dataset=_dataset(projection,inputs,spec); features,labels=projection.features,projection.labels
         stats={**zeros,'cache_hit':False,'saved_input_validation_seconds':time.perf_counter()-begin}
@@ -106,18 +106,19 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None):
             for name,value in values.items(): write_json(stage/name,value)
             write_json(stage/'manifest.json',{'contract_version':'stock_ml_fold_manifest_v2',
                 'fold_ref':fold['fold_ref'],'files':{n:file_digest(stage/n) for n in [*values,'booster.txt']}})
-            load_matrix_fold(stage,projection=projection,batch=batch)
+            admitted = load_matrix_fold(stage,projection=projection,batch=batch)
             try: stage.rename(target)
             except OSError as exc:
                 if exc.errno not in (errno.EEXIST,errno.ENOTEMPTY): raise
-                require(load_matrix_fold(target,projection=projection,batch=batch).identity==fold['fold_ref'],
+                admitted = load_matrix_fold(target,projection=projection,batch=batch)
+                require(admitted.identity==fold['fold_ref'],
                         'concurrent matrix fold conflict')
         stats.update(training_rows=len(projection.training_keys),prediction_rows=len(predictions['rows']),
             valid_predictions=len(projection.candidate_keys),
             matrix_bytes=sum(x.nbytes for x in (projection.X,projection.y,projection.P)),
             artifact_bytes=sum(p.stat().st_size for p in target.iterdir()),total_seconds=time.perf_counter()-begin)
         if metrics is not None: metrics.update(stats)
-        return StockMLFold(target)
+        return _repath_owned_fold(admitted,target)
 
 
 def _predictions(predictions,features,common,spec,model):
@@ -161,7 +162,7 @@ def load_matrix_fold(path, *, projection=None,batch=None):
 
 
 def _load_matrix_fold(path, *, projection,batch,ingress):
-    from .stock_fold_artifacts import StockMLFold
+    from .stock_fold_artifacts import _owned_fold
     path=Path(path).resolve(); manifest=ingress.read_json({'path':str(path/'manifest.json')})
     require(set(manifest)=={'contract_version','fold_ref','files'} and
         manifest['contract_version']=='stock_ml_fold_manifest_v2' and
@@ -222,6 +223,6 @@ def _load_matrix_fold(path, *, projection,batch,ingress):
         projection._store.check()
         if batch is not None: batch._check_sources()
         ingress.check()
-        return StockMLFold(path)
+        return _owned_fold(path,documents)
     finally:
         if own: projection.close()

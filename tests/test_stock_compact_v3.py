@@ -114,6 +114,38 @@ class CompactV3Tests(unittest.TestCase):
                 self.assertEqual(again,manifest); self.assertTrue(hit['cache_hit']); self.assertEqual(data2.queries,[])
                 self.assertEqual((hit['raw_operator_calls'],hit['core_calls']),(0,0))
 
+    def test_saved_consumer_owns_verified_documents_and_opens_outputs_once(self):
+        from axiom_research.stock_fold_artifacts import StockMLFold
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); f,path=self.fixture(root)
+            with load_stock_feature_view(path) as view:
+                manifest,_=self.prepare(f,view,root,folds=f.folds()[:1]); fold=manifest['folds'][0]
+                with load_stock_ml_batch_inputs(manifest,feature_inputs=view) as batch:
+                    with patch('axiom_research.feature_catalog.load_feature_catalog',return_value=f.catalog), \
+                         patch('axiom_research.stock_ml._implementation',return_value=f.implementation), \
+                         patch('axiom_research.stock_ml._environment',return_value=f.environment), \
+                         patch('axiom_research.stock_training.fit_predict_stock_model',side_effect=backend):
+                        run=build_stock_ml_fold_from_saved_inputs(fold['input_manifest'],fold_spec=fold['fold_spec'],
+                            destination=root/'folds',batch=batch)
+                    expected=run.predictions(); real=Path.open; opened=[]; saved_root=run.path.resolve()
+                    def watch(path,*args,**kwargs):
+                        if path.parent.resolve()==saved_root: opened.append(path.name)
+                        return real(path,*args,**kwargs)
+                    with patch.object(Path,'open',watch): loaded=load_stock_ml_fold(run.path,batch=batch)
+                    self.assertEqual(len(opened),9); self.assertEqual(len(set(opened)),9)
+                    with patch.object(Path,'open',side_effect=AssertionError('consumer reread')):
+                        self.assertEqual(loaded.predictions(),expected)
+                        self.assertEqual(loaded.identity,run.identity)
+                        self.assertEqual(loaded.model(),run.model()); self.assertEqual(loaded.evidence(),run.evidence())
+                    copied=loaded.predictions(); copied['rows'][0]['score']=123.0
+                    self.assertEqual(loaded.predictions(),expected)
+                    write_json(run.path/'predictions.json',copied)
+                    self.assertEqual(run.predictions(),expected); self.assertEqual(loaded.predictions(),expected)
+                    # Equal path dataclasses are not equal owner admissions.
+                    self.assertEqual(StockMLFold(run.path).predictions(),copied)
+                    with self.assertRaisesRegex(ValueError,'digest mismatch'):
+                        load_stock_ml_fold(run.path,batch=batch)
+
     def test_sealed_handle_and_wrong_cutoff_borrow(self):
         fake=object.__new__(StockFeatureView)
         with self.assertRaisesRegex(ValueError,'owner-loaded'): _view_data(fake)

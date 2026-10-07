@@ -23,7 +23,7 @@ def _implementation():
     return digest({name:file_digest(Path(__file__).with_name(name)) for name in (
         'labels.py','stock_label_contracts.py','stock_compact_labels.py',
         'stock_compact_store.py','stock_compact_batch.py','stock_batch.py',
-        'stock_matrix_folds.py','stock_fold_inputs.py','stock_matrix_storage.py')})
+        'stock_matrix_folds.py','stock_fold_artifacts.py','stock_fold_inputs.py','stock_matrix_storage.py')})
 
 
 def _raw_implementation():
