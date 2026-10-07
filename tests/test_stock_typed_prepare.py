@@ -11,12 +11,13 @@ from unittest.mock import patch
 
 import test_stock_compact_v3 as fixtures
 from axiom_research import load_stock_feature_view, load_stock_ml_batch_inputs
-from axiom_research.stock_artifacts import digest, digest_array_rows
+from axiom_research.stock_artifacts import digest, digest_array_rows, _read, write_json
 from axiom_research.stock_batch import _data
-from axiom_research.stock_compact_store import feature_rows, iter_feature_eligibility, _view_data
+from axiom_research.stock_compact_store import feature_rows, iter_feature_eligibility, training_matrix, _view_data
+from axiom_research.stock_fold_inputs import seal
 from axiom_research.stock_label_contracts import (_eligible_reason, _FeatureEligibility,
     _instant, normalization_section_inputs, NORMALIZATION_SPEC)
-from axiom_research.stock_matrix_storage import instant_us
+from axiom_research.stock_matrix_storage import instant_us, write_part, write_buffer
 
 
 class TypedPrepareTests(unittest.TestCase):
@@ -165,6 +166,42 @@ class TypedPrepareTests(unittest.TestCase):
                     helper.prepare(f,view,root,folds=f.folds()[:1])
                 self.assertFalse(list((root/'prepared').rglob('batch.json')))
                 self.assertEqual(len(list(iter_feature_eligibility(view,[0]))),1)
+
+    def test_independent_metadata_column_parts_preserve_missing_and_reject_gather(self):
+        import numpy as np
+        helper=fixtures.CompactV3Tests()
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); f,path=helper.fixture(root); index=_read(path/'index.json')
+            original=index['partitions'][0]; metadata=_read(original['metadata']['path']); parts=[]
+            dtypes={'values':'<f8','value_validity':'u1','available_at_utc_us':'<i8','available_at_validity':'u1'}
+            for name,chosen in [('a',[0,1,2]),('b',[3,4,5])]:
+                directory=path/name; directory.mkdir(); part=deepcopy(original); part.pop('partition_ref')
+                part['columns']=[f.columns[i] for i in chosen]
+                part['metadata']=write_part(directory,metadata,'metadata_ref')
+                for field,descriptor in original['buffers'].items():
+                    values=np.frombuffer(Path(descriptor['path']).read_bytes(),dtype=dtypes[field]).reshape(descriptor['shape'])[:,chosen].ravel().tolist()
+                    if field in ('value_validity','available_at_validity'): values=[bool(v) for v in values]
+                    part['buffers'][field]=write_buffer(directory,values,dtype=descriptor['dtype'],shape=[original['row_count'],3])
+                parts.append(seal(part,'partition_ref'))
+            index['partitions']=parts; write_json(path/'index.json',index)
+            with load_stock_feature_view(path) as view:
+                self.assertEqual(len(_view_data(view)['blocks']),2)
+                full=feature_rows(view,[0])[0]; typed=list(iter_feature_eligibility(view,[0]))[0]
+                raw={'valid':True,'return':0.1,'end_session':f.days[0],'label_available_at':f.days[0]+'T00:00:00Z'}
+                cutoff=_instant(f.folds()[0]['fit_cutoff'])
+                self.assertEqual(full['values'][3:],[None,None,None])
+                self.assertFalse(typed.complete_finite)
+                self.assertEqual(_eligible_reason(raw,typed,6,cutoff),_eligible_reason(raw,full,6,cutoff))
+                self.assertEqual(_eligible_reason(raw,typed,6,cutoff),'FEATURE_MISSING')
+                with patch('numpy.empty',side_effect=AssertionError('allocated underfilled matrix')):
+                    with self.assertRaisesRegex(ValueError,'missing columns'):
+                        training_matrix(view,[0],f.folds()[0]['fit_cutoff'])
+                manifest,_=helper.prepare(f,view,root,folds=f.folds()[:1])
+                with load_stock_ml_batch_inputs(manifest,feature_inputs=view) as batch:
+                    state=_data(batch)['matrix_state']; record=state.view['fold_targets'][0]
+                    self.assertEqual(record['training_offsets'],[])
+                    reasons=state.targets[record['normalized']['target_ref']][0]['cohort']['eligibility_reasons']
+                    self.assertIn('FEATURE_MISSING',reasons); self.assertNotIn(None,reasons)
 
 
 if __name__=='__main__': unittest.main()

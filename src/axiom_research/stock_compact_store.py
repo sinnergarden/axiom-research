@@ -322,7 +322,9 @@ def load_stock_feature_view(path, *, limits=None):
                         require(at is None or _instant(at)<=_instant(row['knowledge_cutoff']),
                                 'Feature field exceeds its original cutoff')
             compact=_CompactRows(rows,len(columns),np); store.reserve(compact.bytes); store.resident_bytes+=compact.bytes
-            blocks.append({'start':start,'count':count,'parts':group,'rows':compact})
+            complete_columns={c for part,_ in group for c in part['columns']}==set(columns)
+            blocks.append({'start':start,'count':count,'parts':group,'rows':compact,
+                           'complete_columns':complete_columns})
             require(set(metadata['row_references'])==set(days[start//len(securities):(start+count)//len(securities)]),
                     'Feature metadata parent date scope mismatch')
             for day,parent in metadata['row_references'].items():
@@ -380,7 +382,7 @@ def iter_feature_eligibility(handle, offsets):
     for off in offsets:
         require(type(off) is int and 0<=off<value['row_index']['row_count'],'Feature offset outside view')
         block=next(b for b in value['blocks'] if b['start']<=off<b['start']+b['count']); local=off-block['start']
-        compact=block['rows']; complete=True; valid=True; maximum=None
+        compact=block['rows']; complete=block['complete_columns']; valid=complete; maximum=None
         for part,arrays in block['parts']:
             flags=bool(arrays['value_validity'][local].all()); valid=valid and flags
             # A masked physical zero is logical None, hence FEATURE_MISSING
@@ -401,6 +403,8 @@ def training_matrix(handle,offsets,cutoff):
     value=_view_data(handle); spec=value['definition']['spec']; instant=_instant(cutoff)
     require(all(type(off) is int and 0<=off<value['row_index']['row_count'] for off in offsets),
             'Feature matrix offsets outside view')
+    require(all(next(b for b in value['blocks'] if b['start']<=off<b['start']+b['count'])['complete_columns']
+                for off in offsets),'selected training Feature block is missing columns')
     matrix=np.empty((len(offsets),len(spec['ordered_features'])),dtype='<f8')
     for i,off in enumerate(offsets):
         block=next(b for b in value['blocks'] if b['start']<=off<b['start']+b['count']); local=off-block['start']; rows=block['rows']
