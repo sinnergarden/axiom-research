@@ -13,9 +13,14 @@ from .stock_parent_json import preflight_parent_json
 from .stock_native_json import _graph_bytes
 
 
+_TUPLE_HEADER_BYTES = sys.getsizeof(())
+_POINTER_BYTES = sys.getsizeof((None,)) - _TUPLE_HEADER_BYTES
+
+
 class _LabelWireValidator(_Validator):
     def __init__(self, maximum, retained, endpoint_keys):
         self.paths = []
+        self.path_bytes = 0
         self.active = {}
         self.component_refs = {}
         self.capture = None
@@ -35,18 +40,27 @@ class _LabelWireValidator(_Validator):
         super().__init__(maximum, retained)
 
     def workspace(self):
-        return (super().workspace() + self.owned + len(self.paths)*512
+        return (super().workspace() + self.owned + self.path_bytes + len(self.paths)*512
                 + (sys.getsizeof(self.capture) if self.capture is not None else 0))
 
     def _value_start(self):
         if not self.paths:
+            self.reserve(_TUPLE_HEADER_BYTES + 512)
             path = ()
+            charge = sys.getsizeof(path)
         else:
-            parent, ordinal = self.paths[-1]
+            parent, ordinal = self.paths[-1][0], self.paths[-1][1]
             step = self.stack[-1][2] if self.stack[-1][0] == 'object' else ordinal
+            # Ancestor tuples coexist: their pointer arrays grow quadratically
+            # with depth. Reserve the full new tuple, the one-item concat
+            # temporary, retained key, frame, and possible list growth first.
+            self.reserve(_TUPLE_HEADER_BYTES + _POINTER_BYTES*(len(parent)+1)
+                + _TUPLE_HEADER_BYTES + _POINTER_BYTES + sys.getsizeof(step)
+                + 512 + 16*(len(self.paths)+1))
             path = parent + (step,)
-        self.reserve(512)
-        self.paths.append([path, 0])
+            charge = sys.getsizeof(path) + sys.getsizeof(step)
+        self.path_bytes += charge
+        self.paths.append([path, 0, charge])
         if len(path) == 1:
             if path[0] not in ('context', 'records', 'field_meta'):
                 raise ValueError('exact selected Label wire components required')
@@ -134,7 +148,8 @@ class _LabelWireValidator(_Validator):
     def _value_end(self):
         if not self.paths:
             raise ValueError('selected Label observation stack mismatch')
-        path, _ = self.paths.pop()
+        self.reserve(sys.getsizeof(self.paths))
+        path, _, path_charge = self.paths.pop()
         if self.capture_path == path:
             value,temporary = self._decode_capture()
             if len(path) == 2 and path[0] == 'context':
@@ -179,6 +194,7 @@ class _LabelWireValidator(_Validator):
                 raise ValueError('actual Label query grid required for endpoint projection')
         if self.paths and self.stack and self.stack[-1][0] == 'array':
             self.paths[-1][1] += 1
+        self.path_bytes -= path_charge
 
     def finish(self):
         result = super().finish()

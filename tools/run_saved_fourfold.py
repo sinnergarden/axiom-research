@@ -5,6 +5,7 @@ owner arguments/results and never re-read a panel or compute a target/model.
 No stage may launch until the parent releases the comparison and source review.
 """
 from copy import deepcopy
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from hashlib import sha256
 import importlib.util
@@ -32,6 +33,42 @@ read, save = monitor.read, monitor.save
 
 class SemanticBoundaryError(ValueError):
     pass
+
+
+class _FeatureAdmissionPhases:
+    """Separate initial Feature admission from required saved-closure checks."""
+    def __init__(self, observations):
+        self.observations = observations
+        self.phase = 'initial'
+        observations['feature_admission_calls_by_phase'] = {}
+
+    @contextmanager
+    def scope(self, phase):
+        previous = self.phase
+        self.phase = phase
+        try:
+            yield
+        finally:
+            self.phase = previous
+
+    def completed(self):
+        self.observations['feature_admission_calls'] += 1
+        counts = self.observations['feature_admission_calls_by_phase']
+        counts[self.phase] = counts.get(self.phase, 0) + 1
+        return counts[self.phase]
+
+    @property
+    def initial_calls(self):
+        return self.observations['feature_admission_calls_by_phase'].get('initial', 0)
+
+    def complete_counts_match(self, cache_hit):
+        counts = self.observations['feature_admission_calls_by_phase']
+        return (self.initial_calls == 1
+            and set(counts) <= {'initial','staged','prepared_saved_batch'}
+            and self.observations['feature_admission_calls'] == sum(counts.values())
+            and counts.get('staged',0) == (0 if cache_hit else 1)
+            and (counts.get('prepared_saved_batch',0) == 1 if cache_hit
+                 else counts.get('prepared_saved_batch',0) in (0,1)))
 
 
 def require(ok, why):
@@ -92,6 +129,7 @@ def prepare_child():
         'verified_calls':0, 'verification_hash_calls':0, 'verification_hash_bytes':0}
     restores = []
     data = None
+    feature_phases = _FeatureAdmissionPhases(observations)
     def replace(obj, name, value):
         restores.append((obj, name, getattr(obj,name)))
         setattr(obj, name, value)
@@ -100,25 +138,38 @@ def prepare_child():
         from axiom_research import prepare_stock_ml_batch_inputs
         from axiom_research.stock_matrix_prepare import _label_work_plan
         from axiom_research import stock_matrix_reader as mr, labels
+        from axiom_research import stock_batch as sb
         import axiom_engine.core as core
         from axiom_research.stock_label_contracts import NORMALIZATION_SPEC
         data = Data(old['data_root'], cache_bytes=0)
         native_load = mr.load_feature_matrix_index
         def feature_load(*args, **kwargs):
-            emit(component='feature_admission')
+            phase_name = feature_phases.phase
+            emit(component='feature_admission' if phase_name == 'initial' else phase_name+'_admission',
+                feature_admission_phase=phase_name)
             tick = time.monotonic()
             value = native_load(*args, **kwargs)
-            observations['feature_admission_calls'] += 1
+            phase_call = feature_phases.completed()
             index = value.to_dict()
             require(value.identity == cfg['input_refs']['feature_inputs_ref'] and
                 index['content_digest'] == cfg['input_refs']['feature_content_digest'] and
                 index['definition']['spec'] == read(monitor.OLD_SPEC), 'saved Feature identity/spec differs')
-            save(out/'feature-admission-receipt.json', {'wall_seconds':time.monotonic()-tick,
+            receipt_name = ('feature-admission-receipt.json' if phase_name == 'initial' and phase_call == 1
+                else f'feature-admission-{phase_name}-{phase_call}.json')
+            save(out/receipt_name, {'wall_seconds':time.monotonic()-tick,
                 'feature_inputs_ref':value.identity, 'content_digest':index['content_digest'],
-                'metrics':value.metrics, 'extra_loads':0})
-            emit(component='raw_labels', feature_admission_calls=observations['feature_admission_calls'])
+                'metrics':value.metrics, 'phase':phase_name, 'phase_call':phase_call,
+                'feature_admission_calls':observations['feature_admission_calls']})
+            emit(component='raw_labels' if phase_name == 'initial' else phase_name+'_admission',
+                feature_admission_calls=observations['feature_admission_calls'],
+                feature_initial_admission_calls=feature_phases.initial_calls)
             return value
         replace(mr, 'load_feature_matrix_index', feature_load)
+        native_batch_load = sb.load_stock_ml_batch_inputs
+        def saved_batch_load(*args, **kwargs):
+            with feature_phases.scope('prepared_saved_batch'):
+                return native_batch_load(*args, **kwargs)
+        replace(sb, 'load_stock_ml_batch_inputs', saved_batch_load)
         native_snapshot = data.store.load_snapshot
         def snapshot_load(*args, **kwargs):
             tick = time.monotonic()
@@ -191,7 +242,8 @@ def prepare_child():
         def staged(*args, **kwargs):
             emit(component='staged_joint_admission')
             tick = time.monotonic()
-            value = native_staged(*args, **kwargs)
+            with feature_phases.scope('staged'):
+                value = native_staged(*args, **kwargs)
             save(out/'staged-admission-receipt.json', {'wall_seconds':time.monotonic()-tick, 'metrics':value})
             return value
         replace(mr, '_validate_staged_matrix_batch', staged)
@@ -209,11 +261,13 @@ def prepare_child():
             preparation_options=cfg['prepare_options'], metrics=metrics, progress=progress)
         require(manifest['status']=='COMPLETE' and manifest['definition']['fold_specs']==cfg['fold_specs'],
                 'prepared batch contract differs')
+        require(feature_phases.complete_counts_match(metrics['cache_hit']),
+                'initial/staged/saved-batch Feature admission counts differ')
         if metrics['cache_hit']:
-            require(observations['feature_admission_calls']==1 and observations['data_read_calls']==0 and
+            require(feature_phases.initial_calls==1 and observations['data_read_calls']==0 and
                 not raw_log and not core_log, 'prepared HIT performed owner work')
         else:
-            require(observations['feature_admission_calls']==1 and
+            require(feature_phases.initial_calls==1 and
                 observations['data_read_calls']==physical_plan['data_calls'] and
                 len(raw_log)==physical_plan['raw_calls'] and len(core_log)==physical_plan['core_calls'] and
                 sum(x['rows'] for x in raw_log)==physical_plan['raw_rows'], 'preparation physical plan differs')
