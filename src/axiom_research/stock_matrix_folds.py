@@ -171,7 +171,8 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,traini
                 'environment':definition['environment'],'implementation_ref':definition['implementation_ref'],
                 'booster_digest':file_digest(stage/'booster.txt'),
                 'feature_normalization':'same_date_visible_members_cs_zscore_no_fit',
-                'label_normalization':NORMALIZATION_SPEC,**label_fields},'model_ref')
+                'label_normalization':_label_normalization() if columnar else NORMALIZATION_SPEC,
+                **label_fields},'model_ref')
             predictions=seal({'contract_version':'stock_prediction_run_v3' if columnar else 'stock_prediction_run_v2',
                 'signal_stage':'raw_prediction' if columnar else 'prediction_raw',
                 'score_semantics':_target(common),'score_unit':'dimensionless','feature_ref':features['feature_ref'],
@@ -321,7 +322,8 @@ def _load_matrix_fold(path, *, projection,batch,ingress,_lease=None):
             (model['clock_basis'],'declared_simulation'),(model['ordered_features'],common['ordered_features']),
             (model['feature_selection'],common['feature_selection']),(model['catalog_ref'],common['catalog_ref']),
             (model['parameters'],parameters),(model['num_boost_round'],rounds),
-            (model['target_semantics'],_target(common)),(model['label_normalization'],NORMALIZATION_SPEC),
+            (model['target_semantics'],_target(common)),
+            (model['label_normalization'],_label_normalization() if columnar else NORMALIZATION_SPEC),
             (model['environment'],definition['environment']),(model['implementation_ref'],definition['implementation_ref']),
             (model['booster_digest'],manifest['files']['booster.txt'])):
             require(actual==expected,'saved matrix model linkage mismatch')

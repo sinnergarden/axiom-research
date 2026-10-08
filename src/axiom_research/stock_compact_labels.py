@@ -1280,7 +1280,8 @@ class _IncrementalPreparation:
                 target_spec=self.spec.get('target_spec'))
             charge=_measured(self.stats,[nrows,cohort]);_working(self.stats,charge);self.stats['_retained_raw_bytes']+=charge
             self._release_payloads()
-            offsets=[self.positions[r['feature_session']]*self.width+self.spec['universe'].index(r['security_id']) for r in nrows if r['valid']]
+            security_positions={security:i for i,security in enumerate(self.spec['universe'])}
+            offsets=[self.positions[r['feature_session']]*self.width+security_positions[r['security_id']] for r in nrows if r['valid']]
             def joined_rows():
                 for f,r in zip(iter_feature_rows(self.feature,offsets,model_feature_selection=self.stats['_model_feature_selection']),
                     (r for r in nrows if r['valid'])):
@@ -1313,7 +1314,7 @@ class _IncrementalPreparation:
             if self.progress:self.progress({'stage':'compact_labels','completed':len(self.ready),'total':len(self.plans)})
             return deepcopy(item)
         finally:
-            rows=nrows=cohort=chunk=raw_rows=raw_value=record=selectors=window=joined_rows=parts=offsets=norm=descriptor=inputs=item=None
+            rows=nrows=cohort=chunk=raw_rows=raw_value=record=selectors=window=joined_rows=parts=offsets=norm=descriptor=inputs=item=security_positions=None
             self.stats['_retained_raw_bytes']=0
             _sync_feature_charge(self.stats)
 

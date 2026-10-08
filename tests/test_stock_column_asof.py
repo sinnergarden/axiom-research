@@ -455,6 +455,15 @@ class ColumnAsOfTests(unittest.TestCase):
                     for run in runs:
                         self.assertEqual(_read(run.path/'dataset.json')['contract_version'],'stock_fold_dataset_v4')
                         prediction=_read(run.path/'predictions.json')
+                        from axiom_engine.runtime.stock_schedule import _verify_model
+                        model=run.model();_verify_model(model)
+                        self.assertEqual(model['label_normalization'],prediction['label_normalization'])
+                        self.assertEqual(set(model['label_normalization']),{'operator','operator_version','params'})
+                        from axiom_research.stock_label_contracts import NORMALIZATION_SPEC
+                        bad=deepcopy(model);bad['label_normalization']=deepcopy(NORMALIZATION_SPEC)
+                        from axiom_research.stock_fold_inputs import seal
+                        bad=seal({k:v for k,v in bad.items() if k!='model_ref'},'model_ref')
+                        with self.assertRaises(ValueError):_verify_model(bad)
                         self.assertEqual(run.model()['parameters']['learning_rate'],.03)
                         self.assertEqual(run.model()['num_boost_round'],12)
                         self.assertEqual(prediction['label_spec']['horizon_sessions'],3)
