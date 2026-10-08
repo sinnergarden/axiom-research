@@ -70,10 +70,13 @@ def owned_path(descriptor,root):
 
 
 class OwnedStore:
-    """Each admission hashes the immutable bytes it actually decodes/uses.
+    """First ingress hashes the immutable bytes it actually decodes/uses.
 
     No readonly mmap is used: Python bytes backs every NumPy buffer. Stat
-    identities detect lifecycle changes; they never replace the initial hash.
+    identities never replace the initial hash. Eviction retains that digest
+    and its device/inode/size/mtime/ctime epoch; rehydration verifies the same
+    epoch against the open fd and path before/after reading. A fresh store
+    always performs the full initial byte check.
     """
     def __init__(self, budgets=None, resolver=None, shared_bytes=0, shared_source_bytes=0):
         self.limits=limits(budgets); self.resolve=resolver or (lambda p:Path(p))
@@ -87,7 +90,8 @@ class OwnedStore:
         self.metrics={'file_hash_calls':0,'hash_bytes':0,'source_bytes':0,'json_decode_calls':0,
                       'owned_buffer_bytes':0,'mmap_opens':0,'fold_projection_calls':0,'largest_parent_bytes':0,
                       'source_stat_calls':0,'lifecycle_check_calls':0,
-                      'released_buffer_bytes':0,'released_json_bytes':0,'peak_resident_bytes':0}
+                      'released_buffer_bytes':0,'released_json_bytes':0,'peak_resident_bytes':0,
+                      'file_read_calls':0,'read_bytes':0,'rehydration_calls':0,'rehydration_bytes':0}
 
     def _check_owner(self):
         require(self.owner_pid==os.getpid(),'compact store belongs to another process')
@@ -105,7 +109,7 @@ class OwnedStore:
 
     def read(self, descriptor, *, retain=False, parent=False):
         self._check_owner()
-        require(not self.closed,'compact store is closed')
+        require(not self.closed and not self._invalid,'compact store is closed or invalidated')
         path=descriptor['path']; expected=descriptor.get('file_digest')
         require(type(path) is str and Path(path).is_absolute() and (expected is None or reference(expected)),
                 'fixed compact file descriptor required')
@@ -115,12 +119,12 @@ class OwnedStore:
             self.check_path(path)
             require(expected is None or expected==self.hashes[path],'conflicting compact file descriptor')
             if path in self.arrays or path in self.json: return None
-        # A released leaf must be hashed again, while its original lifecycle
-        # fingerprint continues to guard this owner's immutable source.
-        if path in self.marks: self.check_path(path)
-        mark=file_fingerprint(physical)
+        # A released payload is read only from the original verified file
+        # epoch. Never replace its initial fingerprint with a fresh baseline.
+        admitted=path in self.hashes
+        mark=self.marks[path] if admitted else file_fingerprint(physical)
         self.metrics['source_stat_calls']+=1
-        require(self.shared_source_bytes+self.metrics['source_bytes']+mark[2]<=self.limits['maximum_source_bytes'],
+        require(self.shared_source_bytes+self.metrics['source_bytes']+(0 if admitted else mark[2])<=self.limits['maximum_source_bytes'],
                 'compact source byte budget exceeded')
         if parent:
             require(mark[2]<=self.limits['maximum_parent_bytes'],'compact parent byte budget exceeded')
@@ -134,15 +138,19 @@ class OwnedStore:
                 require(len(payload)==mark[2] and _stat(os.fstat(stream.fileno()))==mark and
                         file_fingerprint(physical)==mark,'compact source changed during read')
                 self.metrics['source_stat_calls']+=1
-            actual='sha256:'+sha256(payload).hexdigest()
+            actual=self.hashes[path] if admitted else 'sha256:'+sha256(payload).hexdigest()
             require(expected is None or actual==expected,'compact file digest mismatch')
         except BaseException:
             payload=None
             raise
-        self.marks[path]=mark; self.hashes[path]=actual
+        if not admitted:self.marks[path]=mark; self.hashes[path]=actual
         if self._operation_depth:self._operation_paths.add(path)
-        self.metrics['file_hash_calls']+=1; self.metrics['hash_bytes']+=len(payload)
-        self.metrics['source_bytes']+=len(payload)
+        self.metrics['file_read_calls']+=1;self.metrics['read_bytes']+=len(payload)
+        if admitted:
+            self.metrics['rehydration_calls']+=1;self.metrics['rehydration_bytes']+=len(payload)
+        else:
+            self.metrics['file_hash_calls']+=1; self.metrics['hash_bytes']+=len(payload)
+            self.metrics['source_bytes']+=len(payload)
         return payload
 
     def read_json(self, descriptor, *, key=None, legacy=False, keep=True):
@@ -205,7 +213,7 @@ class OwnedStore:
             array=payload=None
             raise
 
-    def adopt_written(self,descriptor,value,arrays):
+    def adopt_written(self,descriptor,value,arrays,*,marks):
         """Take this writer's immutable columns after their full byte checks.
 
         This is an internal publication handoff, never external admission. The
@@ -213,28 +221,46 @@ class OwnedStore:
         output descriptors; semantic target validation still runs afterwards.
         """
         try:
-            self._check_owner();require(not self.closed,'compact store is closed')
+            self._check_owner();require(not self.closed and not self._invalid,'compact store is closed or invalidated')
+            paths={descriptor['path'],*(value['buffers'][name]['path'] for name in arrays)}
+            require(type(marks) is dict and paths<=set(marks),'writer-verified file epochs required')
+            def verify_epochs():
+                for path in paths:
+                    physical=self.resolve(path)
+                    try:unchanged=not physical.is_symlink() and file_fingerprint(physical)==marks[path]
+                    except OSError:unchanged=False
+                    require(unchanged,
+                            'written source changed after byte verification')
+                    require(path not in self.marks or self.marks[path]==marks[path],
+                            'written source conflicts with admitted file epoch')
+            verify_epochs()
             encoded=(json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)+'\n').encode()
             require('sha256:'+sha256(encoded).hexdigest()==descriptor['file_digest'],'written target JSON differs from declared bytes')
-            charge=_size(value);self.reserve(charge+sum(a.nbytes for a in arrays.values()))
-            path=descriptor['path'];self.json[path]=value;self.charges[path]=charge;self.resident_bytes+=charge
-            self.hashes[path]=descriptor['file_digest'];self.marks[path]=file_fingerprint(self.resolve(path))
-            if self._operation_depth:self._operation_paths.add(path)
+            payloads={}
             for name,a in arrays.items():
                 item=value['buffers'][name];payload=a.base if isinstance(a.base,bytes) and len(a.base)==a.nbytes else a.tobytes()
                 require(not a.flags.writeable and 'sha256:'+sha256(payload).hexdigest()==item['file_digest'],
                         'written immutable target column differs from declared bytes')
-                path=item['path']
-                if path in self.arrays:
-                    require(self.hashes[path]==item['file_digest'],'conflicting written buffer')
-                    continue
-                self.arrays[path]=payload;self.charges[path]=len(payload);self.resident_bytes+=len(payload)
-                self.hashes[path]=item['file_digest'];self.marks[path]=file_fingerprint(self.resolve(path))
-                if self._operation_depth:self._operation_paths.add(path)
+                require(item['path'] not in self.hashes or self.hashes[item['path']]==item['file_digest'],
+                        'conflicting written buffer')
+                payloads[item['path']]=(payload,item['file_digest'])
+            path=descriptor['path']
+            require(path not in self.hashes or self.hashes[path]==descriptor['file_digest'],'conflicting written JSON')
+            charge=0 if path in self.json else _size(value)
+            self.reserve(charge+sum(len(p) for key,(p,_) in payloads.items() if key not in self.arrays))
+            verify_epochs()
+            if path not in self.json:
+                self.json[path]=value;self.charges[path]=charge;self.resident_bytes+=charge
+            self.hashes[path]=descriptor['file_digest'];self.marks[path]=marks[path]
+            for path,(payload,reference) in payloads.items():
+                if path not in self.arrays:
+                    self.arrays[path]=payload;self.charges[path]=len(payload);self.resident_bytes+=len(payload)
+                self.hashes[path]=reference;self.marks[path]=marks[path]
+            if self._operation_depth:self._operation_paths.update(paths)
             metric='generated_column_handoffs' if arrays else 'generated_json_handoffs'
             self.metrics[metric]=self.metrics.get(metric,0)+1
         finally:
-            descriptor=value=arrays=encoded=payload=a=None
+            descriptor=value=arrays=encoded=payload=a=payloads=marks=verify_epochs=None
 
 
     def release(self, paths):
@@ -245,7 +271,7 @@ class OwnedStore:
         for path in set(paths):
             kind='buffer_bytes' if path in self.arrays else 'json_bytes'
             charge=self.charges.pop(path,0)
-            self.arrays.pop(path,None); self.json.pop(path,None); self.hashes.pop(path,None)
+            self.arrays.pop(path,None); self.json.pop(path,None)
             self.resident_bytes-=charge; released[kind]+=charge
         require(self.resident_bytes>=0,'compact release accounting mismatch')
         self.metrics['released_buffer_bytes']+=released['buffer_bytes']
@@ -253,7 +279,7 @@ class OwnedStore:
         return released
 
     def release_payloads(self, keep_paths=()):
-        return self.release(set(self.hashes)-set(keep_paths))
+        return self.release((set(self.arrays)|set(self.json))-set(keep_paths))
 
     def check_path(self,path):
         self._check_owner()

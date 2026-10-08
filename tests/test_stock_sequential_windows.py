@@ -14,7 +14,7 @@ from axiom_research import (load_stock_feature_view, load_stock_ml_batch_inputs,
     build_stock_ml_fold_from_saved_inputs)
 from axiom_research.stock_artifacts import _read, digest, file_digest, write_json
 from axiom_research.stock_batch import _data
-from axiom_research.stock_compact_store import OwnedStore, _view_data, set_feature_window
+from axiom_research.stock_compact_store import OwnedStore, _view_data, set_feature_window, clear_feature_window
 from axiom_research.stock_fold_inputs import seal, validate_spec
 from axiom_research.stock_matrix_storage import instant_us, write_buffer, write_part
 
@@ -96,6 +96,9 @@ class SequentialWindowTests(unittest.TestCase):
                     self.assertEqual(store.shared_source_bytes,fstore.metrics['source_bytes']+source_baseline)
                 finally: state.close()
                 budgets={'maximum_matrix_bytes':4*1024**2,'maximum_source_bytes':2*1024**2,'maximum_parent_bytes':1024**2}
+                # Successful verification hands off its last Feature window.
+                # This test needs a cold Feature buffer to observe pre-read caps.
+                clear_feature_window(feature)
                 previous=(fstore.limits,fstore.shared_bytes,fstore.shared_source_bytes); observed=[]
                 with load_stock_ml_batch_inputs(manifest,feature_inputs=feature,residency='sequential',limits=budgets) as batch:
                     def buffer(owner,descriptor):
@@ -294,6 +297,9 @@ class SequentialWindowTests(unittest.TestCase):
                 self.assertGreater(fstore.metrics['released_buffer_bytes'],0)
                 self.assertGreater(state.store.metrics['released_buffer_bytes'],0)
                 state.verify_all()
+                self.assertEqual((state.targets,state.store.arrays),({},{}))
+                self.assertTrue(fstore.arrays)
+                state._release_window()
                 self.assertEqual((state.targets,state.store.arrays,fstore.arrays),({},{},{}))
                 self.assertEqual(state.store.metrics['verified_fold_count'],2)
 
@@ -312,7 +318,7 @@ class SequentialWindowTests(unittest.TestCase):
                 with batch._matrix_project(second['input_manifest'],second['fold_spec']): pass
             finally: batch.close()
 
-    def test_released_buffer_readmission_hashes_again_and_detects_mutation(self):
+    def test_released_buffer_rehydrates_original_epoch_and_detects_mutation(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); descriptor=write_buffer(root,[1.25,-3.5],dtype='float64_le',shape=[2])
             with OwnedStore() as store:
@@ -322,10 +328,13 @@ class SequentialWindowTests(unittest.TestCase):
                 self.assertIsNone(reference())
                 self.assertEqual(release,{'buffer_bytes':16,'json_bytes':0})
                 self.assertEqual(store.resident_bytes,0)
-                self.assertNotIn(descriptor['path'],store.hashes)
+                self.assertEqual(store.hashes[descriptor['path']],descriptor['file_digest'])
                 self.assertIn(descriptor['path'],store.marks)
-                count=store.metrics['file_hash_calls']; array=store.buffer(descriptor)
-                self.assertEqual(store.metrics['file_hash_calls'],count+1)
+                count=store.metrics['file_hash_calls']; reads=store.metrics['file_read_calls']
+                array=store.buffer(descriptor)
+                self.assertEqual(store.metrics['file_hash_calls'],count)
+                self.assertEqual(store.metrics['file_read_calls'],reads+1)
+                self.assertEqual(store.metrics['rehydration_bytes'],16)
                 self.assertEqual(array.tobytes(),original); del array
                 store.release_payloads()
                 leaf=Path(descriptor['path']); payload=leaf.read_bytes()

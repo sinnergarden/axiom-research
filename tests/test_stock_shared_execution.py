@@ -79,7 +79,7 @@ class SharedExecutionTests(unittest.TestCase):
         from axiom_research import build_configured_stock_sequential_experiment,load_stock_ml_fold
         from axiom_data.column_source import ColumnSelection
         from axiom_research.stock_training import fit_predict_stock_model
-        admissions=Counter();backend_metrics=[];prepare_metrics={}
+        admissions=Counter();initial_hashes=Counter();backend_metrics=[];prepare_metrics={};resume_metrics={}
         row_dicts=Counter();getitem=TargetRows.__getitem__
         def observed_row(rows,index):
             if rows.value['contract_version']=='stock_compact_raw_v2':
@@ -87,7 +87,9 @@ class SharedExecutionTests(unittest.TestCase):
             return getitem(rows,index)
         original=OwnedStore.read
         def observed(store,descriptor,**kwargs):
+            previous=store.metrics['file_hash_calls']
             value=original(store,descriptor,**kwargs)
+            if store.metrics['file_hash_calls']>previous:initial_hashes[store,descriptor['path']]+=1
             if value is not None:admissions[descriptor['path']]+=1
             return value
         def backend(*args,**kwargs):
@@ -124,13 +126,17 @@ class SharedExecutionTests(unittest.TestCase):
                 pins={str(p):file_digest(p) for fold in result['folds'] for p in Path(fold['path']).iterdir()}
                 before=dict(source.statistics)
                 with patch.object(source,'select',side_effect=AssertionError('resume selected Data')), \
-                    patch('axiom_research.stock_training.fit_predict_stock_model',side_effect=AssertionError('resume trained')):
+                    patch('axiom_research.stock_training.fit_predict_stock_model',side_effect=AssertionError('resume trained')), \
+                    patch('axiom_research.stock_compact_batch.CompactState.verify_all',
+                        side_effect=AssertionError('COMPLETE recovery must consume one fold window at a time')):
                     reused=build_configured_stock_sequential_experiment(data,configuration_path=config,feature_inputs=feature,
-                        column_source=source,destination=root/'experiment')
+                        column_source=source,destination=root/'experiment',metrics=resume_metrics)
                     for fold in reused['folds']:load_stock_ml_fold(fold['path'])
                 self.assertEqual(source.statistics,before)
                 self.assertEqual(reused['folds'],result['folds'])
                 self.assertEqual(pins,{p:file_digest(p) for p in pins})
+                self.assertTrue(all(n==1 for n in initial_hashes.values()))
+                self.assertEqual(resume_metrics['shared_execution']['targets']['fold_window_admissions'],2)
                 if evidence_root:
                     write_json(root/'acceptance.json',dict(status='PASS_SMALL_SYNTHETIC_SHARED_EXECUTION',synthetic=True,
                         real_Data_root_reads=0,supplier_calls=0,feature_executor_calls=0,account_calls=0,
@@ -138,6 +144,8 @@ class SharedExecutionTests(unittest.TestCase):
                         resume_fit_calls=0,resume_predict_calls=0,feature_file_admissions_once=True,
                         training_raw_row_dictionary_projections=0,first_wall_seconds=first_seconds,
                         Data_statistics=dict(source.statistics),Research_metrics=prepare_metrics,backend_metrics=backend_metrics,
+                        resume_Research_metrics=resume_metrics,external_file_hashes_once_per_owner=True,
+                        recovery_full_fold_prepass=False,
                         folds=result['folds'],batch_ref=result['batch_manifest']['batch_ref'],
                         frozen_oos_ref=__import__('axiom_research').to_dict(result['raw_signal_evaluation_input']),
                         saved_fold_file_digests=pins,unchanged_on_resume=True,

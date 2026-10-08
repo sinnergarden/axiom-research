@@ -941,7 +941,8 @@ def _load_checkpoint_state(definition,view_descriptor,plan_descriptor,folds,*,fe
         for fold in folds:validate_input(fold,manifest,fd['row_index'],common)
         state=CompactState(store,feature_inputs,manifest,view,{},False,residency='sequential')
         state._keep_paths.add(plan_descriptor['path']);state._account_controls()
-        state.verify_all();state.check()
+        with state.operation():state.verify_all()
+        state.check()
         return state
     except BaseException:
         if state is not None:state.close()

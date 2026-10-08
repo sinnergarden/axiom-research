@@ -13,7 +13,7 @@ import sys
 import tempfile
 
 from .stock_artifacts import digest, file_digest, write_json
-from .stock_fold_inputs import require, seal, ordered
+from .stock_fold_inputs import require, seal, ordered, file_fingerprint
 from .stock_label_contracts import _instant, _session
 
 
@@ -68,7 +68,18 @@ def _buffer_array(values, dtype):
     return out
 
 
-def write_buffer(root, values, *, dtype, shape):
+def _verify_written(path, expected, marks=None):
+    """Bind the final byte check to the file epoch transferred to its owner."""
+    path=Path(path)
+    require(not path.is_symlink() and path.is_file(),'written source must be a regular file')
+    before=file_fingerprint(path)
+    require(file_digest(path)==expected and not path.is_symlink() and
+            file_fingerprint(path)==before,'written source changed during final verification')
+    if marks is not None:marks[str(path.resolve())]=before
+    return expected
+
+
+def write_buffer(root, values, *, dtype, shape, _verified_marks=None):
     """Publish one finite, explicit raw buffer and return its exact descriptor."""
     try:
         shape = list(shape)
@@ -97,15 +108,16 @@ def write_buffer(root, values, *, dtype, shape):
                             'concurrent matrix buffer changed')
             finally:
                 if temporary is not None: temporary.unlink(missing_ok=True)
-        require(path.stat().st_size == count*DTYPES[dtype][1] and file_digest(path) == reference,
+        require(path.stat().st_size == count*DTYPES[dtype][1],
                 'published matrix buffer mismatch')
+        _verify_written(path,reference,_verified_marks)
         return {'path': str(path.resolve()), 'file_digest': reference, 'dtype': dtype,
                 'shape': shape, 'buffer_digest': reference}
     finally:
         values=packed=raw=None
 
 
-def write_part(root, value, ref_key):
+def write_part(root, value, ref_key, *, _verified_marks=None):
     """Publish a sealed canonical JSON child; byte and content refs stay separate."""
     require(type(value) is dict, 'matrix JSON object required')
     require(value.get(ref_key) == digest({k:v for k,v in value.items() if k != ref_key}),
@@ -122,9 +134,9 @@ def write_part(root, value, ref_key):
         except FileExistsError:
             require(not path.is_symlink() and file_digest(path) == expected,
                     'existing matrix metadata changed')
-        require(file_digest(path) == expected, 'published matrix metadata mismatch')
     finally:
         temporary.unlink(missing_ok=True)
+    _verify_written(path,expected,_verified_marks)
     return {'path': str(path.resolve()), 'file_digest': expected, ref_key: value[ref_key]}
 
 

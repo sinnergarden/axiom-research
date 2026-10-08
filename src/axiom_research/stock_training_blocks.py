@@ -67,13 +67,14 @@ def _training_block_binding(feature, offsets, *, normalized, cohort_ref, selecto
         ordered_features=(_view_data(feature)['definition']['spec']['ordered_features']
                           if model_binding is None else model_binding['ordered_features'])
         store.reserve(2*sys.getsizeof(blocks)+4096 if _view_data(feature,check=False)['store']._operation_depth else 2*_size(blocks)+4096)
-        descriptors=[write_part(destination,body,'feature_block_ref') for body in blocks]
+        written_marks={}
+        descriptors=[write_part(destination,body,'feature_block_ref',_verified_marks=written_marks) for body in blocks]
         if _view_data(feature,check=False)['store']._operation_depth:
             for descriptor,body in zip(descriptors,blocks):
                 if descriptor['path'] in store.json:
                     store.check_path(descriptor['path'])
                     require(store.hashes[descriptor['path']]==descriptor['file_digest'],'written Feature proof descriptor changed')
-                else:store.adopt_written(descriptor,body,{})
+                else:store.adopt_written(descriptor,body,{},marks=written_marks)
         header=store.read_json(normalized,key='target_ref')
         require(header['target_ref']==normalized['target_ref'] and reference(cohort_ref),
                 'training target/cohort binding mismatch')

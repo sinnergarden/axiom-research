@@ -226,14 +226,18 @@ def _column_raw_implementation():
     from axiom_engine.core.cs_batch import _BUFFER_TYPES
     from axiom_engine.core import contracts
     from importlib.metadata import version
-    from .stock_column_inputs import ColumnPriceDomain,query_binding
+    from .stock_column_inputs import ColumnPriceDomain,ColumnMathReuse,query_binding
     return digest({'operator':'core_forward_returns_batch',
         'kernel':inspect.getsource(execute_forward_returns),
         'buffer_admission':inspect.getsource(_snapshot_buffer),
         'buffer_descriptor':inspect.getsource(_descriptor),
         'buffer_types':{name:_BUFFER_TYPES[name] for name in ('values','value_validity')},
         'core_contracts':file_digest(contracts.__file__),'numpy':version('numpy'),
-        'qualification':inspect.getsource(ColumnPriceDomain.rows),
+        'qualification':inspect.getsource(ColumnPriceDomain.columns),
+        'selected_columns':inspect.getsource(ColumnPriceDomain._initialize),
+        'numerical_reuse':inspect.getsource(ColumnMathReuse.forward_block),
+        'numerical_binding':inspect.getsource(ColumnMathReuse.vector_ref),
+        'numerical_handoff':inspect.getsource(ColumnMathReuse._remember),
         'dependency_binding':inspect.getsource(ColumnPriceDomain._endpoint_dependency),
         'query_binding':inspect.getsource(query_binding)})
 
@@ -244,6 +248,8 @@ def _column_normalization_implementation():
     from axiom_engine.core import cs_batch,contracts,plan,execution
     from .stock_target_spec import eligible_target_reason
     from .stock_column_inputs import ColumnMathReuse
+    from .stock_compact_batch import target_eligibility_reasons
+    from .stock_compact_store import feature_eligibility_columns
     from importlib.metadata import version
     import platform
     return digest({'operator':'core_cs_zscore_batch_v1','core':{
@@ -252,8 +258,15 @@ def _column_normalization_implementation():
         'arithmetic':{name:inspect.getsource(getattr(execution,name)) for name in
             ('_Cell','_merge','_std','_cs_zscore_scale','_cs_zscore_value')},
         'eligibility':inspect.getsource(eligible_target_reason),
+        'vector_eligibility':inspect.getsource(target_eligibility_reasons),
+        'feature_eligibility':inspect.getsource(feature_eligibility_columns),
         'normalization_projection':inspect.getsource(_normalized),
         'numerical_binding':inspect.getsource(ColumnMathReuse.vector_ref),
+        'normalization_reuse':inspect.getsource(ColumnMathReuse.normalization),
+        'normalization_handoff':inspect.getsource(ColumnMathReuse.remember_normalization),
+        'clock_projection':inspect.getsource(core_clock),
+        'instant_encoding':inspect.getsource(instant_us),
+        'numerical_handoff':inspect.getsource(ColumnMathReuse._remember),
         'numpy':version('numpy'),'python':platform.python_version()})
 
 
@@ -322,7 +335,8 @@ def _clock(value):
     return (datetime(1970,1,1,tzinfo=timezone.utc)+timedelta(microseconds=int(value))).isoformat().replace('+00:00','Z')
 
 
-def _write(root, definition, rows, *, normalized=False, core_ref=None, cohort=None, final_root=None):
+def _write(root, definition, rows, *, normalized=False, core_ref=None, cohort=None, final_root=None,
+           _verified_marks=None):
     """One typed target, no Raw rows/proof JSON copies at the next stages."""
     try:
         from .stock_compact_batch import TargetRows
@@ -331,7 +345,7 @@ def _write(root, definition, rows, *, normalized=False, core_ref=None, cohort=No
             types={'values':'float64_le','validity':'bool_u8','availability':'int64_le',
                 'availability_validity':'bool_u8','reason_codes':'int32_le',
                 'start_session':'int32_le','end_session':'int32_le','source_codes':'int32_le'}
-            buffers={name:write_buffer(root,values,dtype=types[name],shape=[len(rows)])
+            buffers={name:write_buffer(root,values,dtype=types[name],shape=[len(rows)],_verified_marks=_verified_marks)
                 for name,values in rows.arrays.items()}
             if final_root is not None:
                 for descriptor in buffers.values():descriptor['path']=str(Path(final_root)/Path(descriptor['path']).relative_to(Path(root).resolve()))
@@ -340,7 +354,9 @@ def _write(root, definition, rows, *, normalized=False, core_ref=None, cohort=No
                 'reason_dictionary':dictionary,'source_dictionary':sources,'buffers':buffers,
                 'core_ref':core_ref,'cohort':cohort},'target_ref')
             path=Path(root)/'target.json';write_json(path,value)
-            return {'path':str(path.resolve()),'file_digest':file_digest(path),'target_ref':value['target_ref']},value
+            from .stock_matrix_storage import _verify_written
+            verified=_verify_written(path,file_digest(path),_verified_marks)
+            return {'path':str(path.resolve()),'file_digest':verified,'target_ref':value['target_ref']},value
         reasons=sorted({r['invalid_reason'] for r in rows if r['invalid_reason'] is not None})
         dictionary=[None,*reasons]; codes={r:i for i,r in enumerate(dictionary)}
         calendar=definition['calendar']; positions={d:i for i,d in enumerate(calendar)}
@@ -378,14 +394,17 @@ def _publish(target,definition,rows,*,budgets,normalized=False,core_ref=None,coh
         target=Path(target).resolve(); target.parent.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='.compact-target-',dir=target.parent) as temporary:
             stage=Path(temporary)/'complete'; stage.mkdir()
-            written=_write(stage,definition,rows,normalized=normalized,core_ref=core_ref,cohort=cohort,final_root=target)
+            written_marks={}
+            written=_write(stage,definition,rows,normalized=normalized,core_ref=core_ref,cohort=cohort,
+                final_root=target,_verified_marks=written_marks)
             desc,value=written if isinstance(written,tuple) else (written,None)
-            final={'path':str(target/'target.json'),'file_digest':file_digest(stage/'target.json'),'target_ref':desc['target_ref']}
+            final={'path':str(target/'target.json'),'file_digest':desc['file_digest'],'target_ref':desc['target_ref']}
             checker=store or OwnedStore(budgets); original=checker.resolve
             checker.resolve=lambda p:stage/Path(p).relative_to(target) if Path(p).is_relative_to(target) else original(p)
             try:
                 if value is not None:
-                    checker.adopt_written(final,value,rows.arrays)
+                    marks={str(target/Path(path).relative_to(stage)):mark for path,mark in written_marks.items()}
+                    checker.adopt_written(final,value,rows.arrays,marks=marks)
                 read_target(checker,final,expected=definition,raw_rows=getattr(rows,'raw_rows',None))
                 checker.validate_boundary()
                 try: stage.rename(target)
@@ -400,7 +419,7 @@ def _publish(target,definition,rows,*,budgets,normalized=False,core_ref=None,coh
                 if store is None: checker.close()
             return final
     finally:
-        rows=definition=cohort=store=written=value=checker=desc=None
+        rows=definition=cohort=store=written=value=checker=desc=written_marks=marks=None
 
 
 def _source_view(records,meta,context):
@@ -490,7 +509,7 @@ def _raw(spec,cutoff,days,cache,metrics,price_view):
         from .stock_compact_batch import read_target
         store=metrics['_store']; descriptor={'path':str(artifact.absolute())}
         value,rows=read_target(store,descriptor,expected=definition)
-        _working(metrics,len(rows)*2048); rows=rows if columnar else list(rows)
+        _working(metrics,0 if columnar else len(rows)*2048); rows=rows if columnar else list(rows)
         metrics['raw_cache_hits']+=1
         return {**descriptor,'file_digest':store.hashes[descriptor['path']],'target_ref':value['target_ref']},rows
     if columnar:
@@ -1095,7 +1114,11 @@ class _IncrementalPreparation:
                 require(manifest['definition']==self.definition,'cached compact definition mismatch')
                 self.state=load_compact_state(manifest,feature_inputs=self.feature,limits=self.budgets,
                     publication_store=self.store,residency='sequential')
-                self.state.verify_all();self.ready=self.state.batch['folds'];self.stats['cache_hit']=True
+                # Consume the cold COMPLETE batch in the same sequential
+                # window used by its builder/OOS reader. A separate all-fold
+                # prepass would evict and reread that exact history again.
+                self.ready=self.state.batch['folds'];self.stats['cache_hit']=True
+                self.stats['cached_fold_admission']='on_next_fold'
             else:
                 require(not self.readonly or self.checkpoint.is_file(),'saved checkpoint required')
                 self.target.mkdir(parents=True,exist_ok=True)
@@ -1113,7 +1136,8 @@ class _IncrementalPreparation:
                     self._read_checkpoint()
                 self.state=_load_checkpoint_state(self.definition,self.view_descriptor,plan_descriptor,self.ready,
                     feature_inputs=self.feature,limits=self.budgets,publication_store=self.store)
-                self.ready=self.state.batch['folds'];self._validate_saved_raw()
+                self.ready=self.state.batch['folds']
+                with self.state.operation():self._validate_saved_raw()
             self.batch=_compact_batch_handle(self.state,self.state.batch,self.begin)
             self.stats['_owner_state']=self.state
             self.stats['_owner_shared_baseline']=self.state._fixed_shared_bytes
@@ -1183,8 +1207,8 @@ class _IncrementalPreparation:
         finally:
             saved=outputs=actual=expected=None;temporary.close();temporary=None
 
-    def _release_payloads(self):
-        if self.columnar:
+    def _release_payloads(self,*,keep_active=False):
+        if self.columnar and keep_active:
             self.state._trim_targets(self.state.targets)
         # Drop virtual views before crediting their immutable backing bytes.
         else:self.state._trim_targets()
@@ -1252,7 +1276,7 @@ class _IncrementalPreparation:
                         if use:self.stats['admitted_price_view_reuses']+=1;report['admitted_price_view_reuses']+=1
                         else:report['data_read_calls']+=2
                         desc,chunk=_raw(self.spec,cutoff,days,self.cache,self.stats,price_view)
-                        self.raw_outputs[i][role][n]=desc;chunk=None;self._release_payloads()
+                        self.raw_outputs[i][role][n]=desc;chunk=None;self._release_payloads(keep_active=True)
                 price_view=None
             self._charge_controls()
         finally:origin=control=price_view=chunk=desc=saved=group=None
@@ -1334,9 +1358,15 @@ class _IncrementalPreparation:
         if self.cursor==len(self.plans):return None
         index=self.cursor
         if index<len(self.ready):
-            require(digest(self.ready[index]['fold_spec']) in self.state._verified_folds,
-                    'unfinished checkpoint fold cannot HIT')
-            self.cursor+=1;return deepcopy(self.ready[index])
+            item=record=None
+            try:
+                item=self.ready[index]
+                record=self.state._parts(item['input_manifest'],item['fold_spec'])
+                self.state._activate(item,record)
+                require(digest(item['fold_spec']) in self.state._verified_folds,
+                        'unfinished checkpoint fold cannot HIT')
+                self.cursor+=1;return deepcopy(item)
+            finally:item=record=None
         require(not self.readonly,'checkpoint fold is not prepared')
         self.state._release_window(keep_feature=True)
         fold,training,inference=self.plans[index];rows=[];nrows=cohort=chunk=raw_rows=raw_value=record=selectors=window=joined_rows=None
@@ -1357,7 +1387,7 @@ class _IncrementalPreparation:
                 target_spec=self.spec.get('target_spec'))
             charge=0 if self.columnar else _measured(self.stats,[nrows,cohort])
             _working(self.stats,charge);self.stats['_retained_raw_bytes']+=charge
-            self._release_payloads()
+            self._release_payloads(keep_active=True)
             security_positions={security:i for i,security in enumerate(self.spec['universe'])}
             offsets=([self.positions[training[i//self.width]]*self.width+i%self.width
                 for i,valid in enumerate(nrows.arrays['validity']) if valid] if self.columnar else
@@ -1403,7 +1433,10 @@ class _IncrementalPreparation:
     def finish(self):
         from .stock_batch import _data
         self._check()
-        if not self.state.incomplete:return self.batch.to_dict()
+        if not self.state.incomplete:
+            require(self.cursor==len(self.plans) and self.state._verified_folds=={digest(f) for f,_,_ in self.plans},
+                    'complete cached fold consumption required')
+            return self.batch.to_dict()
         require(len(self.ready)==len(self.plans) and self.cursor==len(self.plans),'complete checkpoint coverage required')
         manifest=None
         try:
