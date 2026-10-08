@@ -63,22 +63,40 @@ def _measured(metrics,value):
         value=None
 
 
+def _raw_reuse_charge(origin, feature_store):
+    """Live borrowed owner bytes; one shared Feature handle is counted once."""
+    if origin is None: return 0,0
+    require(not origin.closed,'Raw reuse source is closed')
+    source_feature=_view_data(origin.feature,check=False)['store']
+    resident=origin.store.resident_bytes+origin.store.lease_bytes+origin._fixed_shared_bytes
+    source=origin.store.metrics['source_bytes']+origin._fixed_shared_source_bytes
+    if source_feature is not feature_store:
+        resident+=source_feature.resident_bytes+source_feature.lease_bytes
+        source+=source_feature.metrics['source_bytes']
+    return resident,source
+
+
 def _sync_feature_charge(metrics):
     """A sequential Feature window changes the live shared byte charge."""
     feature_store=metrics['_feature_store']
-    metrics['_feature_bytes']=feature_store.resident_bytes+metrics['_caller_bytes']
+    reused,reused_source=_raw_reuse_charge(metrics.get('_raw_origin'),feature_store)
+    metrics['raw_reuse_live_bytes']=reused
+    metrics['_feature_bytes']=feature_store.resident_bytes+metrics['_caller_bytes']+reused
     metrics['_store'].shared_bytes=metrics['_feature_bytes']
-    metrics['_store'].shared_source_bytes=feature_store.metrics['source_bytes']+metrics['_caller_source_bytes']
+    metrics['_store'].shared_source_bytes=feature_store.metrics['source_bytes']+metrics['_caller_source_bytes']+reused_source
 
 
 def _producer_feature_window(feature, offsets, metrics):
     feature_store=metrics['_feature_store']; store=metrics['_store']
+    _sync_feature_charge(metrics)
+    external=store.shared_bytes-feature_store.resident_bytes
+    external_source=store.shared_source_bytes-feature_store.metrics['source_bytes']
     previous=(feature_store.limits,feature_store.shared_bytes,feature_store.shared_source_bytes)
     try:
         feature_store.limits={k:min(v,metrics['_limits'][k]) for k,v in previous[0].items()}
-        feature_store.shared_bytes=max(previous[1],metrics['_caller_bytes']+store.resident_bytes+
+        feature_store.shared_bytes=max(previous[1],external+store.resident_bytes+
             metrics['_retained_raw_bytes']+metrics.get('_price_view_bytes',0))
-        feature_store.shared_source_bytes=max(previous[2],metrics['_caller_source_bytes']+store.metrics['source_bytes'])
+        feature_store.shared_source_bytes=max(previous[2],external_source+store.metrics['source_bytes'])
         selection=metrics.get('_model_feature_selection')
         set_feature_window(feature,offsets,**({} if selection is None else {'model_feature_selection':selection}))
     finally:
@@ -365,9 +383,11 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             require(origin.batch['definition']['price_domain_plan']==definition['price_domain_plan'],
                     'Raw reuse price-domain query plan mismatch')
         definition_ref=digest(definition); target=Path(destination).absolute()/definition_ref[7:]
-        store=OwnedStore(budgets,shared_bytes=fd['store'].resident_bytes+_caller_bytes,
-            shared_source_bytes=fd['store'].metrics['source_bytes']+_caller_source_bytes)
+        reused,reused_source=_raw_reuse_charge(origin,fd['store'])
+        store=OwnedStore(budgets,shared_bytes=fd['store'].resident_bytes+_caller_bytes+reused,
+            shared_source_bytes=fd['store'].metrics['source_bytes']+_caller_source_bytes+reused_source)
         store.check_hook=fd['store'].check
+        store.reserve(0)
     except BaseException:
         if store is not None: store.close()
         if own: feature.close()
@@ -380,16 +400,19 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
         'maximum_working_bytes':fd['store'].resident_bytes,
         '_limits':budgets,'_feature_bytes':fd['store'].resident_bytes+_caller_bytes,'_retained_raw_bytes':0,'_store':store,
         '_feature_store':fd['store'],'_caller_bytes':_caller_bytes,'_caller_source_bytes':_caller_source_bytes,
-        '_model_feature_selection':model_feature_selection}
+        '_model_feature_selection':model_feature_selection,'_raw_origin':origin}
     try:
+        _sync_feature_charge(stats)
         if (target/'batch.json').exists():
             value=json.loads((target/'batch.json').read_bytes()); require(value['definition']==definition,'cached compact definition mismatch')
-            state=load_compact_state(value,feature_inputs=feature,limits=budgets,residency='sequential')
+            state=load_compact_state(value,feature_inputs=feature,limits=budgets,
+                publication_store=store,residency='sequential')
             try: state.verify_all()
             except BaseException:
                 state.close(); raise
             if value['batch_ref'] in fd['prepared']: fd['prepared'][value['batch_ref']].close()
             fd['prepared'][value['batch_ref']]=state
+            transferred=True
             stats.update(cache_hit=True,total_seconds=time.perf_counter()-begin)
             if metrics is not None: metrics.update({k:v for k,v in stats.items() if not k.startswith('_')})
             return value
@@ -407,7 +430,22 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             reused=[]
             for fold,_,_ in plans:
                 require(digest(fold) in by_spec,'Raw reuse fold/cutoff mismatch')
-                saved=by_spec[digest(fold)]; control=origin._parts(saved['input_manifest'],fold)
+                saved=by_spec[digest(fold)]
+                source_feature=_view_data(origin.feature,check=False)['store']
+                previous=(origin.store.limits,origin._fixed_shared_bytes,origin._fixed_shared_source_bytes)
+                try:
+                    origin.store.limits={k:min(v,budgets[k]) for k,v in previous[0].items()}
+                    origin._fixed_shared_bytes=previous[1]+_caller_bytes+store.resident_bytes+store.lease_bytes
+                    origin._fixed_shared_source_bytes=previous[2]+_caller_source_bytes+store.metrics['source_bytes']
+                    if source_feature is not fd['store']:
+                        origin._fixed_shared_bytes+=fd['store'].resident_bytes+fd['store'].lease_bytes
+                        origin._fixed_shared_source_bytes+=fd['store'].metrics['source_bytes']
+                    origin._sync_shared(); origin.store.reserve(0)
+                    control=origin._parts(saved['input_manifest'],fold)
+                finally:
+                    origin.store.limits,origin._fixed_shared_bytes,origin._fixed_shared_source_bytes=previous
+                    origin._sync_shared()
+                _sync_feature_charge(stats)
                 reused.append({'raw_parts':deepcopy(control['raw_parts']),
                     'evaluation_parts':deepcopy(control['evaluation_parts'])})
             origin.check()
@@ -534,6 +572,7 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             batch={'contract_version':'stock_ml_batch_inputs_v4' if compact else 'stock_ml_batch_inputs_v3','definition':definition,'definition_ref':definition_ref,
                 'prepared_view':view_desc,'folds':folds,'status':'COMPLETE'}
             batch['batch_ref']=digest(batch); batch=seal(batch,'content_digest'); write_json(stage/'batch.json',batch)
+            _sync_feature_charge(stats)
             state=load_compact_state(batch,feature_inputs=feature,limits=budgets,
                 resolver=lambda p:stage/Path(p).relative_to(target) if Path(p).is_relative_to(target) else Path(p),
                 publication_store=store,residency='sequential')
