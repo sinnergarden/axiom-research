@@ -295,6 +295,7 @@ class CompactEvaluationTests(unittest.TestCase):
             source = deepcopy(next(iter(raw['sources'].values()))); header = source['header']
             price = header['definition']['price_view']; price['records_ref'] = digest('unselected Raw source')
             price['price_view_ref'] = digest({k: v for k, v in price.items() if k != 'price_view_ref'})
+            header['source_dictionary'] = [[price['price_view_ref']]]
             header['definition_ref'] = digest(header['definition'])
             header['target_ref'] = digest({k: v for k, v in header.items() if k != 'target_ref'})
             path = Path(source['descriptor']['path']).with_name('unselected-target.json'); write_json(path, header)
