@@ -14,7 +14,7 @@ from axiom_research import (load_stock_feature_view,prepare_stock_ml_batch_input
 from axiom_research.stock_artifacts import _read,digest
 from axiom_research.stock_fold_inputs import validate_spec
 from axiom_research.stock_compact_store import (OwnedStore,_view_data,
-    feature_rows,training_matrix,iter_feature_eligibility,set_feature_window)
+    feature_rows,training_matrix,iter_feature_eligibility,set_feature_window,clear_feature_window)
 from axiom_research.stock_compact_batch import read_target
 import test_stock_matrix_feature_sources as feature_sources
 from test_stock_matrix_prepare import PublicDataFixture,Query
@@ -135,6 +135,54 @@ class ModelFeatureSelectionTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         prepare_stock_ml_batch_inputs(None,feature_inputs=view,fold_specs=f.folds()[:1],
                             destination=Path(temp)/'bad',preparation_options=self.options,model_feature_selection=selected)
+
+    def test_retained_gather_failure_releases_full_and_selected_arrays(self):
+        with tempfile.TemporaryDirectory() as temp:
+            f,path=self.fixture(Path(temp))
+            for selection in (None,self.selection(f,0,100)):
+                with self.subTest(selection='full' if selection is None else 'selected'), \
+                     load_stock_feature_view(path,residency='sequential') as view:
+                    options={} if selection is None else {'model_feature_selection':selection}
+                    set_feature_window(view,[1],**options)
+                    state=_view_data(view)
+                    released_before=state['store'].metrics['released_buffer_bytes']
+                    buffer_bytes=sum(len(payload) for payload in state['store'].arrays.values())
+                    block=state['blocks'][state['day_blocks'][0]]
+                    group=block['parts'] if selection is None else block['model_parts'].values()
+                    refs=[weakref.ref(arrays['values']) for _,arrays in group]
+                    block=group=None
+                    def fail_gather(amount): raise ValueError('synthetic gather failure')
+                    caught=None
+                    with patch.object(state['store'],'reserve',new=fail_gather):
+                        try: training_matrix(view,[1],f.calendar[-1]+'T21:00:00+08:00',**options)
+                        except ValueError as exc: caught=exc
+                    self.assertIsNotNone(caught)
+                    clear_feature_window(view); gc.collect()
+                    self.assertTrue(refs and all(ref() is None for ref in refs))
+                    self.assertEqual(state['store'].arrays,{})
+                    self.assertEqual(state['store'].metrics['released_buffer_bytes']-released_before,buffer_bytes)
+                    matrix=training_matrix(view,[1],f.calendar[-1]+'T21:00:00+08:00',**options)
+                    self.assertEqual(matrix.shape,(1,300 if selection is None else 100))
+
+    def test_raw_reuse_requires_complete_fold_collection_before_admission(self):
+        from axiom_research.stock_batch import _data
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); f,path=self.fixture(root); data=PublicDataFixture(f.spec)
+            module=types.ModuleType('axiom_data'); module.QuerySpec=Query; module.adjust_prices=data.adjust
+            with patch.dict(sys.modules,{'axiom_data':module}):
+                origin=prepare_stock_ml_batch_inputs(data,feature_inputs=path,fold_specs=f.folds()[:2],
+                    destination=root/'origin-two',preparation_options=self.options)
+            with load_stock_feature_view(path,residency='sequential') as view, \
+                 load_stock_ml_batch_inputs(origin,feature_inputs=view,residency='sequential') as source, \
+                 patch.object(_data(source)['matrix_state'],'_parts',side_effect=AssertionError('control admission reached')), \
+                 patch.object(OwnedStore,'buffer',side_effect=AssertionError('column/target IO reached')), \
+                 patch('axiom_research.stock_compact_labels._price_view',side_effect=AssertionError('Data reached')), \
+                 patch('axiom_research.stock_compact_labels._normalized',side_effect=AssertionError('Core reached')):
+                with self.assertRaisesRegex(ValueError,'fold/cutoff collection'):
+                    prepare_stock_ml_batch_inputs(None,feature_inputs=view,fold_specs=f.folds()[:1],
+                        destination=root/'single',preparation_options=self.options,
+                        model_feature_selection=self.selection(f,0,100),reuse_raw_from_batch=source)
+                self.assertFalse((root/'single').exists())
 
     def test_raw_reuse_changed_cohort_original_core_and_saved_model_bindings(self):
         from axiom_engine.core import FeaturePlan,FactBatch,ExecutionContext,execute_feature_plan

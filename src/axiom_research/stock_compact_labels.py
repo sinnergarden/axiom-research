@@ -349,6 +349,21 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
         if compact: definition['price_domain_plan']='fit_window_evaluation_calendar_blocks_v1'
         if model_binding is not None: definition['model_feature_selection']=model_binding
         require(reuse_raw_from_batch is None or compact,'Raw reuse requires compact v4 controls')
+        origin=None
+        if reuse_raw_from_batch is not None:
+            from .stock_batch import _data
+            owner=_data(reuse_raw_from_batch)
+            require(owner['manifest']['contract_version']=='stock_ml_batch_inputs_v4',
+                    'Raw reuse requires an owner-loaded compact v4 batch')
+            origin=owner['matrix_state']; origin.check()
+            require(origin.compact and origin.active==0 and
+                    origin.batch['definition']['feature_view']==feature.to_dict(),'Raw reuse Feature identity mismatch')
+            require(origin.batch['definition']['preparation_options']['row_block_sessions']==options['row_block_sessions'],
+                    'Raw reuse row-block query plan mismatch')
+            require(origin.batch['definition']['fold_specs']==fold_specs,
+                    'Raw reuse fold/cutoff collection mismatch')
+            require(origin.batch['definition']['price_domain_plan']==definition['price_domain_plan'],
+                    'Raw reuse price-domain query plan mismatch')
         definition_ref=digest(definition); target=Path(destination).absolute()/definition_ref[7:]
         store=OwnedStore(budgets,shared_bytes=fd['store'].resident_bytes+_caller_bytes,
             shared_source_bytes=fd['store'].metrics['source_bytes']+_caller_source_bytes)
@@ -387,16 +402,7 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             previous=fold['oos_trade_sessions'][-1]; plans.append((fold,training,inference))
         cache=Path(destination).absolute()/'compact-cache'; records=[]; domains={}; raw_outputs=[]
         reused=None
-        if reuse_raw_from_batch is not None:
-            from .stock_batch import _data
-            owner=_data(reuse_raw_from_batch)
-            require(owner['manifest']['contract_version']=='stock_ml_batch_inputs_v4',
-                    'Raw reuse requires an owner-loaded compact v4 batch')
-            origin=owner['matrix_state']; origin.check()
-            require(origin.compact and origin.active==0 and
-                    origin.batch['definition']['feature_view']==feature.to_dict(),'Raw reuse Feature identity mismatch')
-            require(origin.batch['definition']['preparation_options']['row_block_sessions']==options['row_block_sessions'],
-                    'Raw reuse row-block query plan mismatch')
+        if origin is not None:
             by_spec={digest(f['fold_spec']):f for f in origin.batch['folds']}
             reused=[]
             for fold,_,_ in plans:

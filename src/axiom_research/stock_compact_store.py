@@ -811,5 +811,5 @@ def training_matrix(handle,offsets,cutoff,*,model_feature_selection=None):
         require(bool(np.isfinite(matrix).all()),'selected training Feature values must be finite')
         matrix.flags.writeable=False; value['store'].check(); return matrix
     except BaseException:
-        matrix=indexes=arrays=rows=flags=maximum=block=None
+        matrix=indexes=arrays=rows=flags=maximum=block=cache=parts=None
         raise
