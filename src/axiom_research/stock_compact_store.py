@@ -393,6 +393,7 @@ def _validate_feature_cells(value, group, rows):
     workspace=count*32+largest*256+count*largest*16+4096
     cache={}; cache_bytes=0
     cutoffs=meta_flags=meta_present=meta_clock=arrays=part=row=None
+    flag=at=positions=None
 
     def parsed(text):
         nonlocal cache_bytes
@@ -448,6 +449,7 @@ def _validate_feature_cells(value, group, rows):
         # before the caller credits released Feature buffers.
         cache.clear(); cache=None
         cutoffs=meta_flags=meta_present=meta_clock=arrays=part=row=None
+        flag=at=positions=None
         value=group=rows=store=None
 
 

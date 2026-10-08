@@ -172,5 +172,27 @@ class FeatureAdmissionTests(unittest.TestCase):
                     trace=trace.tb_next
                 self.assertTrue(found);self.assertEqual(owner._view_data(view)['store'].arrays,{})
 
+    def test_invalid_metadata_container_is_not_retained_in_error(self):
+        for field in ('validity','availability'):
+            with self.subTest(field=field),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp)
+                def mutate(rows,physical):rows[0][field][0]=[0]*50000
+                self.fixture(root,mutate=mutate)
+                with owner.load_stock_feature_view(root,residency='sequential') as view:
+                    caught=None
+                    try:owner.set_feature_window(view,[0])
+                    except ValueError as error:caught=error
+                    self.assertIsNotNone(caught);gc.collect()
+                    trace=caught.__traceback__;found=False
+                    while trace is not None:
+                        frame=trace.tb_frame
+                        if frame.f_code.co_name=='_validate_feature_cells':
+                            found=True
+                            for name in ('flag','at','positions','rows','row','group','value','store','cache'):
+                                self.assertIsNone(frame.f_locals[name],name)
+                        if frame.f_code.co_name=='parsed':self.assertIsNone(frame.f_locals['text'])
+                        trace=trace.tb_next
+                    self.assertTrue(found);self.assertEqual(owner._view_data(view)['store'].arrays,{})
+
 
 if __name__=='__main__':unittest.main()
