@@ -79,6 +79,16 @@ def _fold_definition(inputs,spec,common,parameters,rounds,training_binding=None)
 
 
 def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,training_options=None,model_feature_selection=None,training_spec=None):
+    if batch is None:
+        return _build_matrix_fold(inputs,spec=spec,destination=destination,metrics=metrics,batch=batch,
+            training_options=training_options,model_feature_selection=model_feature_selection,training_spec=training_spec)
+    from .stock_batch import _data
+    with _data(batch)['matrix_state'].operation():
+        return _build_matrix_fold(inputs,spec=spec,destination=destination,metrics=metrics,batch=batch,
+            training_options=training_options,model_feature_selection=model_feature_selection,training_spec=training_spec)
+
+
+def _build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,training_options=None,model_feature_selection=None,training_spec=None):
     from .stock_fold_artifacts import _repath_owned_fold
     from .stock_ml import _implementation,_environment,_signal_evidence
     from .stock_folds import prediction_rows
@@ -202,6 +212,7 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,traini
                     fold_ref=fold['fold_ref'],writer=writer)
             else:
                 admitted = load_matrix_fold(stage,projection=projection,batch=batch)
+                projection._store.validate_boundary()
                 try: stage.rename(target)
                 except OSError as exc:
                     if exc.errno not in (errno.EEXIST,errno.ENOTEMPTY): raise

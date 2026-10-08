@@ -324,57 +324,83 @@ def _clock(value):
 
 def _write(root, definition, rows, *, normalized=False, core_ref=None, cohort=None, final_root=None):
     """One typed target, no Raw rows/proof JSON copies at the next stages."""
-    reasons=sorted({r['invalid_reason'] for r in rows if r['invalid_reason'] is not None})
-    dictionary=[None,*reasons]; codes={r:i for i,r in enumerate(dictionary)}
-    calendar=definition['calendar']; positions={d:i for i,d in enumerate(calendar)}
-    columns={'values':('float64_le',[r['return'] if r['valid'] else 0.0 for r in rows]),
-        'validity':('bool_u8',[r['valid'] for r in rows]),
-        'availability':('int64_le',[instant_us(r['label_available_at']) if r['label_available_at'] else 0 for r in rows]),
-        'availability_validity':('bool_u8',[r['label_available_at'] is not None for r in rows]),
-        'reason_codes':('int32_le',[codes[r['invalid_reason']] for r in rows])}
-    sources=[]
-    if not normalized:
-        columns['start_session']=('int32_le',[positions.get(r['start_session'],-1) for r in rows])
-        columns['end_session']=('int32_le',[positions.get(r['end_session'],-1) for r in rows])
-        sources=sorted({tuple(r['source_refs']) for r in rows}); source_codes={r:i for i,r in enumerate(sources)}
-        columns['source_codes']=('int32_le',[source_codes[tuple(r['source_refs'])] for r in rows])
-    buffers={name:write_buffer(root,values,dtype=dtype,shape=[len(rows)]) for name,(dtype,values) in columns.items()}
-    if final_root is not None:
-        for descriptor in buffers.values():
-            descriptor['path']=str(Path(final_root)/Path(descriptor['path']).relative_to(Path(root).resolve()))
-    columnar='label_definition_ref' in definition or definition.get('normalization_proof_version')=='stock_normalization_reuse_v1'
-    value=seal({'contract_version':('stock_compact_normalized_v2' if columnar else 'stock_compact_normalized_v1')
-        if normalized else ('stock_compact_raw_v2' if columnar else 'stock_compact_raw_v1'),
-        'definition':definition,'definition_ref':digest(definition),'row_count':len(rows),
-        'reason_dictionary':dictionary,'source_dictionary':[list(r) for r in sources],
-        'buffers':buffers,'core_ref':core_ref,'cohort':cohort},'target_ref')
-    path=Path(root)/'target.json'; write_json(path,value)
-    return {'path':str(path.resolve()),'file_digest':file_digest(path),'target_ref':value['target_ref']}
+    try:
+        from .stock_compact_batch import TargetRows
+        if isinstance(rows,TargetRows):
+            dictionary=rows.value['reason_dictionary'];sources=rows.value['source_dictionary']
+            types={'values':'float64_le','validity':'bool_u8','availability':'int64_le',
+                'availability_validity':'bool_u8','reason_codes':'int32_le',
+                'start_session':'int32_le','end_session':'int32_le','source_codes':'int32_le'}
+            buffers={name:write_buffer(root,values,dtype=types[name],shape=[len(rows)])
+                for name,values in rows.arrays.items()}
+            if final_root is not None:
+                for descriptor in buffers.values():descriptor['path']=str(Path(final_root)/Path(descriptor['path']).relative_to(Path(root).resolve()))
+            value=seal({'contract_version':'stock_compact_normalized_v2' if normalized else 'stock_compact_raw_v2',
+                'definition':definition,'definition_ref':digest(definition),'row_count':len(rows),
+                'reason_dictionary':dictionary,'source_dictionary':sources,'buffers':buffers,
+                'core_ref':core_ref,'cohort':cohort},'target_ref')
+            path=Path(root)/'target.json';write_json(path,value)
+            return {'path':str(path.resolve()),'file_digest':file_digest(path),'target_ref':value['target_ref']},value
+        reasons=sorted({r['invalid_reason'] for r in rows if r['invalid_reason'] is not None})
+        dictionary=[None,*reasons]; codes={r:i for i,r in enumerate(dictionary)}
+        calendar=definition['calendar']; positions={d:i for i,d in enumerate(calendar)}
+        columns={'values':('float64_le',[r['return'] if r['valid'] else 0.0 for r in rows]),
+            'validity':('bool_u8',[r['valid'] for r in rows]),
+            'availability':('int64_le',[instant_us(r['label_available_at']) if r['label_available_at'] else 0 for r in rows]),
+            'availability_validity':('bool_u8',[r['label_available_at'] is not None for r in rows]),
+            'reason_codes':('int32_le',[codes[r['invalid_reason']] for r in rows])}
+        sources=[]
+        if not normalized:
+            columns['start_session']=('int32_le',[positions.get(r['start_session'],-1) for r in rows])
+            columns['end_session']=('int32_le',[positions.get(r['end_session'],-1) for r in rows])
+            sources=sorted({tuple(r['source_refs']) for r in rows}); source_codes={r:i for i,r in enumerate(sources)}
+            columns['source_codes']=('int32_le',[source_codes[tuple(r['source_refs'])] for r in rows])
+        buffers={name:write_buffer(root,values,dtype=dtype,shape=[len(rows)]) for name,(dtype,values) in columns.items()}
+        if final_root is not None:
+            for descriptor in buffers.values():
+                descriptor['path']=str(Path(final_root)/Path(descriptor['path']).relative_to(Path(root).resolve()))
+        columnar='label_definition_ref' in definition or definition.get('normalization_proof_version')=='stock_normalization_reuse_v1'
+        value=seal({'contract_version':('stock_compact_normalized_v2' if columnar else 'stock_compact_normalized_v1')
+            if normalized else ('stock_compact_raw_v2' if columnar else 'stock_compact_raw_v1'),
+            'definition':definition,'definition_ref':digest(definition),'row_count':len(rows),
+            'reason_dictionary':dictionary,'source_dictionary':[list(r) for r in sources],
+            'buffers':buffers,'core_ref':core_ref,'cohort':cohort},'target_ref')
+        path=Path(root)/'target.json'; write_json(path,value)
+        return {'path':str(path.resolve()),'file_digest':file_digest(path),'target_ref':value['target_ref']}
+    finally:
+        rows=definition=cohort=buffers=value=values=None
 
 
 def _publish(target,definition,rows,*,budgets,normalized=False,core_ref=None,cohort=None,store=None):
     """Only a fully checked target directory is made visible at its key."""
-    from .stock_compact_batch import read_target
-    target=Path(target).resolve(); target.parent.mkdir(parents=True,exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='.compact-target-',dir=target.parent) as temporary:
-        stage=Path(temporary)/'complete'; stage.mkdir()
-        desc=_write(stage,definition,rows,normalized=normalized,core_ref=core_ref,cohort=cohort,final_root=target)
-        final={'path':str(target/'target.json'),'file_digest':file_digest(stage/'target.json'),'target_ref':desc['target_ref']}
-        checker=store or OwnedStore(budgets); original=checker.resolve
-        checker.resolve=lambda p:stage/Path(p).relative_to(target) if Path(p).is_relative_to(target) else original(p)
-        try:
-            read_target(checker,final,expected=definition)
-            try: stage.rename(target)
-            except OSError as exc:
-                if exc.errno not in (errno.EEXIST,errno.ENOTEMPTY): raise
-                # An independently published inode requires independent byte
-                # admission. Do not pin our unpublished stage to that winner.
-                raise ValueError('concurrent compact target publication; fresh admission required') from exc
-            checker.resolve=original; checker.check()
-        finally:
-            checker.resolve=original
-            if store is None: checker.close()
-        return final
+    try:
+        from .stock_compact_batch import read_target
+        target=Path(target).resolve(); target.parent.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='.compact-target-',dir=target.parent) as temporary:
+            stage=Path(temporary)/'complete'; stage.mkdir()
+            written=_write(stage,definition,rows,normalized=normalized,core_ref=core_ref,cohort=cohort,final_root=target)
+            desc,value=written if isinstance(written,tuple) else (written,None)
+            final={'path':str(target/'target.json'),'file_digest':file_digest(stage/'target.json'),'target_ref':desc['target_ref']}
+            checker=store or OwnedStore(budgets); original=checker.resolve
+            checker.resolve=lambda p:stage/Path(p).relative_to(target) if Path(p).is_relative_to(target) else original(p)
+            try:
+                if value is not None:
+                    checker.adopt_written(final,value,rows.arrays)
+                read_target(checker,final,expected=definition,raw_rows=getattr(rows,'raw_rows',None))
+                checker.validate_boundary()
+                try: stage.rename(target)
+                except OSError as exc:
+                    if exc.errno not in (errno.EEXIST,errno.ENOTEMPTY): raise
+                    # An independently published inode requires independent byte
+                    # admission. Do not pin our unpublished stage to that winner.
+                    raise ValueError('concurrent compact target publication; fresh admission required') from exc
+                checker.resolve=original; checker.check()
+            finally:
+                checker.resolve=original
+                if store is None: checker.close()
+            return final
+    finally:
+        rows=definition=cohort=store=written=value=checker=desc=None
 
 
 def _source_view(records,meta,context):
@@ -464,13 +490,13 @@ def _raw(spec,cutoff,days,cache,metrics,price_view):
         from .stock_compact_batch import read_target
         store=metrics['_store']; descriptor={'path':str(artifact.absolute())}
         value,rows=read_target(store,descriptor,expected=definition)
-        _working(metrics,len(rows)*2048); rows=list(rows)
+        _working(metrics,len(rows)*2048); rows=rows if columnar else list(rows)
         metrics['raw_cache_hits']+=1
         return {**descriptor,'file_digest':store.hashes[descriptor['path']],'target_ref':value['target_ref']},rows
     if columnar:
         from axiom_engine.core import execute_forward_returns
-        rows=list(price_view.rows(days,horizon=h,forward_operator=execute_forward_returns,
-            reuse=metrics['_column_targets'],role=metrics.get('_column_role','training')))
+        rows=price_view.columns(days,horizon=h,forward_operator=execute_forward_returns,
+            reuse=metrics['_column_targets'],role=metrics.get('_column_role','training'))
     else:
         rows=list(_forward_rows(None,None,None,calendar=spec['calendar'],features=days,
             horizon_sessions=h,source_ref=source['price_view_ref'],_domain=price_view))
@@ -498,7 +524,9 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics,*,target_spec=N
     try:
         from axiom_engine.core import execute_cs_zscore_batch
         from axiom_engine._implementation import IMPLEMENTATION_REF
+        from .stock_compact_batch import ConcatRows,TargetRows,target_eligibility_reasons
         fd=_view_data(feature); spec=fd['definition']['spec']; width=len(spec['universe'])
+        columnar=isinstance(rows,ConcatRows) and metrics.get('_column_targets') is not None
         feature_ref=fd['definition']['feature_view_ref']
         positions={d:i for i,d in enumerate(spec['feature_sessions'])}
         offsets=[positions[d]*width+i for d in days for i in range(width)]
@@ -509,7 +537,7 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics,*,target_spec=N
         from .stock_compact_store import model_feature_binding,model_eligibility_ref
         binding=model_feature_binding(feature,selection)
         feature_count=len(spec['ordered_features']) if binding is None else len(binding['ordered_features'])
-        for row,facts in zip(rows,iter_feature_eligibility(feature,offsets,model_feature_selection=selection)):
+        for row,facts in ([] if columnar else zip(rows,iter_feature_eligibility(feature,offsets,model_feature_selection=selection))):
             from .stock_target_spec import eligible_target_reason
             reason=eligible_target_reason(row,facts,feature_count,instant,eligibility_common)
             if reason is None:
@@ -517,10 +545,14 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics,*,target_spec=N
                         facts.maximum_available_at_utc_us<=cutoff_us,
                         'training Feature native clock exceeds fit')
             reasons.append(reason)
+        if columnar:
+            reasons=target_eligibility_reasons(rows,feature,offsets,cutoff,eligibility_common,model_feature_selection=selection)
+            raw_values=rows.column('values');raw_availability=rows.column('availability')
         cohort={'contract_version':'stock_compact_cohort_v1','feature_view_ref':feature_ref,'cutoff':cutoff,
             'sessions':days,'universe':spec['universe'],'raw_refs':[d['target_ref'] for d in raw_parts],
-            'eligibility_reasons':reasons,'eligible_keys':[[r['security_id'],r['feature_session']]
-                for r,reason in zip(rows,reasons) if reason is None]}
+            'eligibility_reasons':reasons,'eligible_keys':([[spec['universe'][i%width],days[i//width]]
+                for i,reason in enumerate(reasons) if reason is None] if columnar else
+                [[r['security_id'],r['feature_session']] for r,reason in zip(rows,reasons) if reason is None])}
         if binding is not None: cohort['model_feature_eligibility_ref']=model_eligibility_ref(binding)
         cohort_ref=digest(cohort)
         definition={'calendar':spec['calendar'],'universe':spec['universe'],'sessions':days,'cutoff':cutoff,
@@ -541,16 +573,16 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics,*,target_spec=N
                     'normalized column logical request mismatch')
             metrics['normalized_cache_hits']+=1
             fd['store'].check()
-            return {**desc,'file_digest':store.hashes[desc['path']],'target_ref':value['target_ref']},list(normalized),value['core_ref'],cohort
+            return {**desc,'file_digest':store.hashes[desc['path']],'target_ref':value['target_ref']},normalized if columnar else list(normalized),value['core_ref'],cohort
         reuse=metrics.get('_column_targets');daily={};core_days=days
         if reuse is not None:
             import numpy as np
             core_days=[]
             for i,day in enumerate(days):
                 _working(metrics,width*32+4096)
-                values=np.asarray([rows[i*width+j]['return'] if reasons[i*width+j] is None else 0.0
-                    for j in range(width)],dtype='<f8')
                 members=np.asarray([reasons[i*width+j] is None for j in range(width)],dtype='?')
+                values=(np.where(members,raw_values[i*width:(i+1)*width],0.0) if columnar else
+                    np.asarray([rows[i*width+j]['return'] if members[j] else 0.0 for j in range(width)],dtype='<f8'))
                 values.flags.writeable=members.flags.writeable=False
                 numeric=digest({'vectors':reuse.vector_ref((values,members)),
                     'normalization_spec_ref':digest(NORMALIZATION_SPEC)})
@@ -574,24 +606,40 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics,*,target_spec=N
             sources[day]={'bindings':sorted(bindings,key=lambda r:r['id']),
                           'source_sets':[['offline_eligibility'],['raw_labels']]}
             arrays['selection_cutoff_utc_us'].append(instant_us(core_clock(cutoff)))
-            for j in range(width):
-                n=i*width+j; row=rows[n]; valid=reasons[n] is None
-                arrays['values'].append(row['return'] if valid else 0.0); arrays['value_validity'].append(valid)
+            for j in ([] if columnar else range(width)):
+                n=i*width+j; row=None if columnar else rows[n]; valid=reasons[n] is None
+                arrays['values'].append((float(raw_values[n]) if columnar else row['return']) if valid else 0.0); arrays['value_validity'].append(valid)
                 arrays['value_reason_codes'].append(codes[reasons[n]])
-                arrays['fact_available_at_utc_us'].append(instant_us(core_clock(row['label_available_at'] if valid else cutoff)))
+                raw_clock=_clock(raw_availability[n]) if columnar and valid else row['label_available_at'] if valid else cutoff
+                arrays['fact_available_at_utc_us'].append(instant_us(core_clock(raw_clock)))
                 arrays['reference_member'].append(valid); arrays['reference_available_at_utc_us'].append(instant_us(core_clock(cutoff)))
                 arrays['fact_source_codes'].append(1 if valid else 0); arrays['reference_source_codes'].append(0)
+        if columnar:
+            indices=np.asarray([i*width+j for day in core_days for i in [day_positions[day]] for j in range(width)],dtype=np.intp)
+            eligible=np.asarray([reasons[int(i)] is None for i in indices],dtype='?')
+            projected_clock=instant_us(core_clock(cutoff))
+            columns={'values':np.where(eligible,raw_values[indices],0.0),'value_validity':eligible,
+                'value_reason_codes':np.asarray([codes[reasons[int(i)]] for i in indices],dtype='<i4'),
+                'fact_available_at_utc_us':np.where(eligible,((raw_availability[indices]+999999)//1000000)*1000000,projected_clock),
+                'reference_member':eligible,'reference_available_at_utc_us':np.full(len(indices),projected_clock,dtype='<i8'),
+                'selection_cutoff_utc_us':np.full(len(core_days),projected_clock,dtype='<i8'),
+                'fact_source_codes':eligible.astype('<i4'),'reference_source_codes':np.zeros(len(indices),dtype='<i4')}
+            typed={k:memoryview(a.tobytes()).cast('?' if a.dtype==np.dtype('?') else a.dtype.char)
+                for k,a in columns.items()}
+        else:
+            typed={k:memoryview(v.tobytes()).cast('?' if k in ('value_validity','reference_member') else v.typecode)
+                for k,v in arrays.items()}
         # Core accepts immutable readonly buffer views; its arithmetic remains the
         # existing operator, not a Research vectorized substitute.
         carrier={'contract_version':'core_cs_zscore_batch_input_v1','calendar_ref':calendar_ref,
             'schema':RAW_TARGET_SCHEMA,'output_schema':NORMALIZED_TARGET_SCHEMA,'sessions':core_days,
             'security_ids':spec['universe'],'reason_dictionary':dictionary,'source_bindings_by_session':sources,
-            **{k:memoryview(v.tobytes()).cast('?' if k in ('value_validity','reference_member') else v.typecode)
-               for k,v in arrays.items()}}
+            **typed}
         # Carrier bytes and per-session bindings are detached from these working
         # panels. Release them before Core takes its own immutable snapshot and
         # before normalized rows/cohort publication are allocated.
-        del arrays
+        del arrays,typed
+        if columnar:columns=indices=eligible=None
         try:
             result=execute_cs_zscore_batch(carrier,params=NORMALIZATION_SPEC['params']) if core_days else None
         finally:
@@ -627,13 +675,25 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics,*,target_spec=N
             # set valid target clocks; cached numerical vectors carry no old clock.
             normalized_clock=core_clock(cutoff)
         else:core_ref=result['metadata']['result_ref']
-        for i,row in enumerate(rows):
+        for i,row in ([] if columnar else enumerate(rows)):
             cached=None if reuse is None else daily[days[i//width]]['cached']
             valid=bool(result['value_validity'][i] if cached is None else cached['validity'][i%width])
             normalized.append({**row,'raw_return':row['return'],'raw_available_at':row['label_available_at'],
                 'return':float(result['values'][i] if cached is None else cached['values'][i%width]) if valid else None,'valid':valid,
                 'label_available_at':(_clock(result['available_at_utc_us'][i]) if cached is None else normalized_clock) if valid else None,
                 'invalid_reason':None if valid else reasons[i] or 'NORMALIZATION_UNDEFINED'})
+        if columnar:
+            flags=np.concatenate([daily[day]['cached']['validity'] for day in days]).astype('u1')
+            values=np.concatenate([daily[day]['cached']['values'] for day in days])
+            dictionary=[None,*sorted({reasons[i] or 'NORMALIZATION_UNDEFINED' for i in range(len(rows)) if not flags[i]})]
+            codes={reason:i for i,reason in enumerate(dictionary)}
+            columns={'values':values,'validity':flags,'availability':np.where(flags,instant_us(normalized_clock),0).astype('<i8'),
+                'availability_validity':flags,'reason_codes':np.asarray([0 if flags[i] else codes[reasons[i] or 'NORMALIZATION_UNDEFINED']
+                    for i in range(len(rows))],dtype='<i4')}
+            columns={name:np.frombuffer(a.tobytes(),dtype=a.dtype) for name,a in columns.items()}
+            normalized=TargetRows({'contract_version':'stock_compact_normalized_v2','definition':definition,
+                'row_count':len(rows),'reason_dictionary':dictionary,'source_dictionary':[]},columns,rows)
+            metrics['columnar_normalized_windows']=metrics.get('columnar_normalized_windows',0)+1
         # Neither the Core carrier nor its immutable result is a next-fold cache.
         # Keep only the logical normalized rows and small committed references.
         del result
@@ -643,11 +703,13 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics,*,target_spec=N
         # not make logical output identity depend on cache warmness/batch packing.
         desc=_publish(target,definition,normalized,budgets=metrics['_limits'],normalized=True,core_ref=core_ref,cohort=cohort,
                       store=metrics['_store'])
+        if columnar:normalized=metrics['_store'].target_views[desc['target_ref']][1]
         fd['store'].check()
         return desc,normalized,core_ref,cohort
 
     finally:
         daily=values=members=cached=result=vals=flags=arrays=carrier=sources=dictionary=fd=feature=metrics=rows=raw_parts=normalized=cohort=reasons=spec=eligibility_common=None
+        raw_values=raw_availability=columns=indices=eligible=typed=row=raw_clock=None
 
 
 def _prepare_legacy_compact_batch(data, *, feature_inputs,fold_specs,destination,preparation_options,metrics=None,progress=None,
@@ -1122,7 +1184,10 @@ class _IncrementalPreparation:
             saved=outputs=actual=expected=None;temporary.close();temporary=None
 
     def _release_payloads(self):
-        self.store.release_payloads(keep_paths=self.state._keep_paths)
+        if self.columnar:
+            self.state._trim_targets(self.state.targets)
+        # Drop virtual views before crediting their immutable backing bytes.
+        else:self.state._trim_targets()
 
     def _validate_saved_raw(self):
         from .stock_compact_batch import read_target,_raw_binding
@@ -1256,7 +1321,13 @@ class _IncrementalPreparation:
         finally:origin=control=saved=desc=source_feature=fstore=group=None
 
     def next_fold(self):
-        from .stock_compact_batch import read_target
+        with self.state.operation():return self._next_fold()
+
+    def operation(self):
+        return self.state.operation()
+
+    def _next_fold(self):
+        from .stock_compact_batch import read_target,ConcatRows
         from .stock_compact_controls import selectors_for
         from .stock_batch import _data
         self._check()
@@ -1267,21 +1338,30 @@ class _IncrementalPreparation:
                     'unfinished checkpoint fold cannot HIT')
             self.cursor+=1;return deepcopy(self.ready[index])
         require(not self.readonly,'checkpoint fold is not prepared')
+        self.state._release_window(keep_feature=True)
         fold,training,inference=self.plans[index];rows=[];nrows=cohort=chunk=raw_rows=raw_value=record=selectors=window=joined_rows=None
         try:
             self._ensure_raw(index)
             window=[self.positions[d]*self.width+j for d in training+inference for j in range(self.width)]
             _producer_feature_window(self.feature,window,self.stats);parts=self.raw_outputs[index]['raw_parts']
             for desc in parts:
-                _sync_feature_charge(self.stats);raw_value,raw_rows=read_target(self.store,desc);chunk=list(raw_rows)
+                _sync_feature_charge(self.stats);raw_value,raw_rows=read_target(self.store,desc)
+                if self.columnar:
+                    rows.append(raw_rows);raw_value=raw_rows=None
+                    continue
+                chunk=list(raw_rows)
                 charge=_measured(self.stats,chunk);_working(self.stats,charge);self.stats['_retained_raw_bytes']+=charge
                 rows.extend(chunk);raw_value=raw_rows=chunk=None;self._release_payloads()
+            if self.columnar:rows=ConcatRows(rows)
             norm,nrows,core_ref,cohort=_normalized(parts,rows,self.feature,fold['fit_cutoff'],training,self.cache,self.stats,
                 target_spec=self.spec.get('target_spec'))
-            charge=_measured(self.stats,[nrows,cohort]);_working(self.stats,charge);self.stats['_retained_raw_bytes']+=charge
+            charge=0 if self.columnar else _measured(self.stats,[nrows,cohort])
+            _working(self.stats,charge);self.stats['_retained_raw_bytes']+=charge
             self._release_payloads()
             security_positions={security:i for i,security in enumerate(self.spec['universe'])}
-            offsets=[self.positions[r['feature_session']]*self.width+security_positions[r['security_id']] for r in nrows if r['valid']]
+            offsets=([self.positions[training[i//self.width]]*self.width+i%self.width
+                for i,valid in enumerate(nrows.arrays['validity']) if valid] if self.columnar else
+                [self.positions[r['feature_session']]*self.width+security_positions[r['security_id']] for r in nrows if r['valid']])
             def joined_rows():
                 for f,r in zip(iter_feature_rows(self.feature,offsets,model_feature_selection=self.stats['_model_feature_selection']),
                     (r for r in nrows if r['valid'])):
@@ -1290,14 +1370,15 @@ class _IncrementalPreparation:
             binding={'training_rows_ref':None if self.columnar else digest_array_rows(joined_rows()),'training_row_count':len(offsets),
                 'training_keys_digest':digest_array_rows([self.spec['universe'][off%self.width],self.spec['feature_sessions'][off//self.width]] for off in offsets)}
             record={'contract_version':'stock_ml_fold_control_v1','fold_spec':deepcopy(fold),'raw_parts':parts,'normalized':norm,
-                'evaluation_parts':self.raw_outputs[index]['evaluation_parts'],'core_ref':core_ref,'cohort_ref':digest(cohort),'training_binding':binding}
+                'evaluation_parts':self.raw_outputs[index]['evaluation_parts'],'core_ref':core_ref,
+                'cohort_ref':nrows.value['definition']['cohort_ref'] if self.columnar else digest(cohort),'training_binding':binding}
             if self.binding is not None:record['model_feature_selection_ref']=self.binding['model_feature_selection_ref']
             selectors=selectors_for(record,self.spec,_view_data(self.feature)['row_index'],offsets)
             if self.columnar:
                 from .stock_training_blocks import training_block_binding
                 record['contract_version']='stock_ml_fold_control_v2'
                 record['training_binding']=training_block_binding(self.feature,offsets,normalized=norm,
-                    cohort_ref=digest(cohort),selector=selectors['training'],store=self.store,
+                    cohort_ref=record['cohort_ref'],selector=selectors['training'],store=self.store,
                     destination=self.cache/'feature-proofs',model_feature_selection=self.stats['_model_feature_selection'],
                     metrics=self.stats)
             record=seal(record,'fold_control_ref');descriptor=write_part(self.cache/'fold-controls',record,'fold_control_ref')
@@ -1306,9 +1387,10 @@ class _IncrementalPreparation:
                 'fold_spec_ref':digest(fold),'selectors':selectors,'core_result_refs':[core_ref]}
             if self.binding is not None:inputs['model_feature_selection_ref']=self.binding['model_feature_selection_ref']
             item={'input_manifest':seal(inputs,'input_ref'),'fold_spec':deepcopy(fold)}
-            rows=nrows=cohort=chunk=raw_rows=raw_value=joined_rows=None;self.stats['_retained_raw_bytes']=0
+            rows=cohort=chunk=raw_rows=raw_value=joined_rows=None;self.stats['_retained_raw_bytes']=0
             _sync_feature_charge(self.stats)
-            self.state._append_checkpoint_fold(item)
+            self.state._append_checkpoint_fold(item,produced_rows=nrows if self.columnar else None)
+            nrows=None
             value=_data(self.batch);value['fold_keys'].add((digest(item['input_manifest']),digest(item['fold_spec'])))
             self._charge_controls();self._persist();self.cursor+=1
             if self.progress:self.progress({'stage':'compact_labels','completed':len(self.ready),'total':len(self.plans)})
@@ -1358,6 +1440,8 @@ class _IncrementalPreparation:
                 label_file_hash_calls=self.store.metrics['file_hash_calls'],label_hash_bytes=self.store.metrics['hash_bytes'],
                 label_released_buffer_bytes=self.store.metrics.get('released_buffer_bytes',0),
                 legacy_ancestor_reads=0,legacy_native_hash_calls=0)
+            self.stats['shared_execution']={'feature':dict(self.stats['_feature_store'].metrics),
+                'targets':dict(self.store.metrics)}
         if self.metrics is not None:self.metrics.update({k:v for k,v in self.stats.items() if not k.startswith('_')})
         caller=self.stats.get('_caller_bytes',0);caller_source=self.stats.get('_caller_source_bytes',0)
         reads=self.stats.get('data_read_calls',0)

@@ -225,7 +225,7 @@ class TrainingBlockTests(unittest.TestCase):
                 self.assertEqual(main.shared_bytes,fstore.resident_bytes)
                 checked=False;traceback=failure.__traceback__
                 while traceback:
-                    if traceback.tb_frame.f_code.co_name=='feature_training_blocks':
+                    if traceback.tb_frame.f_code.co_name=='_feature_training_blocks':
                         checked=True
                         for name in ('arrays','a','parts','rows','block','cached','payload','handle'):
                             self.assertIsNone(traceback.tb_frame.f_locals[name])

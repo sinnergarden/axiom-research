@@ -1,9 +1,10 @@
 """Versioned structural training proof over existing admitted vector blocks."""
 from copy import deepcopy
+import sys
 from contextlib import contextmanager
 
 from .stock_artifacts import digest
-from .stock_compact_store import (feature_training_blocks, _view_data, fields, reference,
+from .stock_compact_store import (_feature_training_blocks, _view_data, fields, reference,
                                   sealed, model_feature_binding,_size)
 from .stock_fold_inputs import require, seal
 from .stock_matrix_storage import write_part
@@ -12,7 +13,7 @@ from .stock_matrix_storage import write_part
 @contextmanager
 def _proof_blocks(feature,offsets,*,store,model_feature_selection=None,metrics=None):
     """The existing two stores share one operation budget during proof work."""
-    fstore=_view_data(feature)['store'];blocks=None;temporary=0
+    fstore=_view_data(feature)['store'];blocks=None;temporary=0;borrow=bool(fstore._operation_depth)
     if metrics is not None:
         from .stock_compact_labels import _sync_feature_charge
         _sync_feature_charge(metrics)
@@ -29,16 +30,17 @@ def _proof_blocks(feature,offsets,*,store,model_feature_selection=None,metrics=N
         fstore.shared_bytes=max(previous[1],max(0,store.shared_bytes-fstore.resident_bytes)+store.resident_bytes+store.lease_bytes)
         fstore.shared_source_bytes=max(previous[2],max(0,store.shared_source_bytes-fstore.metrics['source_bytes'])+
             store.metrics['source_bytes'])
-        blocks=feature_training_blocks(feature,offsets,model_feature_selection=model_feature_selection)
+        blocks=_feature_training_blocks(feature,offsets,model_feature_selection=model_feature_selection,borrow=borrow)
         sync()
-        amount=_size(blocks)
+        amount=sys.getsizeof(blocks) if borrow else _size(blocks)
         store.reserve(amount);store.lease_bytes+=amount;temporary=amount
         yield blocks
     finally:
         if blocks is not None:
             # These are detached operation copies. Empty the graph as well as
             # dropping this root if a downstream writer retains a child frame.
-            for body in blocks:body.clear()
+            if not borrow:
+                for body in blocks:body.clear()
             blocks.clear()
         body=None
         blocks=feature=offsets=None
@@ -64,8 +66,14 @@ def _training_block_binding(feature, offsets, *, normalized, cohort_ref, selecto
         model_binding=model_feature_binding(feature,model_feature_selection)
         ordered_features=(_view_data(feature)['definition']['spec']['ordered_features']
                           if model_binding is None else model_binding['ordered_features'])
-        store.reserve(2*_size(blocks)+4096)
+        store.reserve(2*sys.getsizeof(blocks)+4096 if _view_data(feature,check=False)['store']._operation_depth else 2*_size(blocks)+4096)
         descriptors=[write_part(destination,body,'feature_block_ref') for body in blocks]
+        if _view_data(feature,check=False)['store']._operation_depth:
+            for descriptor,body in zip(descriptors,blocks):
+                if descriptor['path'] in store.json:
+                    store.check_path(descriptor['path'])
+                    require(store.hashes[descriptor['path']]==descriptor['file_digest'],'written Feature proof descriptor changed')
+                else:store.adopt_written(descriptor,body,{})
         header=store.read_json(normalized,key='target_ref')
         require(header['target_ref']==normalized['target_ref'] and reference(cohort_ref),
                 'training target/cohort binding mismatch')

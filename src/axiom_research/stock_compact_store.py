@@ -4,6 +4,7 @@ Legacy native identities are historical references. Only the actual table
 index, typed buffers and row metadata are ingress dependencies here.
 """
 from copy import deepcopy
+from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
 from weakref import WeakKeyDictionary
@@ -82,6 +83,7 @@ class OwnedStore:
         self.borrowers=0; self.closed=False; self.marks={}; self.hashes={}; self.arrays={}; self.json={}
         self.charges={}
         self.check_hook=None
+        self._operation_depth=0; self._operation_paths=set(); self._invalid=False
         self.metrics={'file_hash_calls':0,'hash_bytes':0,'source_bytes':0,'json_decode_calls':0,
                       'owned_buffer_bytes':0,'mmap_opens':0,'fold_projection_calls':0,'largest_parent_bytes':0,
                       'source_stat_calls':0,'lifecycle_check_calls':0,
@@ -138,6 +140,7 @@ class OwnedStore:
             payload=None
             raise
         self.marks[path]=mark; self.hashes[path]=actual
+        if self._operation_depth:self._operation_paths.add(path)
         self.metrics['file_hash_calls']+=1; self.metrics['hash_bytes']+=len(payload)
         self.metrics['source_bytes']+=len(payload)
         return payload
@@ -202,6 +205,38 @@ class OwnedStore:
             array=payload=None
             raise
 
+    def adopt_written(self,descriptor,value,arrays):
+        """Take this writer's immutable columns after their full byte checks.
+
+        This is an internal publication handoff, never external admission. The
+        canonical JSON digest and every immutable payload must match the new
+        output descriptors; semantic target validation still runs afterwards.
+        """
+        try:
+            self._check_owner();require(not self.closed,'compact store is closed')
+            encoded=(json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)+'\n').encode()
+            require('sha256:'+sha256(encoded).hexdigest()==descriptor['file_digest'],'written target JSON differs from declared bytes')
+            charge=_size(value);self.reserve(charge+sum(a.nbytes for a in arrays.values()))
+            path=descriptor['path'];self.json[path]=value;self.charges[path]=charge;self.resident_bytes+=charge
+            self.hashes[path]=descriptor['file_digest'];self.marks[path]=file_fingerprint(self.resolve(path))
+            if self._operation_depth:self._operation_paths.add(path)
+            for name,a in arrays.items():
+                item=value['buffers'][name];payload=a.base if isinstance(a.base,bytes) and len(a.base)==a.nbytes else a.tobytes()
+                require(not a.flags.writeable and 'sha256:'+sha256(payload).hexdigest()==item['file_digest'],
+                        'written immutable target column differs from declared bytes')
+                path=item['path']
+                if path in self.arrays:
+                    require(self.hashes[path]==item['file_digest'],'conflicting written buffer')
+                    continue
+                self.arrays[path]=payload;self.charges[path]=len(payload);self.resident_bytes+=len(payload)
+                self.hashes[path]=item['file_digest'];self.marks[path]=file_fingerprint(self.resolve(path))
+                if self._operation_depth:self._operation_paths.add(path)
+            metric='generated_column_handoffs' if arrays else 'generated_json_handoffs'
+            self.metrics[metric]=self.metrics.get(metric,0)+1
+        finally:
+            descriptor=value=arrays=encoded=payload=a=None
+
+
     def release(self, paths):
         """Drop owned cache references; callers first drop their array views."""
         self._check_owner(); require(not self.closed and self.borrowers==0,
@@ -221,13 +256,67 @@ class OwnedStore:
         return self.release(set(self.hashes)-set(keep_paths))
 
     def check_path(self,path):
-        self._check_owner(); self.metrics['source_stat_calls']+=1
-        require(file_fingerprint(self.resolve(path))==self.marks[path], 'compact source changed; fresh admission required')
+        self._check_owner()
+        require(not self._invalid,'compact owner invalidated by source change')
+        if self._operation_depth and path in self._operation_paths:return
+        self.metrics['source_stat_calls']+=1
+        try:
+            physical=self.resolve(path)
+            unchanged=not physical.is_symlink() and file_fingerprint(physical)==self.marks[path]
+        except OSError:unchanged=False
+        if not unchanged:
+            self._invalid=True
+            raise ValueError('compact source changed; fresh admission required')
+        if self._operation_depth:self._operation_paths.add(path)
+
+    def validate_boundary(self):
+        """Check the active ancestor bindings before atomic publication."""
+        self._check_owner()
+        require(not self.closed and not self._invalid,'compact owner is unavailable')
+        paths=tuple(self._operation_paths) if self._operation_depth else tuple(self.marks)
+        for path in paths:
+            self.metrics['source_stat_calls']+=1
+            try:
+                physical=self.resolve(path)
+                unchanged=not physical.is_symlink() and file_fingerprint(physical)==self.marks[path]
+            except OSError:unchanged=False
+            if not unchanged:
+                self._invalid=True
+                raise ValueError('compact source changed; fresh admission required')
+        owner=getattr(self,'ancestor_store',None)
+        if owner is not None:owner.validate_boundary()
+        elif self.check_hook is not None:self.check_hook()
+
+    @contextmanager
+    def operation(self):
+        """Borrow owned facts once; check used files at both lease boundaries.
+
+        Nested helpers do not stat the growing historical source graph. Owned
+        bytes remain immutable while external path changes invalidate the lease
+        before its result may be published/returned. No cross-call trust flag.
+        """
+        self._check_owner(); require(not self.closed and not self._invalid,'compact owner is unavailable')
+        outer=self._operation_depth==0
+        if outer:self._operation_paths.clear()
+        self._operation_depth+=1
+        try:yield self
+        finally:
+            self._operation_depth-=1
+            if outer:
+                paths=self._operation_paths;self._operation_paths=set()
+                try:
+                    # Preserve the first mutation failure while revoking future
+                    # borrows; cleanup must not replace its useful diagnosis.
+                    if self._invalid and sys.exc_info()[0] is not None:paths=()
+                    for path in paths:self.check_path(path)
+                except BaseException:
+                    self._invalid=True;raise
 
     def check(self):
         self._check_owner(); self.metrics['lifecycle_check_calls']+=1
-        require(not self.closed,'compact store is closed')
-        for path in self.marks: self.check_path(path)
+        require(not self.closed and not self._invalid,'compact store is closed or invalidated')
+        if not self._operation_depth:
+            for path in self.marks:self.check_path(path)
         if self.check_hook is not None: self.check_hook()
 
     def close(self):
@@ -505,7 +594,15 @@ def _validate_feature_cells(value, group, rows):
 
 
 def _admit_feature_block(value, block):
-    if block['parts'] is not None: return
+    if block['parts'] is not None:
+        try:
+            for part in block['descriptors']:
+                value['store'].check_path(part['metadata']['path'])
+                for item in part['buffers'].values():value['store'].check_path(item['path'])
+            return
+        except BaseException:
+            value=block=None
+            raise
     import numpy as np
     from .stock_matrix_reader import _CompactRows
     store=value['store']; spec=value['definition']['spec']; columns=spec['ordered_features']
@@ -576,6 +673,9 @@ def _admit_model_columns(value, block, binding):
     cache=block['model_parts']
     new=[]; metadata=None
     try:
+        for part,arrays in cache.values():
+            store.check_path(part['metadata']['path'])
+            for descriptor in part['buffers'].values():store.check_path(descriptor['path'])
         if block['parts'] is not None:
             for part,arrays in block['parts']:
                 if selected.intersection(part['columns']) and part['partition_ref'] not in cache:
@@ -645,7 +745,7 @@ def _admit_model_columns(value, block, binding):
         store.metrics['resident_bytes']=store.resident_bytes
         return cache,block['model_rows'],block['model_eligibility']
     except BaseException:
-        new.clear(); cache=arrays=rows=metadata=compact=flags=maximum=old=None
+        new.clear(); cache=arrays=rows=metadata=compact=flags=maximum=old=value=block=None
         raise
 
 
@@ -702,6 +802,10 @@ def _trim_feature_window(value, wanted):
 
 
 def feature_training_blocks(handle, offsets, *, model_feature_selection=None):
+    return _feature_training_blocks(handle,offsets,model_feature_selection=model_feature_selection)
+
+
+def _feature_training_blocks(handle, offsets, *, model_feature_selection=None, borrow=False):
     """Bind selected native columns once per live immutable Feature block.
 
     The small proofs live in the existing Feature window and are charged to its
@@ -718,6 +822,8 @@ def feature_training_blocks(handle, offsets, *, model_feature_selection=None):
         result=[]; key=tuple(columns); copies=0
         for ordinal in wanted:
             block=value['blocks'][ordinal]
+            if binding is None:_admit_feature_block(value,block)
+            else:_admit_model_columns(value,block,binding)
             cached=block.get('training_block_proofs',{}).get(key)
             if cached is None:
                 if binding is None:
@@ -760,9 +866,13 @@ def feature_training_blocks(handle, offsets, *, model_feature_selection=None):
                 block.setdefault('training_block_proofs',{})[key]=cached
                 block['training_block_proof_charge']=block.get('training_block_proof_charge',0)+charge
                 store.metrics['training_block_proof_builds']=store.metrics.get('training_block_proof_builds',0)+1
-            sealed(cached,'feature_block_ref')
-            copies+=_size(cached)+1024;store.reserve(copies)
-            result.append(deepcopy(cached))
+            if borrow:
+                result.append(cached)
+                store.metrics['training_block_proof_borrows']=store.metrics.get('training_block_proof_borrows',0)+1
+            else:
+                sealed(cached,'feature_block_ref')
+                copies+=_size(cached)+1024;store.reserve(copies)
+                result.append(deepcopy(cached))
         store.check()
         return result
 
@@ -822,6 +932,31 @@ def iter_feature_rows(handle, offsets, *, model_feature_selection=None):
 
 def feature_rows(handle, offsets, *, model_feature_selection=None):
     return list(iter_feature_rows(handle,offsets,model_feature_selection=model_feature_selection))
+
+
+def feature_eligibility_columns(handle, offsets, *, model_feature_selection=None):
+    """Gather already admitted membership/masks/clocks, without row objects."""
+    try:
+        import numpy as np
+        value=_view_data(handle);store=value['store'];count=len(offsets)
+        store.reserve(count*32+4096)
+        binding=_model_feature_binding(value,model_feature_selection)
+        member=np.empty(count,dtype='?');valid=np.empty(count,dtype='?')
+        knowledge=np.empty(count,dtype='<i8');maximum=np.empty(count,dtype='<i8')
+        for first,block,locals_ in _offset_runs(value,offsets):
+            if binding is None:
+                _admit_feature_block(value,block);rows=block['rows'];flags,at=block['eligibility']
+            else:_,rows,(flags,at)=_admit_model_columns(value,block,binding)
+            indexes=np.asarray(locals_,dtype=np.intp);end=first+len(indexes)
+            member[first:end]=rows.member[indexes];valid[first:end]=flags[indexes];maximum[first:end]=at[indexes]
+            # Interned row clocks are parsed by unique code, never once per cell.
+            codes=rows.knowledge[indexes]
+            for code in np.unique(codes):knowledge[first:end][codes==code]=instant_us(rows.dictionary[int(code)])
+        store.metrics['feature_eligibility_column_gathers']=store.metrics.get('feature_eligibility_column_gathers',0)+1
+        return member,valid,knowledge,maximum
+
+    finally:
+        handle=value=store=member=valid=knowledge=maximum=block=rows=flags=at=indexes=codes=None
 
 
 def iter_feature_eligibility(handle, offsets, *, model_feature_selection=None):

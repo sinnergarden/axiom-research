@@ -309,6 +309,9 @@ class ColumnPriceDomain:
         return digest({'blocks':used,'indices_and_clocks':ColumnMathReuse.vector_ref((*arrays,*clocks))})
 
     def rows(self, days, *, horizon, forward_operator, reuse=None,role='training'):
+        yield from self.columns(days,horizon=horizon,forward_operator=forward_operator,reuse=reuse,role=role)
+
+    def columns(self, days, *, horizon, forward_operator, reuse=None,role='training'):
         """Gather a native endpoint block, qualify it, and call Core once."""
         import numpy as np
         from .stock_matrix_storage import instant_us
@@ -316,7 +319,7 @@ class ColumnPriceDomain:
         from .stock_compact_labels import _working
         require(not self.closed and self.pid==os.getpid(),'column price domain is closed or foreign')
         opening=closing=valid=reasons=clocks=values=flags=panel=take=present=safe=code=mask=a=None
-        gathered=endpoint_indices=endpoint_clocks=lineage=output=result=None
+        gathered=endpoint_indices=endpoint_clocks=lineage=output=result=columns=remap=value=None
         try:
             calendar=self.spec['calendar'];positions={d:i for i,d in enumerate(calendar)}
             width=len(self.spec['universe']);shape=(len(days),width)
@@ -365,18 +368,34 @@ class ColumnPriceDomain:
             else:output=reuse.forward_block([(role,d,horizon) for d in days],opening,closing,valid,
                 anchor=self.source['anchor_session'],dependency_refs=dependencies,operator=forward_operator)
             clocks=np.maximum(*endpoint_clocks)
-            for i,day in enumerate(days):
-                values=output[i]['values'];flags=output[i]['validity']
-                require(values.shape==flags.shape==(width,) and not values.flags.writeable and not flags.flags.writeable,
-                        'Core forward output shape/ownership mismatch')
-                for j,security in enumerate(self.spec['universe']):
-                    ok=bool(flags[j]);reason=dictionary[int(reasons[i,j])] if not valid[i,j] else None if ok else 'nonfinite_return'
-                    yield {'security_id':security,'feature_session':day,'start_session':starts[i],'end_session':ends[i],
-                        'return':float(values[j]) if ok else None,'label_available_at':_clock(clocks[i,j]) if ok else None,
-                        'valid':ok,'invalid_reason':reason,'source_refs':[self.source_ref]}
+            require(all(item['values'].shape==item['validity'].shape==(width,) and
+                not item['values'].flags.writeable and not item['validity'].flags.writeable for item in output),
+                'Core forward output shape/ownership mismatch')
+            values=np.concatenate([item['values'] for item in output]).reshape(shape)
+            flags=np.concatenate([item['validity'] for item in output]).reshape(shape)
+            reasons[(reasons==0)&~flags]=len(dictionary);dictionary.append('nonfinite_return')
+            used=[None,*sorted({dictionary[int(code)] for code in np.unique(reasons) if code})]
+            remap=np.asarray([used.index(reason) if reason in used else -1 for reason in dictionary],dtype='<i4')
+            positions={day:i for i,day in enumerate(calendar)}
+            columns={'values':np.where(flags,values,0).reshape(-1).astype('<f8'),
+                'validity':flags.reshape(-1).astype('u1'),
+                'availability':np.where(flags,clocks,0).reshape(-1).astype('<i8'),
+                'availability_validity':flags.reshape(-1).astype('u1'),
+                'reason_codes':remap[reasons].reshape(-1),
+                'start_session':np.repeat([positions.get(day,-1) for day in starts],width).astype('<i4'),
+                'end_session':np.repeat([positions.get(day,-1) for day in ends],width).astype('<i4'),
+                'source_codes':np.zeros(len(days)*width,dtype='<i4')}
+            # Bytes-backed vectors have no writeable caller alias. Logical
+            # clocks and provenance belong to this actual as-of selection.
+            columns={name:np.frombuffer(a.tobytes(),dtype=a.dtype) for name,a in columns.items()}
+            from .stock_compact_batch import TargetRows
+            value={'contract_version':'stock_compact_raw_v2','row_count':len(days)*width,
+                'definition':{'calendar':calendar,'sessions':list(days),'universe':self.spec['universe']},
+                'reason_dictionary':used,'source_dictionary':[[self.source_ref]]}
+            return TargetRows(value,columns)
         finally:
             opening=closing=valid=reasons=clocks=values=flags=panel=take=present=safe=code=mask=a=None
-            gathered=endpoint_indices=endpoint_clocks=lineage=output=result=None
+            gathered=endpoint_indices=endpoint_clocks=lineage=output=result=columns=remap=value=None
 
     def close(self):
         self.panels.clear();self.lineage.clear();self.positions.clear();self.source=None

@@ -31,6 +31,7 @@ def _publish_build_fold(stage,target,*,projection,batch,fold_ref,writer):
     from .stock_signal_evaluation_lease import _admit_build_fold
     stage=Path(stage).resolve(); target=Path(target).resolve()
     with _admit_build_fold(stage,projection=projection,batch=batch) as (lease,run):
+        projection._store.validate_boundary()
         try: stage.rename(target)
         except OSError as exc:
             if exc.errno not in (errno.EEXIST,errno.ENOTEMPTY): raise

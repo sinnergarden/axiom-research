@@ -37,6 +37,16 @@ def shape_size(shape):
 
 def _buffer_array(values, dtype):
     require(dtype in DTYPES, 'unsupported matrix buffer dtype')
+    # Native column handoff stays columnar. Snapshot before writing; no mutable
+    # caller can change the hash's input while publication is in progress.
+    np=sys.modules.get('numpy')
+    if np is not None and isinstance(values,np.ndarray):
+        expected={'float64_le':'<f8','bool_u8':'u1','int32_le':'<i4',
+                  'int64_le':'<i8','uint64_le':'<u8','uint8':'u1'}[dtype]
+        require(values.ndim==1 and values.dtype==np.dtype(expected),'native matrix dtype/shape mismatch')
+        require(bool(np.isfinite(values).all()),'finite native matrix values required')
+        if dtype=='bool_u8':require(bool(((values==0)|(values==1)).all()),'native bool values must be0/1')
+        return np.frombuffer(values.tobytes(),dtype=values.dtype)
     code, size = DTYPES[dtype]
     out = array(code)
     require(out.itemsize == size, 'platform raw buffer size mismatch')
@@ -60,36 +70,39 @@ def _buffer_array(values, dtype):
 
 def write_buffer(root, values, *, dtype, shape):
     """Publish one finite, explicit raw buffer and return its exact descriptor."""
-    shape = list(shape)
-    count = shape_size(shape)
-    packed = _buffer_array(values, dtype)
-    require(len(packed) == count, 'matrix buffer shape mismatch')
-    raw = memoryview(packed).cast('B')
-    reference = 'sha256:' + sha256(raw).hexdigest()
-    directory = Path(root)/'buffers'; directory.mkdir(parents=True, exist_ok=True)
-    path = directory/(reference[7:]+'.bin')
-    if path.exists():
-        require(not path.is_symlink() and file_digest(path) == reference,
-                'existing matrix buffer changed')
-    else:
-        temporary = None
-        try:
-            with tempfile.NamedTemporaryFile(prefix='.buffer-', dir=directory, delete=False) as stream:
-                temporary = Path(stream.name)
-                stream.write(raw)
-            # A concurrent identical publisher is harmless, but corrupt/orphaned
-            # data is always verified before it can become a descriptor.
+    try:
+        shape = list(shape)
+        count = shape_size(shape)
+        packed = _buffer_array(values, dtype)
+        require(len(packed) == count, 'matrix buffer shape mismatch')
+        raw = memoryview(packed).cast('B')
+        reference = 'sha256:' + sha256(raw).hexdigest()
+        directory = Path(root)/'buffers'; directory.mkdir(parents=True, exist_ok=True)
+        path = directory/(reference[7:]+'.bin')
+        if path.exists():
+            require(not path.is_symlink() and file_digest(path) == reference,
+                    'existing matrix buffer changed')
+        else:
+            temporary = None
             try:
-                os.link(temporary, path)
-            except FileExistsError:
-                require(not path.is_symlink() and file_digest(path) == reference,
-                        'concurrent matrix buffer changed')
-        finally:
-            if temporary is not None: temporary.unlink(missing_ok=True)
-    require(path.stat().st_size == count*DTYPES[dtype][1] and file_digest(path) == reference,
-            'published matrix buffer mismatch')
-    return {'path': str(path.resolve()), 'file_digest': reference, 'dtype': dtype,
-            'shape': shape, 'buffer_digest': reference}
+                with tempfile.NamedTemporaryFile(prefix='.buffer-', dir=directory, delete=False) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(raw)
+                # A concurrent identical publisher is harmless, but corrupt/orphaned
+                # data is always verified before it can become a descriptor.
+                try:
+                    os.link(temporary, path)
+                except FileExistsError:
+                    require(not path.is_symlink() and file_digest(path) == reference,
+                            'concurrent matrix buffer changed')
+            finally:
+                if temporary is not None: temporary.unlink(missing_ok=True)
+        require(path.stat().st_size == count*DTYPES[dtype][1] and file_digest(path) == reference,
+                'published matrix buffer mismatch')
+        return {'path': str(path.resolve()), 'file_digest': reference, 'dtype': dtype,
+                'shape': shape, 'buffer_digest': reference}
+    finally:
+        values=packed=raw=None
 
 
 def write_part(root, value, ref_key):

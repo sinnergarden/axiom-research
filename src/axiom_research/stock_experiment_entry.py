@@ -70,21 +70,24 @@ def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
         column_source=column_source,model_feature_selection=model_feature_selection,metrics=metrics,
         progress=progress) as owner:
         with open_stock_signal_evaluation_freeze(owner.batch,scope=scope,destination=root/'oos',signal_name='model') as writer:
-            while (item:=owner.next_fold()) is not None:
-                run=build_stock_ml_fold_from_saved_inputs(item['input_manifest'],fold_spec=item['fold_spec'],
-                    destination=root/'folds',batch=owner.batch,training_spec=specs['model'])
-                # Read the builder's actual saved outputs. No fabricated model or
-                # synthetic combined prediction replaces the original fold refs.
-                prediction,binding,_=_parent(run)
-                if plan is not None:
-                    saved=build_stock_derived_signal(plan,prediction_inputs={plan.inputs[0].alias:run.path},
-                        context=signal_contexts[digest(item['fold_spec'])],destination=root/'derived',batch=owner.batch)
-                    bindings.append(saved.engine_input_binding())
-                    derived.append({'path':str(saved.path),'signal_run_ref':saved.identity})
-                else:bindings.append(binding)
-                folds.append({'path':str(run.path),'fold_ref':run.identity,
-                    'signal_run_ref':prediction['signal_run_ref'],'fold_spec_ref':digest(item['fold_spec'])})
-                run=prediction=binding=None
+            while True:
+                with owner.operation():
+                    item=owner.next_fold()
+                    if item is None:break
+                    run=build_stock_ml_fold_from_saved_inputs(item['input_manifest'],fold_spec=item['fold_spec'],
+                        destination=root/'folds',batch=owner.batch,training_spec=specs['model'])
+                    # Read the builder's actual saved outputs. No fabricated model or
+                    # synthetic combined prediction replaces the original fold refs.
+                    prediction,binding,_=_parent(run)
+                    if plan is not None:
+                        saved=build_stock_derived_signal(plan,prediction_inputs={plan.inputs[0].alias:run.path},
+                            context=signal_contexts[digest(item['fold_spec'])],destination=root/'derived',batch=owner.batch)
+                        bindings.append(saved.engine_input_binding())
+                        derived.append({'path':str(saved.path),'signal_run_ref':saved.identity})
+                    else:bindings.append(binding)
+                    folds.append({'path':str(run.path),'fold_ref':run.identity,
+                        'signal_run_ref':prediction['signal_run_ref'],'fold_spec_ref':digest(item['fold_spec'])})
+                    run=prediction=binding=None
             batch=owner.finish();frozen=writer.finish()
     evaluation_input=frozen
     if derived:
