@@ -9,10 +9,97 @@ from axiom_research import load_stock_feature_view,load_stock_ml_batch_inputs,pr
 from axiom_research.stock_batch import _data
 from axiom_research.stock_compact_store import OwnedStore,_view_data,clear_feature_window
 from axiom_research import stock_compact_labels as producer
+from axiom_research.stock_compact_batch import CompactState
 import test_stock_compact_v4 as fixtures
 
 
 class RawReuseBudgetTests(unittest.TestCase):
+    def test_a_b_c_operation_lifecycle_cold_hit_and_failed_transfer(self):
+        reserve=OwnedStore.reserve; verify=CompactState.verify_all
+        for same_handle in (True,False):
+            with self.subTest(same_handle=same_handle),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp); f,path,manifest,_=fixtures.CompactV4Tests().prepare(root,block=64)
+                with load_stock_feature_view(path,residency='eager') as fa, \
+                     (nullcontext(fa) if same_handle else load_stock_feature_view(path,residency='sequential')) as fb, \
+                     (nullcontext(fb) if same_handle else load_stock_feature_view(path,residency='sequential')) as fc:
+                    handles=[]; table=[]
+                    try:
+                        a=load_stock_ml_batch_inputs(manifest,feature_inputs=fa,residency='eager'); handles.append(a)
+                        astate=_data(a)['matrix_state']
+                        options=manifest['definition']['preparation_options']
+                        def prepare(name,feature,source,selection,caller,caller_source,expect_hit,fail=False):
+                            origin=_data(source)['matrix_state']; fstore=_view_data(feature)['store']
+                            source_feature=_view_data(origin.feature)['store']; created=[]; checks=[]
+                            prior=(origin.store.limits,origin._fixed_shared_bytes,origin._fixed_shared_source_bytes)
+                            def create(*args,**kwargs):
+                                store=OwnedStore(*args,**kwargs); created.append(store); return store
+                            def check_reserve(owner,amount):
+                                if created and owner is created[-1]:
+                                    extra=origin.store.resident_bytes+origin.store.lease_bytes+prior[1]
+                                    if source_feature is not fstore:
+                                        extra+=source_feature.resident_bytes+source_feature.lease_bytes
+                                    self.assertEqual(owner.shared_bytes,fstore.resident_bytes+caller+extra)
+                                    checks.append(extra)
+                                return reserve(owner,amount)
+                            def check_verify(state):
+                                if created and state.store is created[-1] and fail:
+                                    raise RuntimeError('synthetic transfer validation failure')
+                                return verify(state)
+                            metrics={}
+                            with patch.object(producer,'OwnedStore',new=create), \
+                                 patch.object(OwnedStore,'reserve',new=check_reserve), \
+                                 patch.object(CompactState,'verify_all',new=check_verify):
+                                kwargs=dict(feature_inputs=feature,fold_specs=f.folds()[:2],destination=root/name,
+                                    preparation_options=options,model_feature_selection=selection,reuse_raw_from_batch=source,
+                                    _caller_bytes=caller,_caller_source_bytes=caller_source,metrics=metrics)
+                                if fail:
+                                    with self.assertRaisesRegex(RuntimeError,'transfer validation failure'):
+                                        producer.prepare_compact_batch(None,**kwargs)
+                                    self.assertTrue(created[-1].closed)
+                                    self.assertFalse(_view_data(feature)['prepared'])
+                                    result=None
+                                else:
+                                    result=producer.prepare_compact_batch(None,**kwargs)
+                                    self.assertEqual(metrics['cache_hit'],expect_hit)
+                                    returned=_view_data(feature)['prepared'][result['batch_ref']]
+                                    self.assertEqual((returned._fixed_shared_bytes,returned._fixed_shared_source_bytes),
+                                        (caller,caller_source))
+                                    self.assertEqual(returned.store.shared_bytes,fstore.resident_bytes+caller)
+                                    self.assertEqual(returned.store.shared_source_bytes,fstore.metrics['source_bytes']+caller_source)
+                            self.assertTrue(checks and any(extra>0 for extra in checks))
+                            self.assertEqual((origin.store.limits,origin._fixed_shared_bytes,origin._fixed_shared_source_bytes),prior)
+                            origin.check()
+                            table.append({'feature':'same' if same_handle else 'distinct','step':name,
+                                'hit':expect_hit,'failed_transfer':fail,'returned_caller_bytes':None if fail else caller,
+                                'temporary_raw_charge_removed':not fail,'source_restored':True})
+                            return result
+                        # A is active for both B paths; B keeps its own caller,
+                        # never A's temporary Raw/Feature snapshot.
+                        bmanifest=prepare('B',fb,a,f.selection[:1],8192,4096,False)
+                        b=load_stock_ml_batch_inputs(bmanifest,feature_inputs=fb,residency='sequential'); handles.append(b)
+                        b.close(); handles.remove(b)
+                        bmanifest=prepare('B',fb,a,f.selection[:1],8192,4096,True)
+                        b=load_stock_ml_batch_inputs(bmanifest,feature_inputs=fb,residency='sequential'); handles.append(b)
+                        bstate=_data(b)['matrix_state']
+                        a.close(); handles.remove(a)
+                        self.assertTrue(astate.closed); self.assertEqual(astate.store.resident_bytes,0)
+                        self.assertEqual(bstate._fixed_shared_bytes,8192)
+                        # C borrows only active B, then retains its own zero
+                        # caller baseline after cold or HIT completion.
+                        cmanifest=prepare('C',fc,b,f.selection[:2],0,0,False)
+                        c=load_stock_ml_batch_inputs(cmanifest,feature_inputs=fc,residency='sequential'); handles.append(c)
+                        c.close(); handles.remove(c)
+                        cmanifest=prepare('C',fc,b,f.selection[:2],0,0,True)
+                        c=load_stock_ml_batch_inputs(cmanifest,feature_inputs=fc,residency='sequential'); handles.append(c)
+                        c.close(); handles.remove(c)
+                        # Failure before transfer closes the candidate and
+                        # restores B for both a fresh path and an existing HIT.
+                        prepare('failed-cold',fc,b,f.selection[:2],0,0,False,fail=True)
+                        prepare('C',fc,b,f.selection[:2],0,0,True,fail=True)
+                        print('RAW_REUSE_LIFECYCLE '+str(table))
+                    finally:
+                        for handle in reversed(handles): handle.close()
+
     def test_default_hit_transfers_the_same_store_to_saved_state(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); f,path,manifest,_=fixtures.CompactV4Tests().prepare(root,block=64)

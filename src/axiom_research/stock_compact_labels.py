@@ -580,11 +580,11 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             # active fold at a time, before the directory becomes visible.
             try:
                 state.verify_all()
-                transferred=True
                 stage.rename(target); state.store.resolve=lambda p:Path(p); state.check()
             except BaseException:
                 state.close(); raise
             fd['prepared'][batch['batch_ref']]=state
+            transferred=True
         stats.update(total_seconds=time.perf_counter()-begin,batch_ref=batch['batch_ref'],
             feature_file_hash_calls=fd['store'].metrics['file_hash_calls'],
             label_file_hash_calls=store.metrics['file_hash_calls'],label_hash_bytes=store.metrics['hash_bytes'],
@@ -593,6 +593,12 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
         if metrics is not None: metrics.update({k:v for k,v in stats.items() if not k.startswith('_')})
         return batch
     finally:
-        if not transferred: store.close()
+        if transferred:
+            # Raw owners are borrowed for this operation. Returned state owns
+            # its label leaves and retains only the declared caller baseline.
+            state._fixed_shared_bytes=_caller_bytes
+            state._fixed_shared_source_bytes=_caller_source_bytes
+            state._sync_shared()
+        else: store.close()
         if own: feature.close()
         if stats['data_read_calls'] and callable(getattr(data,'clear_cache',None)): data.clear_cache()
