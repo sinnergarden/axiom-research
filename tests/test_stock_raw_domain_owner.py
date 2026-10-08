@@ -179,7 +179,7 @@ class RawDomainOwnerTests(unittest.TestCase):
         with self.environment() as (spec, data, stats):
             with owner._price_view(data, spec, CUTOFF, list(CALENDAR), stats) as domain:
                 before = stats['_price_view_bytes']
-                with patch.object(owner._RawPriceDomain, '_charge', side_effect=ValueError('actual owner budget')):
+                with patch.object(owner._RawPriceDomain, '_charge_compiled', side_effect=ValueError('actual owner budget')):
                     with self.assertRaisesRegex(ValueError, 'actual owner budget'):
                         list(labels._forward_rows(None, None, None, calendar=CALENDAR,
                             features=list(CALENDAR), horizon_sessions=5, source_ref=domain.source_ref, _domain=domain))
@@ -192,6 +192,58 @@ class RawDomainOwnerTests(unittest.TestCase):
                 self.assertEqual(rows, self.expected(data.adjusted[-1], list(CALENDAR), domain.source_ref))
                 self.assertEqual(stats['price_domain_index_build_attempts'], 2)
                 self.assertEqual(stats['price_domain_index_builds'], 1)
+
+    def test_compile_increment_bounds_live_graph_without_any_native_rescan(self):
+        from axiom_research.stock_matrix_reader import _resident_size
+        with self.environment() as (spec, data, stats):
+            with owner._price_view(data, spec, CUTOFF, list(CALENDAR), stats) as domain:
+                before = stats['_price_view_bytes']; release_lists = domain._release_native_lists
+                peaks = []
+                def release_checked():
+                    value = owner._RAW_DOMAINS[domain]
+                    actual = _resident_size(domain._roots(value)) + sys.getsizeof(value)
+                    self.assertGreaterEqual(stats['_price_view_bytes'], actual)
+                    peaks.append(stats['_price_view_bytes'])
+                    release_lists()
+                with patch.object(owner._RawPriceDomain, '_charge', side_effect=AssertionError('native rescan')), \
+                     patch.object(owner, '_measured', side_effect=AssertionError('graph rescan')), \
+                     patch.object(owner._RawPriceDomain, '_release_native_lists', side_effect=release_checked):
+                    rows = list(labels._forward_rows(None, None, None, calendar=CALENDAR,
+                        features=list(CALENDAR), horizon_sessions=5, source_ref=domain.source_ref, _domain=domain))
+                value = owner._RAW_DOMAINS[domain]
+                self.assertGreaterEqual(stats['_price_view_bytes'],
+                    _resident_size(domain._roots(value)) + sys.getsizeof(value))
+                self.assertEqual(peaks, [before + stats['price_domain_index_increment_bytes']])
+                self.assertEqual(stats['_price_view_bytes'], peaks[0] - stats['price_domain_released_list_capacity_bytes'])
+                self.assertEqual(rows, self.expected(data.adjusted[-1], list(CALENDAR), domain.source_ref))
+
+    def test_native_list_alias_capacity_is_released_once(self):
+        def alias(wire):
+            wire['field_meta']['close']['by_key'] = wire['field_meta']['open']['by_key']
+        with self.environment(alias) as (spec, data, stats):
+            with owner._price_view(data, spec, CUTOFF, list(CALENDAR), stats) as domain:
+                expected = self.expected(data.adjusted[-1], list(CALENDAR), domain.source_ref)
+                value = owner._RAW_DOMAINS[domain]
+                original = value['records'], value['field_meta']['open']['by_key']
+                released = sum(sys.getsizeof(rows) - sys.getsizeof([]) for rows in original)
+                rows = list(labels._forward_rows(None, None, None, calendar=CALENDAR,
+                    features=list(CALENDAR), horizon_sessions=5, source_ref=domain.source_ref, _domain=domain))
+                self.assertEqual(rows, expected)
+                self.assertEqual(stats['price_domain_released_list_containers'], 2)
+                self.assertEqual(stats['price_domain_released_list_capacity_bytes'], released)
+                self.assertIs(value['field_meta']['open']['by_key'], value['field_meta']['close']['by_key'])
+                self.assertEqual(value['records'], [])
+                self.assertEqual(value['field_meta']['open']['by_key'], [])
+
+    def test_missing_metadata_field_keeps_original_invalid_rows(self):
+        def missing(wire): del wire['field_meta']['close']
+        with self.environment(missing) as (spec, data, stats):
+            with owner._price_view(data, spec, CUTOFF, list(CALENDAR), stats) as domain:
+                expected = self.expected(data.adjusted[-1], list(CALENDAR), domain.source_ref)
+                rows = list(labels._forward_rows(None, None, None, calendar=CALENDAR,
+                    features=list(CALENDAR), horizon_sessions=5, source_ref=domain.source_ref, _domain=domain))
+                self.assertEqual(rows, expected)
+                self.assertEqual(stats['price_domain_released_list_containers'], 2)
 
     def test_saved_target_validation_charges_the_domain_and_child_and_restores_on_failure(self):
         with self.environment() as (spec, data, stats), tempfile.TemporaryDirectory() as temp:

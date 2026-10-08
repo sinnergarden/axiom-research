@@ -75,6 +75,47 @@ class _RawPriceDomain:
         _sync_feature_charge(metrics)
         return charge
 
+    def _charge_compiled(self):
+        """Charge only allocations added to the admitted native graph."""
+        value = self._data(); metrics = value['metrics']; compiled = value['compiled']
+        indexes = (compiled['indexed'], *compiled['metadata'].values())
+        # Values and tuple members alias admitted rows/strings. Each _keyed
+        # inserts a fresh pair; all such pairs have this fixed Python size.
+        # The small container set also prevents charging any container alias
+        # twice. No row/provenance graph traversal belongs at this boundary.
+        seen = set(); increment = 1024; key_count = 0
+        for container in (compiled, compiled['metadata'], *indexes, compiled['positions']):
+            if id(container) not in seen:
+                seen.add(id(container)); increment += sys.getsizeof(container)
+        seen_indexes = set()
+        for index in indexes:
+            if id(index) not in seen_indexes:
+                seen_indexes.add(id(index)); key_count += len(index)
+        increment += key_count * sys.getsizeof((None, None))
+        # Enumerate integers may alias cached native scalars. Charging all of
+        # them at the largest position size is a conservative upper bound;
+        # the 1024 bytes above bound the few new control strings/headers.
+        increment += len(compiled['positions']) * sys.getsizeof(max(0, len(compiled['positions']) - 1))
+        _working(metrics, increment)
+        metrics['_price_view_bytes'] += increment
+        _sync_feature_charge(metrics)
+        metrics['price_domain_index_increment_bytes'] = metrics.get('price_domain_index_increment_bytes', 0) + increment
+        return metrics['_price_view_bytes']
+
+    def _release_native_lists(self):
+        value = self._data(); metrics = value['metrics']; released = 0; seen = set()
+        # Retain the admitted headers/empty containers. Only list capacity is
+        # released; all row/provenance values remain owned by the indexes.
+        for rows in (value['records'], *((value['field_meta'].get(field) or {}).get('by_key')
+                                       for field in ('open', 'close'))):
+            if rows is not None and id(rows) not in seen:
+                seen.add(id(rows)); before = sys.getsizeof(rows)
+                rows.clear(); released += before - sys.getsizeof(rows)
+        metrics['_price_view_bytes'] -= released
+        _sync_feature_charge(metrics)
+        metrics['price_domain_released_list_capacity_bytes'] = metrics.get('price_domain_released_list_capacity_bytes', 0) + released
+        metrics['price_domain_released_list_containers'] = metrics.get('price_domain_released_list_containers', 0) + len(seen)
+
     @staticmethod
     def _clear_compiled(compiled):
         if compiled is not None:
@@ -100,7 +141,7 @@ class _RawPriceDomain:
             try:
                 value['compiled'] = _compile_forward_index(value['records'], value['field_meta'], None,
                     calendar, parsed_query=value['parsed'])
-                peak = self._charge()
+                peak = self._charge_compiled()
             except BaseException:
                 self._clear_compiled(value['compiled'])
                 value['compiled'] = None
@@ -110,10 +151,7 @@ class _RawPriceDomain:
                 len(value['compiled'][k]) if k == 'indexed' else sum(len(v) for v in value['compiled'][k].values())
                 for k in ('indexed', 'metadata'))
             metrics['price_domain_compile_peak_bytes'] = max(metrics.get('price_domain_compile_peak_bytes', 0), peak)
-            # Indexes now own the same private row/provenance dictionaries.
-            # Their old JSON list containers are not another retained view.
-            value['records'] = value['field_meta'] = None
-            self._charge()
+            self._release_native_lists()
         # Check after lazy compilation, before the generator materializes its
         # detached output. A retained index and its child rows coexist.
         _working(metrics, len(features) * len(value['parsed'][1]) * 2048 + 65536)
