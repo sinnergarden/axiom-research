@@ -14,7 +14,7 @@ import sys
 import time
 
 from .stock_artifacts import digest
-from .stock_fold_inputs import require, ordered, file_fingerprint
+from .stock_fold_inputs import require, ordered, file_fingerprint, seal
 from .stock_label_contracts import _instant, _session
 from .stock_matrix_storage import DTYPES, BUFFER_FIELDS, instant_us
 
@@ -261,6 +261,50 @@ def _view_data(handle, *, check=True):
     return value
 
 
+def model_feature_binding(feature, selection):
+    """Bind an ordered model subset to the unchanged admitted Feature table."""
+    value=_view_data(feature)
+    return _model_feature_binding(value,selection)
+
+
+def _model_feature_binding(value, selection):
+    if selection is None: return None
+    require(type(selection) is list and bool(selection),'nonempty ordered model_feature_selection required')
+    definition=value['definition']; spec=definition['spec']; original=spec['feature_selection']
+    require([s['id'] for s in original]==spec['ordered_features'],'Feature selection/schema binding mismatch')
+    available={s['id']:s for s in original}; selected=[]; seen=set()
+    for item in selection:
+        fields(item,{'id','semantic_version'},'exact model feature id/version required')
+        require(type(item['id']) is str and type(item['semantic_version']) is str and
+                item['id'] in available and item==available[item['id']], 'unknown model feature or version')
+        require(item['id'] not in seen,'duplicate model feature')
+        seen.add(item['id']); selected.append(deepcopy(item))
+    schema={c['name']:c for c in definition['schema']}
+    return seal({'contract_version':'stock_model_feature_selection_v1',
+        'feature_view_ref':definition['feature_view_ref'],
+        'historical_feature_inputs_ref':definition['historical_feature_inputs_ref'],
+        'selection':selected,'ordered_features':[s['id'] for s in selected],
+        'schema':[deepcopy(schema[s['id']]) for s in selected],
+        'eligibility':'original_membership_selected_validity_max_known_availability_fit_cutoff_v1'},'model_feature_selection_ref')
+
+
+def model_common(spec, binding):
+    common={k:deepcopy(spec[k]) for k in ('scope','snapshot','pit_policy','calendar','universe',
+        'catalog_ref','feature_selection','ordered_features')}
+    if binding is not None:
+        common.update(feature_selection=deepcopy(binding['selection']),
+            ordered_features=list(binding['ordered_features']),model_feature_selection=deepcopy(binding))
+    return common
+
+
+def model_eligibility_ref(binding):
+    if binding is None: return None
+    return digest({'feature_view_ref':binding['feature_view_ref'],
+        'selection':sorted(binding['selection'],key=lambda s:s['id']),
+        'schema':sorted(binding['schema'],key=lambda c:c['name']),
+        'eligibility':binding['eligibility']})
+
+
 class StockFeatureView:
     __slots__=('__weakref__',)
     def __init__(self,token,value):
@@ -283,8 +327,12 @@ class StockFeatureView:
     def __exit__(self,*args): self.close()
 
 
-def load_stock_feature_view(path, *, limits=None, residency="eager"):
-    """Ordinary ingress stops at Feature table files, never source ancestors."""
+def load_stock_feature_view(path, *, limits=None, residency="eager",model_feature_selection=None):
+    """Admit table files; an explicit subset narrows eager buffer admission.
+
+    The Feature identity and schema remain original. Pass the selection again
+    to selected row/matrix consumers; omission keeps full-column semantics.
+    """
     require(residency in ("eager","sequential"),"unknown Feature residency mode")
     begin=time.perf_counter(); path=Path(path).absolute(); store=OwnedStore(limits)
     try:
@@ -372,9 +420,12 @@ def load_stock_feature_view(path, *, limits=None, residency="eager"):
             'day_admissions':day_admissions,
             'control_paths':{index_path,index['row_index']['path']},'residency':residency,
             'closed':False,'borrowers':0,'prepared':{}})
+        binding=_model_feature_binding(_view_data(handle,check=False),model_feature_selection)
         if residency=='eager':
             value=_view_data(handle,check=False)
-            for block in blocks: _admit_feature_block(value,block)
+            for block in blocks:
+                if binding is None: _admit_feature_block(value,block)
+                else: _admit_model_columns(value,block,binding)
             require(set(parents)==set(days),'Feature parent date coverage mismatch')
         store.metrics['initialization_seconds']=time.perf_counter()-begin
         store.metrics['resident_bytes']=store.resident_bytes
@@ -510,18 +561,109 @@ def _admit_feature_block(value, block):
         raise
 
 
-def set_feature_window(handle, offsets):
+def _admit_model_columns(value, block, binding):
+    """Admit selected physical parts into the existing owner's byte/JSON caches."""
+    import numpy as np
+    from .stock_matrix_reader import _CompactRows
+    store=value['store']; spec=value['definition']['spec']; columns=binding['ordered_features']
+    selected=set(columns); count=block['count']; start=block['start']; universe=spec['universe']
+    require(selected <= {c for p in block['descriptors'] for c in p['columns']},
+            'selected Feature block is missing columns')
+    if 'model_parts' not in block:
+        control=4096+16*len(spec['ordered_features'])
+        store.reserve(control); store.resident_bytes+=control
+        block.update(model_parts={},model_charge=control)
+    cache=block['model_parts']
+    new=[]; metadata=None
+    try:
+        if block['parts'] is not None:
+            for part,arrays in block['parts']:
+                if selected.intersection(part['columns']) and part['partition_ref'] not in cache:
+                    store.reserve(512); store.resident_bytes+=512; block['model_charge']+=512
+                    cache[part['partition_ref']]=(part,arrays)
+        for part in block['descriptors']:
+            if not selected.intersection(part['columns']) or part['partition_ref'] in cache: continue
+            store.reserve((len(new)+1)*1024)
+            arrays={k:store.buffer(v) for k,v in part['buffers'].items()}
+            require(all(a.shape==(count,len(part['columns'])) for a in arrays.values()),'Feature buffer shapes mismatch')
+            new.append((part,arrays))
+        if new or 'model_rows' not in block:
+            if block['parts'] is not None and 'model_rows' not in block:
+                block['model_rows']=block['rows']
+                store.metrics['active_model_feature_blocks']=store.metrics.get('active_model_feature_blocks',0)+1
+            else:
+                metadata=store.read_json(block['descriptors'][0]['metadata'],legacy=True)
+                rows=metadata['rows']; require(len(rows)==count,'Feature metadata row count mismatch')
+                for i,row in enumerate(rows):
+                    off=start+i; day=spec['feature_sessions'][off//len(universe)]
+                    require((row['security_id'],row['session'])==(universe[off%len(universe)],day) and
+                            row['knowledge_cutoff']==spec['cutoff_by_session'][day] and type(row['member']) is bool,
+                            'Feature row key/cutoff/member mismatch')
+                    require(len(row['validity'])==len(row['availability'])==len(row['reasons'])==len(spec['ordered_features']),
+                            'Feature row metadata width mismatch')
+                if new: _validate_feature_cells(value,new,rows)
+                if 'model_rows' not in block:
+                    store.reserve(_size(rows,maximum=store.maximum_matrix_bytes,
+                        retained=store.shared_bytes+store.resident_bytes+store.lease_bytes)+count*256+4096)
+                    compact=_CompactRows(rows,len(spec['ordered_features']),np)
+                    parents={}
+                    require(set(metadata['row_references'])==set(spec['feature_sessions'][
+                        start//len(universe):(start+count)//len(universe)]),'Feature metadata parent date scope mismatch')
+                    for day,parent in metadata['row_references'].items():
+                        require(reference(parent.get('feature_ref')) and reference(parent.get('qlib_view_ref')),
+                                'explicit Feature parent refs required')
+                        require(day not in value['parents'] or value['parents'][day]==parent,'conflicting Feature parent reference')
+                        if day not in value['parents']: parents[day]=deepcopy(parent)
+                    charge=compact.bytes+_size(parents)
+                    store.reserve(charge); store.resident_bytes+=charge
+                    block['model_rows']=compact; block['model_charge']+=compact.bytes
+                    store.metrics['active_model_feature_blocks']=store.metrics.get('active_model_feature_blocks',0)+1
+                    value['parents'].update(parents)
+        for part,arrays in new:
+            store.reserve(1024); store.resident_bytes+=1024
+            block['model_charge']+=1024
+            cache[part['partition_ref']]=(part,arrays)
+            store.metrics['model_column_part_admissions']=store.metrics.get('model_column_part_admissions',0)+1
+        key=tuple(sorted(selected))
+        if block.get('model_eligibility_key')!=key:
+            store.reserve(count*18+count*32+4096)
+            flags=np.ones(count,dtype='?'); maximum=np.full(count,np.iinfo(np.int64).min,dtype='<i8')
+            for part,arrays in cache.values():
+                positions=[j for j,c in enumerate(part['columns']) if c in selected]
+                if not positions: continue
+                store.reserve(count*18+count*len(positions)*17+4096)
+                flags &= np.all(arrays['value_validity'][:,positions],axis=1)
+                np.maximum(maximum,np.max(arrays['available_at_utc_us'][:,positions],axis=1,
+                    where=arrays['available_at_validity'][:,positions].view('?'),
+                    initial=np.iinfo(np.int64).min),out=maximum)
+            flags.flags.writeable=maximum.flags.writeable=False
+            old=block.get('model_eligibility')
+            if old is None:
+                charge=flags.nbytes+maximum.nbytes
+                store.resident_bytes+=charge; block['model_charge']+=charge
+            block.update(model_eligibility=(flags,maximum),model_eligibility_key=key)
+        store.metrics['resident_bytes']=store.resident_bytes
+        return cache,block['model_rows'],block['model_eligibility']
+    except BaseException:
+        new.clear(); cache=arrays=rows=metadata=compact=flags=maximum=old=None
+        raise
+
+
+def set_feature_window(handle, offsets, *, model_feature_selection=None):
     """Admit the complete selected day blocks; eager owners keep their choice."""
     value=_view_data(handle); store=value['store']
-    if value['residency']=='eager': return
+    binding=_model_feature_binding(value,model_feature_selection)
+    if value['residency']=='eager' and binding is None: return
     require(store.borrowers==0 and value.get('active',0)==0,'Feature window still borrowed')
     width=len(value['definition']['spec']['universe']); wanted=set()
     for off in offsets:
         require(type(off) is int and 0<=off<value['row_index']['row_count'],'Feature offset outside view')
         wanted.update(value['day_admissions'][off//width])
-    _trim_feature_window(value,wanted)
+    if value['residency']=='sequential': _trim_feature_window(value,wanted)
     try:
-        for ordinal in sorted(wanted): _admit_feature_block(value,value['blocks'][ordinal])
+        for ordinal in sorted(wanted):
+            if binding is None: _admit_feature_block(value,value['blocks'][ordinal])
+            else: _admit_model_columns(value,value['blocks'][ordinal],binding)
     except BaseException:
         # Skip lifecycle stat checks during cleanup of a failed admission.
         _trim_feature_window(value,set())
@@ -549,6 +691,10 @@ def _trim_feature_window(value, wanted):
             charge=block['charge']; block.update(parts=None,rows=None,eligibility=None,charge=0)
             store.resident_bytes-=charge
             store.metrics['released_feature_metadata_bytes']=store.metrics.get('released_feature_metadata_bytes',0)+charge
+        if ordinal not in wanted and 'model_parts' in block:
+            charge=block.pop('model_charge',0); store.resident_bytes-=charge
+            if 'model_rows' in block: store.metrics['active_model_feature_blocks']-=1
+            for key in ('model_rows','model_parts','model_eligibility','model_eligibility_key'): block.pop(key,None)
     store.release_payloads(keep)
 
 
@@ -568,33 +714,54 @@ def _offset_runs(value, offsets, *, chunk=1024):
         yield first,value['blocks'][ordinal],local
 
 
-def iter_feature_rows(handle, offsets):
+def iter_feature_rows(handle, offsets, *, model_feature_selection=None):
     value=_view_data(handle); spec=value['definition']['spec']; width=len(spec['universe'])
+    binding=_model_feature_binding(value,model_feature_selection)
+    columns=spec['ordered_features'] if binding is None else binding['ordered_features']
+    positions={c:i for i,c in enumerate(columns)}
+    source_positions=[value['column_positions'][c] for c in columns]
     for _,block,locals_ in _offset_runs(value,offsets):
-        _admit_feature_block(value,block)
+        if binding is None:
+            _admit_feature_block(value,block); parts=block['parts']; compact=block['rows']
+        else:
+            cache,compact,_=_admit_model_columns(value,block,binding); parts=cache.values()
         for local in locals_:
             off=block['start']+local
-            values=[None]*len(spec['ordered_features']); flags=[False]*len(values)
-            for part,arrays in block['parts']:
+            values=[None]*len(columns); flags=[False]*len(values)
+            for part,arrays in parts:
                 for j,c in enumerate(part['columns']):
-                    k=value['column_positions'][c]; flag=bool(arrays['value_validity'][local,j]); flags[k]=flag
+                    if c not in positions: continue
+                    k=positions[c]; flag=bool(arrays['value_validity'][local,j]); flags[k]=flag
                     values[k]=float(arrays['values'][local,j]) if flag else None
-            yield block['rows'].row(local,security=spec['universe'][off%width],
-                session=spec['feature_sessions'][off//width],values=values,validity=flags)
+            if binding is None:
+                row=compact.row(local,security=spec['universe'][off%width],
+                    session=spec['feature_sessions'][off//width],values=values,validity=flags)
+            else:
+                row={'security_id':spec['universe'][off%width],'session':spec['feature_sessions'][off//width],
+                    'member':bool(compact.member[local]),'values':values,'validity':flags,
+                    'knowledge_cutoff':deepcopy(compact.dictionary[int(compact.knowledge[local])]),
+                    'source_refs':deepcopy(compact.dictionary[int(compact.sources[local])])}
+                for name in ('reasons','availability'):
+                    original=compact.dictionary[int(getattr(compact,name)[local])]
+                    row[name]=deepcopy([original[j] for j in source_positions])
+            yield row
     value['store'].check()
 
 
-def feature_rows(handle, offsets):
-    return list(iter_feature_rows(handle,offsets))
+def feature_rows(handle, offsets, *, model_feature_selection=None):
+    return list(iter_feature_rows(handle,offsets,model_feature_selection=model_feature_selection))
 
 
-def iter_feature_eligibility(handle, offsets):
+def iter_feature_eligibility(handle, offsets, *, model_feature_selection=None):
     """Reuse admitted block reductions without per-row NumPy workspaces."""
     from .stock_label_contracts import _FeatureEligibility
     value=_view_data(handle); minimum=-(2**63)
+    binding=_model_feature_binding(value,model_feature_selection)
     for _,block,locals_ in _offset_runs(value,offsets):
-        _admit_feature_block(value,block)
-        compact=block['rows']; flags,maximum=block['eligibility']
+        if binding is None:
+            _admit_feature_block(value,block); compact=block['rows']; flags,maximum=block['eligibility']
+        else:
+            _,compact,(flags,maximum)=_admit_model_columns(value,block,binding)
         for local in locals_:
             at=int(maximum[local]); complete=bool(flags[local])
             yield _FeatureEligibility(bool(compact.member[local]),complete,complete,
@@ -602,10 +769,13 @@ def iter_feature_eligibility(handle, offsets):
     value['store'].check()
 
 
-def training_matrix(handle,offsets,cutoff):
+def training_matrix(handle,offsets,cutoff,*,model_feature_selection=None):
     """Gather X in block batches, preserving the caller's exact row order."""
     import numpy as np
     value=_view_data(handle); spec=value['definition']['spec']; instant=instant_us(cutoff)
+    binding=_model_feature_binding(value,model_feature_selection)
+    columns=spec['ordered_features'] if binding is None else binding['ordered_features']
+    column_positions={c:i for i,c in enumerate(columns)}
     require(all(type(off) is int and 0<=off<value['row_index']['row_count'] for off in offsets),
             'Feature matrix offsets outside view')
     # One check per selected block before any output allocation. The day index
@@ -613,23 +783,30 @@ def training_matrix(handle,offsets,cutoff):
     width=len(spec['universe']); chosen={value['day_blocks'][off//width] for off in offsets}
     require(all(value['blocks'][i]['complete_columns'] for i in chosen),
             'selected training Feature block is missing columns')
-    for i in sorted(chosen): _admit_feature_block(value,value['blocks'][i])
-    matrix=np.empty((len(offsets),len(spec['ordered_features'])),dtype='<f8')
+    for i in sorted(chosen):
+        if binding is None: _admit_feature_block(value,value['blocks'][i])
+        else: _admit_model_columns(value,value['blocks'][i],binding)
+    matrix=np.empty((len(offsets),len(columns)),dtype='<f8')
     try:
         for first,block,locals_ in _offset_runs(value,offsets):
-            rows=block['rows']; indexes=np.asarray(locals_,dtype=np.intp)
-            flags,maximum=block['eligibility']
+            if binding is None: parts=block['parts']; rows=block['rows']; flags,maximum=block['eligibility']
+            else:
+                cache,rows,(flags,maximum)=_admit_model_columns(value,block,binding); parts=cache.values()
+            indexes=np.asarray(locals_,dtype=np.intp)
             require(bool(rows.member[indexes].all()) and bool(flags[indexes].all()) and
                     bool(((maximum[indexes]!=-(2**63)) & (maximum[indexes]<=instant)).all()) and
                     all(instant_us(rows.dictionary[int(code)])<=instant for code in set(rows.knowledge[indexes])),
                     'selected training Feature membership/clock mismatch')
             # Admission validated every individual availability <= original K;
             # max availability and K above retain the complete fit cutoff check.
-            for part,arrays in block['parts']:
-                positions=[value['column_positions'][column] for column in part['columns']]
+            for part,arrays in parts:
+                selected=[j for j,c in enumerate(part['columns']) if c in column_positions]
+                if not selected: continue
+                positions=[column_positions[part['columns'][j]] for j in selected]
                 workspace=len(indexes)*len(positions)*8+len(indexes)*32
                 value['store'].reserve(matrix.nbytes+workspace)
-                matrix[first:first+len(indexes),positions]=arrays['values'][indexes]
+                matrix[first:first+len(indexes),positions]=(arrays['values'][indexes] if binding is None
+                    else arrays['values'][indexes[:,None],selected])
                 value['store'].metrics['training_block_gathers']=value['store'].metrics.get('training_block_gathers',0)+1
         require(bool(np.isfinite(matrix).all()),'selected training Feature values must be finite')
         matrix.flags.writeable=False; value['store'].check(); return matrix

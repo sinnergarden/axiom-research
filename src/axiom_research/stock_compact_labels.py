@@ -79,7 +79,8 @@ def _producer_feature_window(feature, offsets, metrics):
         feature_store.shared_bytes=max(previous[1],metrics['_caller_bytes']+store.resident_bytes+
             metrics['_retained_raw_bytes']+metrics.get('_price_view_bytes',0))
         feature_store.shared_source_bytes=max(previous[2],metrics['_caller_source_bytes']+store.metrics['source_bytes'])
-        set_feature_window(feature,offsets)
+        selection=metrics.get('_model_feature_selection')
+        set_feature_window(feature,offsets,**({} if selection is None else {'model_feature_selection':selection}))
     finally:
         feature_store.limits,feature_store.shared_bytes,feature_store.shared_source_bytes=previous
     _sync_feature_charge(metrics)
@@ -231,8 +232,12 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
     offsets=[positions[d]*width+i for d in days for i in range(width)]
     _working(metrics,len(rows)*4096+len(spec['ordered_features'])*96+3072)
     reasons=[]; instant=_instant(cutoff); cutoff_us=instant_us(cutoff)
-    for row,facts in zip(rows,iter_feature_eligibility(feature,offsets)):
-        reason=_eligible_reason(row,facts,len(spec['ordered_features']),instant)
+    selection=metrics.get('_model_feature_selection')
+    from .stock_compact_store import model_feature_binding,model_eligibility_ref
+    binding=model_feature_binding(feature,selection)
+    feature_count=len(spec['ordered_features']) if binding is None else len(binding['ordered_features'])
+    for row,facts in zip(rows,iter_feature_eligibility(feature,offsets,model_feature_selection=selection)):
+        reason=_eligible_reason(row,facts,feature_count,instant)
         if reason is None:
             require(facts.maximum_available_at_utc_us is not None and
                     facts.maximum_available_at_utc_us<=cutoff_us,
@@ -242,6 +247,7 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
         'sessions':days,'universe':spec['universe'],'raw_refs':[d['target_ref'] for d in raw_parts],
         'eligibility_reasons':reasons,'eligible_keys':[[r['security_id'],r['feature_session']]
             for r,reason in zip(rows,reasons) if reason is None]}
+    if binding is not None: cohort['model_feature_eligibility_ref']=model_eligibility_ref(binding)
     cohort_ref=digest(cohort)
     definition={'calendar':spec['calendar'],'universe':spec['universe'],'sessions':days,'cutoff':cutoff,
         'raw_refs':cohort['raw_refs'],'cohort_ref':cohort_ref,'normalization_spec':NORMALIZATION_SPEC,
@@ -309,7 +315,7 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
 
 
 def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,preparation_options,metrics=None,progress=None,
-                          _caller_bytes=0,_caller_source_bytes=0):
+                          _caller_bytes=0,_caller_source_bytes=0,model_feature_selection=None,reuse_raw_from_batch=None):
     from .stock_compact_batch import load_compact_state
     begin=time.perf_counter(); own=type(feature_inputs) is not StockFeatureView
     require(not own or isinstance(feature_inputs,(str,Path)),'Feature input must be an owner handle or path')
@@ -321,6 +327,7 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             all(type(v) is int and v>0 for k,v in options.items() if k not in ('normalization_backend','control_layout')),
             'fixed compact options and positive budgets required')
     compact=options.get('control_layout','fold_controls_v1')=='fold_controls_v1'
+    require(model_feature_selection is None or compact,'model_feature_selection requires compact v4 controls')
     budgets=limits({'maximum_matrix_bytes':options['maximum_resident_bytes'],
         **{k:options[k] for k in ('maximum_source_bytes','maximum_parent_bytes') if k in options}})
     require(type(_caller_bytes) is int and _caller_bytes>=0 and type(_caller_source_bytes) is int and _caller_source_bytes>=0,
@@ -328,7 +335,11 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
     feature=load_stock_feature_view(feature_inputs,limits=budgets,residency='sequential') if own else feature_inputs
     store=None
     try:
-        fd=_view_data(feature); spec=fd['definition']['spec']; width=len(spec['universe'])
+        from .stock_compact_store import model_feature_binding,model_common
+        fd=_view_data(feature); source_spec=fd['definition']['spec']; spec=source_spec; width=len(spec['universe'])
+        model_binding=model_feature_binding(feature,model_feature_selection)
+        if model_binding is not None:
+            spec={**source_spec,'ordered_features':model_binding['ordered_features'],'feature_selection':model_binding['selection']}
         require(fd['store'].resident_bytes<=budgets['maximum_matrix_bytes'] and
                 fd['store'].metrics['source_bytes']<=budgets['maximum_source_bytes'] and
                 fd['store'].metrics['largest_parent_bytes']<=budgets['maximum_parent_bytes'],'borrowed Feature budget incompatible')
@@ -336,6 +347,8 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             'fold_specs':deepcopy(fold_specs),'preparation_options':options,'implementation_ref':_implementation(),
             'environment':_input_environment()}
         if compact: definition['price_domain_plan']='fit_window_evaluation_calendar_blocks_v1'
+        if model_binding is not None: definition['model_feature_selection']=model_binding
+        require(reuse_raw_from_batch is None or compact,'Raw reuse requires compact v4 controls')
         definition_ref=digest(definition); target=Path(destination).absolute()/definition_ref[7:]
         store=OwnedStore(budgets,shared_bytes=fd['store'].resident_bytes+_caller_bytes,
             shared_source_bytes=fd['store'].metrics['source_bytes']+_caller_source_bytes)
@@ -351,7 +364,8 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
         'price_domains':[],
         'maximum_working_bytes':fd['store'].resident_bytes,
         '_limits':budgets,'_feature_bytes':fd['store'].resident_bytes+_caller_bytes,'_retained_raw_bytes':0,'_store':store,
-        '_feature_store':fd['store'],'_caller_bytes':_caller_bytes,'_caller_source_bytes':_caller_source_bytes}
+        '_feature_store':fd['store'],'_caller_bytes':_caller_bytes,'_caller_source_bytes':_caller_source_bytes,
+        '_model_feature_selection':model_feature_selection}
     try:
         if (target/'batch.json').exists():
             value=json.loads((target/'batch.json').read_bytes()); require(value['definition']==definition,'cached compact definition mismatch')
@@ -372,7 +386,30 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
                     set(training+inference)<=set(spec['feature_sessions']),'fold grid/chronology mismatch')
             previous=fold['oos_trade_sessions'][-1]; plans.append((fold,training,inference))
         cache=Path(destination).absolute()/'compact-cache'; records=[]; domains={}; raw_outputs=[]
+        reused=None
+        if reuse_raw_from_batch is not None:
+            from .stock_batch import _data
+            owner=_data(reuse_raw_from_batch)
+            require(owner['manifest']['contract_version']=='stock_ml_batch_inputs_v4',
+                    'Raw reuse requires an owner-loaded compact v4 batch')
+            origin=owner['matrix_state']; origin.check()
+            require(origin.compact and origin.active==0 and
+                    origin.batch['definition']['feature_view']==feature.to_dict(),'Raw reuse Feature identity mismatch')
+            require(origin.batch['definition']['preparation_options']['row_block_sessions']==options['row_block_sessions'],
+                    'Raw reuse row-block query plan mismatch')
+            by_spec={digest(f['fold_spec']):f for f in origin.batch['folds']}
+            reused=[]
+            for fold,_,_ in plans:
+                require(digest(fold) in by_spec,'Raw reuse fold/cutoff mismatch')
+                saved=by_spec[digest(fold)]; control=origin._parts(saved['input_manifest'],fold)
+                reused.append({'raw_parts':deepcopy(control['raw_parts']),
+                    'evaluation_parts':deepcopy(control['evaluation_parts'])})
+            origin.check()
+            stats['raw_reused_from_batch']=origin._batch_ref
         for i,(fold,training,inference) in enumerate(plans):
+            if reused is not None:
+                raw_outputs.append(reused[i]); stats['raw_cache_hits']+=len(reused[i]['raw_parts'])+len(reused[i]['evaluation_parts'])
+                continue
             chunks=[training[n:n+options['row_block_sessions']] for n in range(0,len(training),options['row_block_sessions'])]
             raw_outputs.append({'raw_parts':[None]*len(chunks),
                 **({'evaluation_parts':[]} if compact else {'evaluation':None})})
@@ -435,18 +472,20 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             _working(stats,len(spec['ordered_features'])*96+3072)
             def joined_rows():
                 selected=(r for r in nrows if r['valid'])
-                for f,r in zip(iter_feature_rows(feature,training_offsets),selected):
+                for f,r in zip(iter_feature_rows(feature,training_offsets,
+                        model_feature_selection=model_feature_selection),selected):
                     f.update(label=r['return'],raw_return=r['raw_return'],label_available_at=r['raw_available_at'],
                              normalized_available_at=r['label_available_at'])
                     yield f
-            binding={'training_rows_ref':digest_array_rows(joined_rows()),'training_row_count':len(training_offsets),
+            training_binding={'training_rows_ref':digest_array_rows(joined_rows()),'training_row_count':len(training_offsets),
                 'training_keys_digest':digest_array_rows([spec['universe'][off%width],
                     spec['feature_sessions'][off//width]] for off in training_offsets)}
             record={'fold_spec':deepcopy(fold),'raw_parts':parts,'normalized':norm,
-                'core_ref':core_ref,'cohort_ref':digest(cohort),'training_binding':binding}
+                'core_ref':core_ref,'cohort_ref':digest(cohort),'training_binding':training_binding}
             if compact:
                 from .stock_compact_controls import selectors_for
                 record.update(contract_version='stock_ml_fold_control_v1',evaluation_parts=raw_outputs[i]['evaluation_parts'])
+                if model_binding is not None: record['model_feature_selection_ref']=model_binding['model_feature_selection_ref']
                 selectors=selectors_for(record,spec,fd['row_index'],training_offsets)
                 record=seal(record,'fold_control_ref')
                 descriptor=write_part(cache/'fold-controls',record,'fold_control_ref')
@@ -463,12 +502,11 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
             store.release_payloads()
             # Preserve already verified overlap for the next full window;
             # set_feature_window trims only partitions outside that window.
-        _producer_feature_window(feature,[],stats)
+        if model_binding is None: _producer_feature_window(feature,[],stats)
         target.parent.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='.compact-batch-',dir=target.parent) as temporary:
             stage=Path(temporary)/'complete'; stage.mkdir()
-            common={k:deepcopy(spec[k]) for k in ('scope','snapshot','pit_policy','calendar','universe',
-                'catalog_ref','feature_selection','ordered_features')}
+            common=model_common(source_spec,model_binding)
             view=seal({'contract_version':'stock_ml_prepared_view_v3' if compact else 'stock_ml_prepared_view_v2',
                 'definition':common,'feature_view':feature.to_dict(),**({} if compact else {'fold_targets':records})},'prepared_view_ref')
             write_json(stage/'view.json',view)
@@ -483,6 +521,9 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
                     **({'fold_control':record['fold_control']} if compact else {}),
                     'fold_spec_ref':digest(record['fold_spec']),'selectors':selectors,
                     'core_result_refs':[record['core_ref']]},'input_ref')
+                if model_binding is not None:
+                    inputs=seal({**{k:v for k,v in inputs.items() if k!='input_ref'},
+                        'model_feature_selection_ref':model_binding['model_feature_selection_ref']},'input_ref')
                 folds.append({'input_manifest':inputs,'fold_spec':record['fold_spec']})
             batch={'contract_version':'stock_ml_batch_inputs_v4' if compact else 'stock_ml_batch_inputs_v3','definition':definition,'definition_ref':definition_ref,
                 'prepared_view':view_desc,'folds':folds,'status':'COMPLETE'}

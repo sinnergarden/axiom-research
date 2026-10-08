@@ -21,8 +21,12 @@ def expand_ranges(selector):
 
 def validate_input(fold, manifest, row_index, common):
     inputs=fold['input_manifest']; spec=fold['fold_spec']
+    binding=common.get('model_feature_selection')
+    extra=set() if binding is None else {'model_feature_selection_ref'}
     fields(inputs,{'contract_version','prepared_view','fold_control','fold_spec_ref','selectors',
-        'core_result_refs','input_ref'},'exact compact v4 saved inputs required'); sealed(inputs,'input_ref')
+        'core_result_refs','input_ref'}|extra,'exact compact v4 saved inputs required'); sealed(inputs,'input_ref')
+    require(inputs.get('model_feature_selection_ref')==(None if binding is None else binding['model_feature_selection_ref']),
+            'compact input model selection mismatch')
     require(inputs['contract_version']=='stock_ml_saved_inputs_v4' and inputs['fold_spec_ref']==digest(spec) and
         inputs['prepared_view']==manifest['prepared_view'] and type(inputs['core_result_refs']) is list and
         len(inputs['core_result_refs'])==1 and reference(inputs['core_result_refs'][0]),'compact v4 input linkage mismatch')
@@ -66,8 +70,12 @@ def selectors_for(record, spec, row_index, training_offsets):
 
 def validate_controls(fold, record, view, manifest, row_index):
     inputs=fold['input_manifest']; spec=fold['fold_spec']; common=view['definition']
+    binding=common.get('model_feature_selection')
+    extra=set() if binding is None else {'model_feature_selection_ref'}
     fields(record,{'contract_version','fold_spec','raw_parts','normalized','evaluation_parts',
-        'core_ref','cohort_ref','training_binding','fold_control_ref'},'exact fold control required')
+        'core_ref','cohort_ref','training_binding','fold_control_ref'}|extra,'exact fold control required')
+    require(record.get('model_feature_selection_ref')==(None if binding is None else binding['model_feature_selection_ref']),
+            'compact control model selection mismatch')
     sealed(record,'fold_control_ref')
     require(record['contract_version']=='stock_ml_fold_control_v1' and record['fold_spec']==spec and
         record['fold_control_ref']==inputs['fold_control']['fold_control_ref'],'fold control linkage mismatch')
