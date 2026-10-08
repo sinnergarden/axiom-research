@@ -192,6 +192,74 @@ class OwnerStub:
 
 
 class CompactEvaluationTests(unittest.TestCase):
+    def test_scope_filter_index_and_pin_checks_have_linear_operation_counts(self):
+        class CountedFolds(list):
+            iterations = 0
+            visits = 0
+            def __iter__(self):
+                self.iterations += 1
+                for fold in super().__iter__():
+                    self.visits += 1
+                    yield fold
+        with tempfile.TemporaryDirectory() as temp:
+            owner = OwnerStub(Path(temp)/'sources')
+            scope = {**owner.scope, 'sessions': [owner.days[0], owner.days[3]], 'universe': owner.universe[1:]}
+            scans, filters, fold_lists = [], [], []
+            read_manifest, join, check = StockMLBatchInputs.to_dict, compact._join, frozen._check_marks
+            def manifest(batch):
+                wire = read_manifest(batch); wire['folds'] = CountedFolds(wire['folds'])
+                fold_lists.append(wire['folds']); return wire
+            def observed_join(*args):
+                filters.append(args[-1]); return join(*args)
+            def observed_check(marks):
+                scans.append(set(marks)); return check(marks)
+            with patch.object(StockMLBatchInputs, 'to_dict', manifest), \
+                 patch.object(compact, '_join', observed_join), \
+                 patch.object(frozen, '_check_marks', observed_check), \
+                 patch('axiom_research.stock_matrix_folds.admit_stock_signal_evaluation_fold', owner.hook, create=True):
+                admitted, records, marks, _ = compact._admit_compact(owner.inputs, None, scope, owner.batch())
+            self.assertEqual(len(fold_lists), 1)
+            self.assertEqual((fold_lists[0].iterations, fold_lists[0].visits), (1, len(owner.manifest['folds'])))
+            expected = [{Path(path) for path, _ in owner.leases[item['path']].source_records}
+                for descriptors in owner.inputs.values() for item in descriptors]
+            self.assertEqual(scans, [pins for own in expected for pins in (own, own)] + [set(marks)])
+            self.assertEqual(sum(map(len, scans)), 2*sum(map(len, expected))+len(records))
+            self.assertEqual(len(filters), len(expected))
+            self.assertTrue(all(wanted is filters[0] for wanted in filters))
+            self.assertEqual(filters[0], (set(scope['universe']), set(scope['sessions'])))
+            self.assertEqual(set(admitted['labels']), {(s, d) for d in scope['sessions'] for s in scope['universe']})
+            print(json.dumps({'compact_operations': {'leases': len(expected), 'fold_index_passes': fold_lists[0].iterations,
+                'fold_index_visits': fold_lists[0].visits, 'scope_set_sizes': list(map(len, filters[0])),
+                'lease_pin_entries': sum(map(len, expected)), 'unique_pin_entries': len(records),
+                'consumer_stat_checks': sum(map(len, scans))}}))
+
+    def test_current_lease_pre_post_and_final_released_source_mutations_rejected(self):
+        for timing in ('before_consume', 'during_consume', 'after_release'):
+            with self.subTest(timing=timing), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp); owner = OwnerStub(root/'sources')
+                first = owner.inputs['a'][0]; original_join = compact._join
+                changed_path = Path(first['path']).parent/'booster.txt'
+                def observed_join(*args):
+                    result = original_join(*args)
+                    if timing == 'during_consume': changed_path.write_text('changed during consumption')
+                    return result
+                @contextmanager
+                def before(descriptor, *, batch):
+                    lease = owner.leases[descriptor['path']]; owner.assert_sources(lease)
+                    changed_path.write_text('changed after owner admission')
+                    yield lease
+                def after():
+                    if owner.calls == 5: changed_path.write_text('changed after first lease closed')
+                owner.changed = after if timing == 'after_release' else None
+                with patch.object(compact, '_join', side_effect=observed_join) as join, \
+                     patch('axiom_research.stock_matrix_folds.admit_stock_signal_evaluation_fold',
+                         before if timing == 'before_consume' else owner.hook, create=True):
+                    with self.assertRaisesRegex(ValueError, 'frozen evaluation file changed'):
+                        save_stock_signal_evaluation_inputs(owner.inputs, scope=owner.scope,
+                            destination=root/'inputs', batch=owner.batch())
+                    if timing == 'before_consume': join.assert_not_called()
+                self.assertEqual(owner.active, 0); self.assertFalse((root/'inputs').exists())
+
     def test_exact_all_years_and_single_read_zero_compute_hit(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); owner = OwnerStub(root/'sources'); ref = owner.freeze(root/'inputs')

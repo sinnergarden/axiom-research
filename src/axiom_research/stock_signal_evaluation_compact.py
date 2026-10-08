@@ -93,8 +93,8 @@ def _binding(spec, snapshot, label):
         'label_spec': spec, 'snapshot': snapshot, 'row': label})
 
 
-def _join(targets, inputs, fold_spec, common, scope, records, state):
-    wanted = {(s, d) for d in scope['sessions'] for s in scope['universe']}
+def _join(targets, inputs, fold_spec, common, scope, records, state, wanted):
+    wanted_securities, wanted_sessions = wanted
     selector = inputs['selectors']['evaluation_labels']; _verify_ref(selector, 'selector_ref')
     _require(selector == inputs['selectors']['inference'] and
         selector['target_refs'] == [item['header']['target_ref'] for item in targets], 'compact selector/targets mismatch')
@@ -112,7 +112,7 @@ def _join(targets, inputs, fold_spec, common, scope, records, state):
         for key, row in indexed.items():
             _target(row, key, common['calendar'], _instant(definition['cutoff']), 5)
             _require(row['source_refs'] == [definition['price_view']['price_view_ref']], 'compact row original source mismatch')
-            if key not in wanted: continue
+            if key[0] not in wanted_securities or key[1] not in wanted_sessions: continue
             binding = _binding(spec, common['snapshot'], row)
             _require(key not in state['labels'] or state['labels'][key] == row and state['leaves'][key] == binding,
                 'comparison compact Label value/source/clock conflict')
@@ -130,6 +130,12 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch):
     _require(callable(hook), 'compact owner admit_stock_signal_evaluation_fold interface required')
     _require(raw_label_input is None, 'compact evaluation requires owner-admitted evaluation Raw targets')
     manifest = batch.to_dict(); common = None; state = _target_state()
+    wanted = (set(scope['universe']), set(scope['sessions']))
+    folds_by_input = {}
+    for item in manifest['folds']:
+        ref = item['input_manifest']['input_ref']
+        _require(ref not in folds_by_input, 'duplicate compact batch fold input')
+        folds_by_input[ref] = item
     projected, metadata, refs, closures, records, marks = {}, {}, {}, {}, {}, {}
     for name, descriptors in signal_inputs.items():
         descriptors = descriptors if type(descriptors) is list else [descriptors]
@@ -140,11 +146,13 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch):
             with hook(descriptor, batch=batch) as lease:
                 pins = _sources_table(lease.source_records)
                 _require(set(lease.source_fingerprints) == set(pins), 'complete compact owner fingerprints required')
+                lease_marks = {}
                 for path, ref in pins.items():
                     _require(path not in records or records[path] == ref, 'conflicting compact source pin')
                     mark = tuple(lease.source_fingerprints[path]); p = Path(path)
                     _require(p not in marks or marks[p] == mark, 'compact source changed between leases')
-                    records[path] = ref; marks[p] = mark
+                    records[path] = ref; marks[p] = mark; lease_marks[p] = mark
+                _check_marks(lease_marks)
                 documents = lease.documents; fold = documents['fold.json']; model = documents['model.json']
                 features, signal = documents['feature-slice.json'], documents['predictions.json']
                 _require(set(documents) == {'manifest.json', 'fold.json', 'model.json', 'feature-slice.json', 'predictions.json'},
@@ -161,7 +169,8 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch):
                     _verify_ref(document, key)
                 inputs, spec = fold['definition']['input_manifest'], fold['definition']['fold_spec']
                 _verify_ref(inputs, 'input_ref')
-                _require(any(item['input_manifest'] == inputs and item['fold_spec'] == spec for item in manifest['folds']),
+                original = folds_by_input.get(inputs['input_ref'])
+                _require(original is not None and original['input_manifest'] == inputs and original['fold_spec'] == spec,
                     'compact Signal outside saved batch definition')
                 control = inputs['fold_control']
                 _require(pins.get(control['path']) == control['file_digest'], 'compact original fold control pin required')
@@ -178,7 +187,7 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch):
                 identity = {k: deepcopy(lease.common[k]) for k in ('snapshot', 'pit_policy', 'calendar', 'universe')}
                 _require(common is None or common == identity, 'comparison compact common scope mismatch')
                 common = identity
-                _require(common['calendar'] == scope['calendar'] and set(scope['universe']) <= set(common['universe']),
+                _require(common['calendar'] == scope['calendar'] and wanted[0] <= set(common['universe']),
                     'compact frozen axes mismatch')
                 days = features['prediction_sessions']; indexed = _grid(signal['rows'], common['universe'], days, 'session', 'compact Signal')
                 _require(previous is None or previous < days[0], 'weekly Signals must be ordered and disjoint')
@@ -192,7 +201,7 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch):
                     _require(key not in members or members[key] == own_members[key], 'weekly historical membership conflict')
                     clocks.extend([row['knowledge_cutoff'], feature_index[key]['knowledge_cutoff']])
                 rows.update(deepcopy(indexed)); members.update(own_members); prediction_features.update(own_features)
-                _join(lease.evaluation_targets, inputs, spec, common, scope, pins, state)
+                _join(lease.evaluation_targets, inputs, spec, common, scope, pins, state, wanted)
                 metadata[name].append({'signal_contract_version': signal['contract_version'],
                     'signal_run_ref': signal['signal_run_ref'], 'prediction_sessions': list(days),
                     'input_ref': inputs['input_ref'], 'fold_spec_ref': digest(spec), 'fold_ref': fold['fold_ref'],
@@ -203,7 +212,7 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch):
                 refs[name].append(signal['signal_run_ref'])
                 closures[name].append({'signal_input': deepcopy(descriptor), 'model_ref': model['model_ref'],
                     'feature_ref': features['feature_ref'], 'source_paths': sorted(pins)})
-                _check_marks(marks)
+                _check_marks(lease_marks)
             del lease, documents, fold, model, features, signal, indexed, feature_index, own_members, own_features, row
         projected[name] = {'rows': rows, 'members': members, 'prediction_features': prediction_features}
     targets = _finish_targets(state, scope)
