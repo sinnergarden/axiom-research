@@ -114,7 +114,7 @@ def build_stock_derived_signal(signal_plan,*,prediction_inputs,context,destinati
     return load_stock_derived_signal(target)
 
 
-def load_stock_derived_signal(path):
+def load_stock_derived_signal(path,*,limits=None,_shared_bytes=0):
     """Hash/ref-load frozen Core output and saved parents; never import Core.
 
     Original raw folds were fully admitted during build. This loader checks
@@ -122,7 +122,7 @@ def load_stock_derived_signal(path):
     signal arithmetic, training, prediction or an account.
     """
     path=Path(path).resolve()
-    with OwnedStore() as store:
+    with OwnedStore(limits,shared_bytes=_shared_bytes) as store:
         manifest=store.read_json({'path':str(path/'manifest.json')},key='content_digest')
         fields(manifest,{'contract_version','definition','signal_file_digest','signal_artifact','parent_inputs',
             'parent_files','content_digest'},'exact saved DerivedSignal manifest required')
@@ -179,4 +179,7 @@ def load_stock_derived_signal(path):
                     binding['model_ref'],binding['signal_run_ref'],binding['feature_ref']),
                 'DerivedSignal original fold/model/feature closure mismatch')
         store.check()
+        from .stock_compact_store import _size
+        store.reserve(_size([signal,manifest],maximum=store.maximum_matrix_bytes,
+            retained=store.shared_bytes+store.resident_bytes)*3+4096)
         return StockDerivedSignal(path,deepcopy(signal),deepcopy(manifest))

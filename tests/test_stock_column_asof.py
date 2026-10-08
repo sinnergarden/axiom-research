@@ -96,6 +96,78 @@ def forward_golden(start,end,*,endpoint_validity):
 
 
 class ColumnAsOfTests(unittest.TestCase):
+    def test_joint_ingress_rejects_before_json_decode_and_selects_raw_once(self):
+        from axiom_research import stock_signal_evaluation_derived as joint
+        from axiom_research import stock_signal_evaluation_projection as projection
+        from axiom_research.stock_derived_signal import load_stock_derived_signal
+        freeze=joint.save_stock_derived_signal_evaluation_inputs;checked=[]
+        def verify(raw,**kwargs):
+            with patch('axiom_research.stock_compact_store.json.loads',
+                side_effect=AssertionError('budget must reject before decoding')):
+                with self.assertRaisesRegex(ValueError,'byte budget'):
+                    freeze(raw,**{**kwargs,'destination':Path(kwargs['destination']).parent/'tiny-joint',
+                        'maximum_resident_bytes':1})
+                with self.assertRaisesRegex(ValueError,'byte budget'):
+                    load_stock_derived_signal(next(iter(kwargs['derived_inputs'].values()))[0],
+                        limits={'maximum_matrix_bytes':1,'maximum_parent_bytes':1})
+            saved=freeze(raw,**kwargs)
+            with patch.object(projection,'_select_inputs',side_effect=AssertionError('Raw mask must not be built twice')), \
+                patch.object(joint,'_select_inputs',wraps=joint._select_inputs) as selector:
+                projection._load_inputs(saved,kwargs['scope'])
+                self.assertEqual(selector.call_count,1)
+            low=replace(saved,metadata={'maximum_resident_bytes':1})
+            with patch('axiom_research.stock_compact_store.json.loads',side_effect=AssertionError('joint root decoded')):
+                with self.assertRaisesRegex(ValueError,'byte budget'):projection._load_inputs(low,kwargs['scope'])
+            checked.append(saved.artifact_id);return saved
+        with patch.object(joint,'save_stock_derived_signal_evaluation_inputs',side_effect=verify):
+            self.test_public_sequence_entry_and_actual_raw_evaluation()
+        self.assertEqual(len(checked),1)
+
+    def test_joint_sample_allocation_checks_shared_budget_before_selector(self):
+        from axiom_research import stock_signal_evaluation_derived as joint
+        from axiom_research.stock_signal_evaluation_projection import _load_inputs
+        from axiom_research.stock_compact_store import OwnedStore,_size
+        freeze=joint.save_stock_derived_signal_evaluation_inputs;checked=[]
+        def verify(raw,**kwargs):
+            saved=freeze(raw,**kwargs)
+            _,root,selected,admission=_load_inputs(saved,kwargs['scope'],include_admission=True)
+            with OwnedStore(joint._limits(root['maximum_resident_bytes'])) as store:
+                store.shared_bytes=_size([root,selected,admission])
+                # A caller has already retained the admitted inputs and leaves
+                # only 64 KiB for two sample tables, masks and sorting.
+                store.limits={**store.limits,'maximum_matrix_bytes':store.shared_bytes+65536}
+                with patch.object(joint,'_select_inputs',side_effect=AssertionError('unbudgeted sample allocation')):
+                    with self.assertRaisesRegex(ValueError,'byte budget'):
+                        joint._select_joint_inputs(admission,kwargs['scope'],store)
+            checked.append(saved.artifact_id);return saved
+        with patch.object(joint,'save_stock_derived_signal_evaluation_inputs',side_effect=verify):
+            self.test_public_sequence_entry_and_actual_raw_evaluation()
+        self.assertEqual(len(checked),1)
+
+    def test_joint_raw_shard_swap_after_staged_validation_blocks_publication(self):
+        from axiom_research import stock_signal_evaluation_derived as joint
+        freeze=joint.save_stock_derived_signal_evaluation_inputs;load=joint._load_joint_inputs;checked=[]
+        def verify(raw,**kwargs):
+            manifest=_read(raw.uri);descriptor=manifest['shards'][kwargs['scope']['sessions'][0]]
+            shard=Path(raw.uri).parent/descriptor['file'];original=shard.read_bytes();mutated=[]
+            def replace_shard(ref,scope,**options):
+                result=load(ref,scope,**options)
+                if options.get('_validate_only') and not mutated:
+                    shard.write_bytes(original+b' ');mutated.append(True)
+                return result
+            race=Path(kwargs['destination']).parent/'joint-publication-race'
+            try:
+                with patch.object(joint,'_load_joint_inputs',side_effect=replace_shard), \
+                    patch.object(joint.os,'rename',side_effect=AssertionError('changed Raw shard reached publication')):
+                    with self.assertRaisesRegex(ValueError,'frozen evaluation file changed'):
+                        freeze(raw,**{**kwargs,'destination':race})
+                self.assertEqual(mutated,[True]);self.assertFalse(list(race.glob('*/manifest.json')))
+            finally:shard.write_bytes(original)
+            checked.append(True);return freeze(raw,**kwargs)
+        with patch.object(joint,'save_stock_derived_signal_evaluation_inputs',side_effect=verify):
+            self.test_public_sequence_entry_and_actual_raw_evaluation()
+        self.assertEqual(checked,[True])
+
     def test_public_second_fold_core_failure_releases_warm_normalization_vectors(self):
         from axiom_research import open_stock_ml_batch_preparation
         module=ModuleType('axiom_data');module.QuerySpec=Query

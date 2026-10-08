@@ -53,9 +53,26 @@ def _check_marks(marks):
         _require(_mark(path.stat()) == mark, 'frozen evaluation file changed: ' + str(path))
 
 
-def _read_checked(path, expected=None, *, marks=None):
+def _read_checked(path, expected=None, *, marks=None,_budget=None):
     """Hash and parse the exact buffer consumed, including duplicate-key checks."""
     path = Path(path)
+    if _budget is not None:
+        value=None
+        try:
+            from .stock_compact_store import _size
+            descriptor={'path':str(path.resolve()),**({} if expected is None else {'file_digest':expected})}
+            # OwnedStore reserves the byte buffer and JSON workspace before
+            # decoding. Charge the returned graph before its caller projects it.
+            value=_budget.read_json(descriptor,keep=False)
+            charge=_size(value,maximum=_budget.maximum_matrix_bytes,
+                retained=_budget.shared_bytes+_budget.resident_bytes+_budget.lease_bytes)
+            _budget.reserve(charge);_budget.shared_bytes+=charge
+            if marks is not None:
+                before=_budget.marks[descriptor['path']]
+                _require(path not in marks or marks[path]==before,'frozen evaluation file changed between reads')
+                marks[path]=before
+            return value,_budget.hashes[descriptor['path']]
+        finally:value=None
     with path.open('rb') as stream:
         before = _mark(os.fstat(stream.fileno()))
         payload = stream.read()
@@ -352,14 +369,21 @@ def _verify_root(root, ref, scope):
     return by_day
 
 
-def _load_inputs(input_ref, scope, *, marks=None, include_admission=False, _validate_only=False):
+def _load_inputs(input_ref, scope, *, marks=None, include_admission=False, _validate_only=False,
+    _admission_only=False,_budget=None):
     _require(not (_validate_only and include_admission), 'validation-only input has no row projection')
     ref = _input_ref(input_ref); scope = _scope(scope)
     if ref.artifact_contract_version==DERIVED_INPUT_VERSION:
         from .stock_signal_evaluation_derived import _load_joint_inputs
         return _load_joint_inputs(ref,scope,marks=marks,include_admission=include_admission,_validate_only=_validate_only)
     marks = {} if marks is None else marks
-    root, _ = _read_checked(ref.uri, ref.content_digest, marks=marks)
+    root, _ = _read_checked(ref.uri, ref.content_digest, marks=marks,_budget=_budget)
+    if _budget is not None:
+        # Root identity/metadata validation copies its small closure and builds
+        # per-day lookups. The decoded root is already charged by _read_checked.
+        from .stock_compact_store import _size
+        _budget.reserve(_size(root,maximum=_budget.maximum_matrix_bytes,
+            retained=_budget.shared_bytes)*4+65536)
     metadata_by_day = _verify_root(root, ref, scope)
     names, base = root['signal_order'], root['scope']
     shared_members, labels = {}, {}
@@ -372,9 +396,20 @@ def _load_inputs(input_ref, scope, *, marks=None, include_admission=False, _vali
         from .stock_signal_evaluation_matrix import _matrix_label_context
         label_context = _matrix_label_context(root)
     raw_cutoff = None if matrix else _instant(raw['source_context']['derivation']['decision_cutoff'])
+    if _budget is not None:
+        from .stock_compact_store import _size
+        _budget.shared_bytes+=_size([metadata_by_day,positions,label_context if matrix else None],
+            maximum=_budget.maximum_matrix_bytes,retained=_budget.shared_bytes)
+        _budget.reserve(0)
     for day in scope['sessions']:
         descriptor = root['shards'][day]
-        shard, _ = _read_checked(Path(ref.uri).parent/descriptor['file'], descriptor['file_digest'], marks=marks)
+        shard, _ = _read_checked(Path(ref.uri).parent/descriptor['file'], descriptor['file_digest'], marks=marks,_budget=_budget)
+        if _budget is not None:
+            # Charge the decoded date and row-index/member wrappers before
+            # allocating them. Earlier dates already belong to the projection.
+            charge=len(base['universe'])*(512+256*len(names))+4096
+            workspace=_size(shard,maximum=_budget.maximum_matrix_bytes,retained=_budget.shared_bytes)*2
+            _budget.reserve(charge+workspace);_budget.shared_bytes+=charge
         _require(set(shard) == {'contract_version', 'session', 'rows'} and
             shard['contract_version'] == ('stock_signal_evaluation_date_v4' if ref.artifact_contract_version==COLUMN_INPUT_VERSION else
                 'stock_signal_evaluation_date_v3' if _compact_input(ref.artifact_contract_version) else
@@ -454,8 +489,15 @@ def _load_inputs(input_ref, scope, *, marks=None, include_admission=False, _vali
         # The identical root/date/row/source/clock checks above ran. Freezing
         # needs no second full OOS row dictionary or derived sample mask.
         return ref, root, None
+    if _budget is not None:
+        charge=_size(root['admission_receipt'],maximum=_budget.maximum_matrix_bytes,
+            retained=_budget.shared_bytes)*2+65536
+        _budget.reserve(charge);_budget.shared_bytes+=charge
     admission = {'projected': projected, 'labels': labels, 'raw': raw,
         'refs': {name: root['signal_refs'][name] for name in names}, 'closures': _expand_closure(root['admission_receipt'])}
+    if _admission_only:
+        _require(include_admission,'admission-only read requires the original projection')
+        return ref,root,None,admission
     result = (ref, root, _select_inputs(admission, scope))
     return (*result, admission) if include_admission else result
 
@@ -688,7 +730,12 @@ def evaluate_stock_signal_input_periods(input_ref, *, scope, destination):
     result = {'all': _evaluate_prepared((ref, root, admitted), destination, marks), 'by_year': {}}
     for year in sorted({day[:4] for day in admitted['scope']['sessions']}):
         selected_scope = {**admitted['scope'], 'sessions': [day for day in admitted['scope']['sessions'] if day[:4] == year]}
-        selected = _select_inputs(admission, selected_scope)
+        if ref.artifact_contract_version==DERIVED_INPUT_VERSION:
+            from .stock_signal_evaluation_derived import _select_joint_period
+            selected=None
+            selected=_select_joint_period(admission,selected_scope,maximum=root['maximum_resident_bytes'],
+                retained_graph=[root,admission,admitted,result])
+        else:selected = _select_inputs(admission, selected_scope)
         result['by_year'][year] = _evaluate_prepared((ref, root, selected), destination, marks)
     _check_marks(marks)
     return result

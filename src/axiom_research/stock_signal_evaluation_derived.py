@@ -12,7 +12,7 @@ import tempfile
 from .api import semantic_identity,to_dict
 from .contracts import ArtifactRef
 from .stock_artifacts import digest,file_digest,write_json,_verify_ref
-from .stock_compact_store import fields,_size,reference
+from .stock_compact_store import OwnedStore,fields,_size,reference
 from .stock_fold_inputs import require
 from .stock_label_contracts import _instant,_finite
 from .stock_signal_evaluation_inputs import _scope,_select_inputs
@@ -20,6 +20,42 @@ from .stock_signal_evaluation_inputs import _scope,_select_inputs
 VERSION='stock_signal_evaluation_inputs_v5'
 _FIELDS={'contract_version','input_id','scope','source_input_ref','signal_order',
     'signal_refs','signal_lineage','derived_inputs','admission_receipt','maximum_resident_bytes'}
+
+
+def _limits(maximum):
+    require(type(maximum) is int and maximum>0,'positive joint input budget required')
+    return {'maximum_matrix_bytes':maximum,'maximum_parent_bytes':maximum}
+
+
+def _measure(store,value):
+    return _size(value,maximum=store.maximum_matrix_bytes,
+        retained=store.shared_bytes+store.resident_bytes+store.lease_bytes)
+
+
+def _select_joint_inputs(admission,scope,store):
+    """Budget the existing selector's row tables, masks and sort workspace.
+
+    This is an allocation bound, not a changed statistical sample. Two tables
+    coexist (common/native), together with key tuples, masks and coverage.
+    """
+    selected=None
+    try:
+        count=len(scope['sessions'])*len(scope['universe']);signals=len(admission['projected'])
+        lineage_bytes=_measure(store,admission.get('signal_lineage',{}))
+        allocation=count*(2048+1024*signals)+8192*len(scope['sessions'])*signals+lineage_bytes*3+65536
+        store.reserve(allocation)
+        selected=_select_inputs(admission,scope)
+        charge=_measure(store,selected)
+        store.reserve(charge);store.shared_bytes+=charge
+        return selected
+    finally:selected=admission=scope=None
+
+
+def _select_joint_period(admission,scope,*,maximum,retained_graph):
+    """The yearly selector shares the already resident all-session graph."""
+    with OwnedStore(_limits(maximum)) as store:
+        store.shared_bytes=_measure(store,retained_graph)
+        return _select_joint_inputs(admission,scope,store)
 
 
 def _lineage(signal):
@@ -68,7 +104,7 @@ def _shape(root,ref,scope):
     return source
 
 
-def _derived_rows(signal,base,scope,raw_admission,seen):
+def _derived_rows(signal,base,scope,raw_admission,seen,*,project=True):
     """Validate frozen stage/parents/keys/clocks, without replaying SignalPlan."""
     try:
         from .stock_compact_store import sealed
@@ -114,55 +150,67 @@ def _derived_rows(signal,base,scope,raw_admission,seen):
             if row['session'] in wanted and row['security_id'] in securities:
                 require(raw_admission['projected'][next(iter(raw_admission['projected']))]['members'][key]['member']==row['member'],
                     'joint Derived differs from frozen historical membership')
-                projected[key]=deepcopy(row)
+                if project:projected[key]=deepcopy(row)
         return projected
     finally:
         signal=saved=base=metadata=parents=row=rows=current=projected=raw_admission=admission=root=selected=closures=lineage=result=scope=derived_inputs=None
 
 
-def _load_joint_inputs(ref,scope,*,marks=None,include_admission=False,_validate_only=False):
+def _load_joint_inputs(ref,scope,*,marks=None,include_admission=False,_validate_only=False,_shared_bytes=0):
     try:
         from .stock_signal_evaluation_projection import _read_checked,_load_inputs,_check_marks
         marks={} if marks is None else marks
-        root,_=_read_checked(ref.uri,ref.content_digest,marks=marks);source=_shape(root,ref,scope)
-        source_ref,base,selected,admission=_load_inputs(source,scope,marks=marks,include_admission=True)
-        source_ref=selected=None
-        resident=_size([root,base,admission],maximum=root['maximum_resident_bytes'])
-        require(root['scope']==base['scope'] and
-            root['signal_order']==[*base['signal_order'],*root['derived_inputs']] and
-            all(root['signal_refs'][name]==base['signal_refs'][name] for name in base['signal_order']),
-            'joint original raw axes, scope or refs mismatch')
-        require(all(root['signal_lineage'][name]==[_lineage(item) for item in base['signal_metadata'][name]]
-            for name in base['signal_order']),'joint original raw stage lineage mismatch')
-        for name,descriptors in root['derived_inputs'].items():
-            require(type(name) is str and bool(name) and type(descriptors) is list and bool(descriptors),
-                'joint named original Derived folds required')
-            rows={};seen=set();refs=[];closures=[];lineage=[]
-            for descriptor in descriptors:
-                fields(descriptor,{'file','file_digest','signal_run_ref'},'exact frozen Derived descriptor required')
-                require(reference(descriptor['signal_run_ref']) and descriptor['file']==descriptor['signal_run_ref'][7:]+'.json',
-                    'joint frozen Derived locator mismatch')
-                signal,_=_read_checked(Path(ref.uri).parent/descriptor['file'],descriptor['file_digest'],marks=marks)
-                signal_bytes=_size(signal)
-                require(resident+signal_bytes*3+65536<=root['maximum_resident_bytes'],
-                    'joint current fold projection exceeds the shared byte budget')
-                require(signal['signal_run_ref']==descriptor['signal_run_ref'],'joint frozen Derived identity mismatch')
-                current=_derived_rows(signal,base,scope,admission,seen)
-                resident+=_size(current)+65536
-                rows.update(current);current=None;refs.append(signal['signal_run_ref'])
-                lineage.append(_lineage(signal))
-                closures.append({'signal_input':deepcopy(descriptor),'parent_signal_refs':deepcopy(signal['parent_signal_refs']),
-                    'signal_plan_ref':signal['signal_plan_ref'],'score_ref':signal['score_ref'],'signal_stage':signal['signal_stage']})
-            require(refs==root['signal_refs'][name] and lineage==root['signal_lineage'][name],
-                'joint frozen Derived ref order or lineage mismatch')
-            admission['projected'][name]={'rows':rows,'members':next(iter(admission['projected'].values()))['members']}
-            admission['refs'][name]=refs;admission['closures'][name]=closures
-            require(resident<=root['maximum_resident_bytes'],'joint cumulative projection exceeds the shared byte budget')
-        _check_marks(marks)
-        admission['signal_lineage']=deepcopy(root['signal_lineage'])
-        if _validate_only:return ref,root,None
-        result=(ref,root,_select_inputs(admission,scope))
-        return (*result,admission) if include_admission else result
+        # The read hint is checked against the digest-bound root after decoding.
+        # It supplies a limit before even the manifest can allocate JSON objects.
+        maximum=ref.metadata.get('maximum_resident_bytes')
+        with OwnedStore(_limits(maximum),shared_bytes=_shared_bytes) as store:
+            root,_=_read_checked(ref.uri,ref.content_digest,marks=marks,_budget=store)
+            store.reserve(_measure(store,root)*4+65536)
+            source=_shape(root,ref,scope)
+            require(maximum==root['maximum_resident_bytes'],'joint input read budget differs from frozen root')
+            source_ref,base,selected,admission=_load_inputs(source,scope,marks=marks,include_admission=True,
+                _admission_only=True,_budget=store)
+            source_ref=selected=None
+            require(root['scope']==base['scope'] and
+                root['signal_order']==[*base['signal_order'],*root['derived_inputs']] and
+                all(root['signal_refs'][name]==base['signal_refs'][name] for name in base['signal_order']),
+                'joint original raw axes, scope or refs mismatch')
+            require(all(root['signal_lineage'][name]==[_lineage(item) for item in base['signal_metadata'][name]]
+                for name in base['signal_order']),'joint original raw stage lineage mismatch')
+            for name,descriptors in root['derived_inputs'].items():
+                require(type(name) is str and bool(name) and type(descriptors) is list and bool(descriptors),
+                    'joint named original Derived folds required')
+                rows={};seen=set();refs=[];closures=[];lineage=[]
+                for descriptor in descriptors:
+                    fields(descriptor,{'file','file_digest','signal_run_ref'},'exact frozen Derived descriptor required')
+                    require(reference(descriptor['signal_run_ref']) and descriptor['file']==descriptor['signal_run_ref'][7:]+'.json',
+                        'joint frozen Derived locator mismatch')
+                    before=store.shared_bytes
+                    signal,_=_read_checked(Path(ref.uri).parent/descriptor['file'],descriptor['file_digest'],marks=marks,_budget=store)
+                    signal_bytes=store.shared_bytes-before
+                    # Current fold validation, copied rows, duplicate keys and
+                    # lineage coexist with the already charged Raw projection.
+                    store.reserve(signal_bytes*4+65536)
+                    require(signal['signal_run_ref']==descriptor['signal_run_ref'],'joint frozen Derived identity mismatch')
+                    current=_derived_rows(signal,base,scope,admission,seen,project=not _validate_only)
+                    closures.append({'signal_input':deepcopy(descriptor),'parent_signal_refs':deepcopy(signal['parent_signal_refs']),
+                        'signal_plan_ref':signal['signal_plan_ref'],'score_ref':signal['score_ref'],'signal_stage':signal['signal_stage']})
+                    refs.append(signal['signal_run_ref']);lineage.append(_lineage(signal))
+                    charge=_measure(store,[current,closures[-1],lineage[-1]])+len(signal['rows'])*256+4096
+                    store.reserve(charge);store.shared_bytes+=charge
+                    rows.update(current);current=signal=None
+                    store.shared_bytes-=signal_bytes
+                require(refs==root['signal_refs'][name] and lineage==root['signal_lineage'][name],
+                    'joint frozen Derived ref order or lineage mismatch')
+                admission['projected'][name]={'rows':rows,'members':next(iter(admission['projected'].values()))['members']}
+                admission['refs'][name]=refs;admission['closures'][name]=closures
+            _check_marks(marks)
+            if _validate_only:return ref,root,None
+            store.reserve(_measure(store,root['signal_lineage'])*3+4096)
+            admission['signal_lineage']=deepcopy(root['signal_lineage'])
+            store.shared_bytes+=_measure(store,admission['signal_lineage'])
+            result=(ref,root,_select_joint_inputs(admission,scope,store))
+            return (*result,admission) if include_admission else result
     finally:
         signal=saved=base=metadata=parents=row=rows=current=projected=raw_admission=admission=root=selected=closures=lineage=result=scope=derived_inputs=None
 
@@ -177,32 +225,46 @@ def save_stock_derived_signal_evaluation_inputs(raw_input_ref,*,derived_inputs,s
         from axiom_engine.core import SignalFrame
         scope=_scope(scope);ref=_input_ref(raw_input_ref);marks={}
         require(ref.artifact_contract_version=='stock_signal_evaluation_inputs_v4','original frozen column OOS input required')
-        base,_=_read_checked(ref.uri,ref.content_digest,marks=marks);_verify_root(base,ref,scope)
+        limits=_limits(maximum_resident_bytes)
+        with OwnedStore(limits) as store:
+            base,_=_read_checked(ref.uri,ref.content_digest,marks=marks,_budget=store)
+            store.reserve(_measure(store,base)*4+65536);_verify_root(base,ref,scope)
+            retained=store.shared_bytes
         require(scope==base['scope'] and type(derived_inputs) is dict and bool(derived_inputs) and
             not set(derived_inputs)&set(base['signal_order']),'joint full frozen scope and distinct Derived names required')
-        require(type(maximum_resident_bytes) is int and maximum_resident_bytes>0,'positive joint input budget required')
         destination=Path(destination).resolve();destination.mkdir(parents=True,exist_ok=True)
         sources={};descriptors={};refs=deepcopy(base['signal_refs'])
         lineage={name:[_lineage(item) for item in items] for name,items in base['signal_metadata'].items()}
-        with tempfile.TemporaryDirectory(prefix='.joint-signal-inputs-',dir=destination) as temporary:
+        with OwnedStore(limits,shared_bytes=retained) as store, \
+            tempfile.TemporaryDirectory(prefix='.joint-signal-inputs-',dir=destination) as temporary:
+            store.shared_bytes+=_measure(store,[refs,lineage])
             stage=Path(temporary)/'complete';stage.mkdir()
             for name,paths in derived_inputs.items():
                 require(type(name) is str and bool(name) and type(paths) is list and bool(paths),'named Derived fold paths required')
                 descriptors[name]=[];refs[name]=[];lineage[name]=[]
                 for path in paths:
-                    saved=load_stock_derived_signal(path);signal=saved.to_dict()
-                    _size(signal,maximum=maximum_resident_bytes,retained=_size([base,descriptors,refs,sources]))
+                    saved=load_stock_derived_signal(path,limits=limits,_shared_bytes=store.shared_bytes)
+                    # The loader already owns isolated validated copies. Avoid
+                    # the public to_dict/identity deep copies inside this owner.
+                    signal=saved._signal;signal_ref=signal['signal_run_ref']
+                    signal_bytes=_measure(store,[signal,saved._manifest])
+                    store.reserve(signal_bytes*5+65536)
+                    store.shared_bytes+=signal_bytes
                     validate_derived_signal(SignalFrame.from_dict(signal))
                     for source,expected in {**saved._manifest['parent_files'],
                         str(saved.path/'signal.json'):saved._manifest['signal_file_digest'],
                         str(saved.path/'manifest.json'):file_digest(saved.path/'manifest.json')}.items():
                         require(source not in sources or sources[source]==expected,'conflicting joint original source pin')
                         sources[source]=expected
-                    filename=saved.identity[7:]+'.json';write_json(stage/filename,signal)
+                    filename=signal_ref[7:]+'.json';write_json(stage/filename,signal)
                     descriptors[name].append({'file':filename,'file_digest':file_digest(stage/filename),
-                        'signal_run_ref':saved.identity});refs[name].append(saved.identity)
+                        'signal_run_ref':signal_ref});refs[name].append(signal_ref)
                     lineage[name].append(_lineage(signal))
+                    charge=_measure(store,[descriptors[name][-1],lineage[name][-1],saved._manifest['parent_files']])+4096
+                    store.reserve(charge);store.shared_bytes+=charge
                     saved=signal=None
+                    store.shared_bytes-=signal_bytes
+            store.reserve(_measure(store,[base,descriptors,refs,sources,lineage])*4+65536)
             receipt={'contract_version':'stock_signal_evaluation_admission_v5','source_records':[
                 {'path':path,'file_digest':sources[path]} for path in sorted(sources)],
                 'validation_sources':{Path(__file__).name:file_digest(__file__)}}
@@ -212,17 +274,25 @@ def save_stock_derived_signal_evaluation_inputs(raw_input_ref,*,derived_inputs,s
                 'signal_lineage':lineage,'admission_receipt':receipt,'maximum_resident_bytes':maximum_resident_bytes}
             root['input_id']=_identity(root);write_json(stage/'manifest.json',root)
             staged=ArtifactRef(artifact_type='StockSignalEvaluationInputs',artifact_id=root['input_id'],
-                artifact_contract_version=VERSION,content_digest=file_digest(stage/'manifest.json'),uri=str(stage/'manifest.json'))
-            _load_joint_inputs(staged,scope,_validate_only=True)
+                artifact_contract_version=VERSION,content_digest=file_digest(stage/'manifest.json'),uri=str(stage/'manifest.json'),
+                metadata={'maximum_resident_bytes':maximum_resident_bytes})
+            _load_joint_inputs(staged,scope,marks=marks,_validate_only=True,_shared_bytes=store.shared_bytes)
             for path,expected in sources.items():require(file_digest(path)==expected,'joint original source changed during freezing')
-            _check_marks(marks);target=destination/root['input_id'][7:]
+            target=destination/root['input_id'][7:]
             final=ArtifactRef(artifact_type=staged.artifact_type,artifact_id=staged.artifact_id,
-                artifact_contract_version=VERSION,content_digest=staged.content_digest,uri=str(target/'manifest.json'))
-            if target.exists():_load_joint_inputs(final,scope,_validate_only=True);return final
+                artifact_contract_version=VERSION,content_digest=staged.content_digest,uri=str(target/'manifest.json'),
+                metadata=staged.metadata)
+            if target.exists():
+                _load_joint_inputs(final,scope,marks=marks,_validate_only=True,_shared_bytes=store.shared_bytes)
+                _check_marks(marks);return final
+            # This is the same mark table that admitted every Raw date shard,
+            # the original manifest and each frozen Derived copy above.
+            _check_marks(marks)
             try:os.rename(stage,target)
             except OSError:
                 if not target.exists():raise
-                _load_joint_inputs(final,scope,_validate_only=True)
+                _load_joint_inputs(final,scope,marks=marks,_validate_only=True,_shared_bytes=store.shared_bytes)
+                _check_marks(marks)
             return final
     finally:
         signal=saved=base=metadata=parents=row=rows=current=projected=raw_admission=admission=root=selected=closures=lineage=result=scope=derived_inputs=None
@@ -230,8 +300,10 @@ def save_stock_derived_signal_evaluation_inputs(raw_input_ref,*,derived_inputs,s
 
 def _audit_joint_input(ref):
     from .stock_signal_evaluation_projection import _read_checked,_audit_input
-    root,_=_read_checked(ref.uri,ref.content_digest)
-    _load_joint_inputs(ref,_scope(root['scope']),_validate_only=True)
+    with OwnedStore(_limits(ref.metadata.get('maximum_resident_bytes'))) as store:
+        root,_=_read_checked(ref.uri,ref.content_digest,_budget=store)
+        scope=_scope(root['scope'])
+    _load_joint_inputs(ref,scope,_validate_only=True)
     _audit_input(root['source_input_ref'])
     for row in root['admission_receipt']['source_records']:
         require(file_digest(row['path'])==row['file_digest'],'joint original Derived source differs from frozen admission')
