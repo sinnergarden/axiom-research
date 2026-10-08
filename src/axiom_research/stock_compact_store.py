@@ -10,6 +10,7 @@ from weakref import WeakKeyDictionary
 from zoneinfo import ZoneInfo
 import json
 import os
+import sys
 import time
 
 from .stock_artifacts import digest
@@ -22,6 +23,7 @@ DEFAULT_LIMITS = {'maximum_source_bytes':8*1024**3,
                   'maximum_parent_bytes':64*1024**2}
 _TOKEN = object()
 _VIEWS = WeakKeyDictionary()
+_ADMISSION_CLOCK_CACHE_ENTRIES = 1024
 
 
 def limits(value=None):
@@ -381,6 +383,74 @@ def load_stock_feature_view(path, *, limits=None, residency="eager"):
         store.close(); raise
 
 
+def _validate_feature_cells(value, group, rows):
+    """Validate every cell with block-local clock reuse and part temporaries."""
+    import numpy as np
+    store=value['store']; count=len(rows)
+    largest=max(len(part['columns']) for part, _ in group)
+    # K vector, part masks/clocks, predicate temporaries and position headers.
+    # Cache growth is reserved separately before parsing/inserting each key.
+    workspace=count*32+largest*256+count*largest*16+4096
+    cache={}; cache_bytes=0
+    cutoffs=meta_flags=meta_present=meta_clock=arrays=part=row=None
+
+    def parsed(text):
+        nonlocal cache_bytes
+        try:
+            require(type(text) is str,'Feature clock must be an exact aware string')
+            result=cache.get(text)
+            if result is not None:
+                store.metrics['feature_clock_cache_hits']=store.metrics.get('feature_clock_cache_hits',0)+1
+                return result
+            if len(cache)==_ADMISSION_CLOCK_CACHE_ENTRIES:
+                cache.clear(); cache_bytes=0
+            charge=sys.getsizeof(text)+256  # key/int plus conservative map growth
+            store.reserve(workspace+cache_bytes+charge)
+            result=instant_us(text)  # Cache only a successfully parsed aware clock.
+            cache[text]=result; cache_bytes+=charge
+            store.metrics['feature_clock_parse_calls']=store.metrics.get('feature_clock_parse_calls',0)+1
+            store.metrics['feature_clock_cache_max_entries']=max(
+                store.metrics.get('feature_clock_cache_max_entries',0),len(cache))
+            return result
+        finally:
+            text=None
+
+    try:
+        store.reserve(workspace)
+        cutoffs=np.empty(count,dtype='<i8')
+        for i,row in enumerate(rows): cutoffs[i]=parsed(row['knowledge_cutoff'])
+        for part,arrays in group:
+            positions=[value['column_positions'][column] for column in part['columns']]
+            shape=(count,len(positions))
+            meta_flags=np.empty(shape,dtype='?'); meta_present=np.empty(shape,dtype='?')
+            meta_clock=np.empty(shape,dtype='<i8')
+            for i,row in enumerate(rows):
+                for j,k in enumerate(positions):
+                    flag=row['validity'][k]; at=row['availability'][k]
+                    require(type(flag) is bool,'Feature buffer/metadata clock or validity mismatch')
+                    meta_flags[i,j]=flag; meta_present[i,j]=at is not None
+                    meta_clock[i,j]=0 if at is None else parsed(at)
+            require(bool((meta_flags==arrays['value_validity']).all()) and
+                    bool((meta_present==arrays['available_at_validity']).all()) and
+                    bool(((~meta_present)|(meta_clock==arrays['available_at_utc_us'])).all()),
+                    'Feature buffer/metadata clock or validity mismatch')
+            require(bool(np.isfinite(arrays['values']).all()),'Feature physical value must be finite')
+            require(bool(((arrays['value_validity']!=0)|(arrays['values']==0.0)).all()),
+                    'Feature null physical value must be zero')
+            require(bool(((arrays['available_at_validity']!=0)|(arrays['available_at_utc_us']==0)).all()),
+                    'Feature null physical clock must be zero')
+            require(bool(((~meta_present)|(arrays['available_at_utc_us']<=cutoffs[:,None])).all()),
+                    'Feature field exceeds its original cutoff')
+            store.metrics['feature_validation_array_calls']=store.metrics.get('feature_validation_array_calls',0)+1
+            meta_flags=meta_present=meta_clock=None
+    finally:
+        # Even retained validation tracebacks must release cache/work arrays
+        # before the caller credits released Feature buffers.
+        cache.clear(); cache=None
+        cutoffs=meta_flags=meta_present=meta_clock=arrays=part=row=None
+        value=group=rows=store=None
+
+
 def _admit_feature_block(value, block):
     if block['parts'] is not None: return
     import numpy as np
@@ -402,22 +472,7 @@ def _admit_feature_block(value, block):
                     'Feature row key/cutoff/member mismatch')
             require(len(row['validity'])==len(row['availability'])==len(row['reasons'])==len(columns),
                     'Feature row metadata width mismatch')
-            row['values']=[None]*len(columns)
-        for part,arrays in group:
-            for j,column in enumerate(part['columns']):
-                k=value['column_positions'][column]
-                for i,row in enumerate(rows):
-                    flag=bool(arrays['value_validity'][i,j]); at=row['availability'][k]
-                    require(row['validity'][k] is flag and bool(arrays['available_at_validity'][i,j]) is (at is not None) and
-                            (at is None or int(arrays['available_at_utc_us'][i,j])==instant_us(at)),
-                            'Feature buffer/metadata clock or validity mismatch')
-                    cell=float(arrays['values'][i,j]); require(np.isfinite(cell),'Feature physical value must be finite')
-                    require(flag or cell==0.0,'Feature null physical value must be zero')
-                    require(at is not None or int(arrays['available_at_utc_us'][i,j])==0,
-                            'Feature null physical clock must be zero')
-                    row['values'][k]=cell if flag else None
-                    require(at is None or _instant(at)<=_instant(row['knowledge_cutoff']),
-                            'Feature field exceeds its original cutoff')
+        _validate_feature_cells(value,group,rows)
         compact=_CompactRows(rows,len(columns),np)
         # Reduction happens once per admitted block, never one NumPy temporary
         # per eligibility row. Physical finiteness was checked above.
