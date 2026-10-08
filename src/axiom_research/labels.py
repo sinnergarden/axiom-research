@@ -144,14 +144,17 @@ def _query_context(ctx: dict, calendar: tuple[str, ...]) -> tuple[dict, tuple[st
 
 
 def _keyed(items: Any, expected: set[tuple[str, str]], label: str) -> dict:
-    _require(isinstance(items, list), "missing " + label)
-    indexed = {}
-    for item in items:
-        _require(isinstance(item, dict), "malformed " + label)
-        key = item.get("security_id"), item.get("session")
-        _require(key in expected and key not in indexed, "duplicate/unexpected " + label + " key")
-        indexed[key] = item
-    return indexed
+    try:
+        _require(isinstance(items, list), "missing " + label)
+        indexed = {}
+        for item in items:
+            _require(isinstance(item, dict), "malformed " + label)
+            key = item.get("security_id"), item.get("session")
+            _require(key in expected and key not in indexed, "duplicate/unexpected " + label + " key")
+            indexed[key] = item
+        return indexed
+    finally:
+        items = expected = item = key = indexed = None
 
 
 def _endpoint(rows: dict, metadata: dict, key: tuple[str, str], field: str,
@@ -189,7 +192,33 @@ def _endpoint(rows: dict, metadata: dict, key: tuple[str, str], field: str,
     return float(value), clocks, None
 
 
-def _forward_rows(records, field_meta, ctx, *, calendar, features, horizon_sessions, source_ref):
+def _compile_forward_index(records, field_meta, ctx, calendar, *, parsed_query=None):
+    """Compile one already-selected domain; never select another revision."""
+    keys = indexed = metadata = None
+    try:
+        q, securities, anchor, cutoff = (parsed_query if parsed_query is not None else
+                                         _query_context(ctx, calendar))
+        keys = {(security, session) for security in securities for session in q["sessions"]}
+        indexed = _keyed(records, keys, "label record")
+        metadata = {}
+        for field in ("open", "close"):
+            definition = field_meta.get(field) or {}
+            _require(isinstance(definition, dict), "malformed " + field + " metadata")
+            metadata[field] = _keyed(definition.get("by_key", []), keys, field + " provenance")
+        return dict(securities=securities, anchor=anchor, cutoff=cutoff, indexed=indexed,
+                    metadata=metadata, positions={session: i for i, session in enumerate(calendar)})
+    except BaseException:
+        if indexed is not None: indexed.clear()
+        if metadata is not None:
+            for value in metadata.values(): value.clear()
+            metadata.clear()
+        raise
+    finally:
+        records = field_meta = ctx = keys = indexed = metadata = definition = None
+
+
+def _forward_rows(records, field_meta, ctx, *, calendar, features, horizon_sessions, source_ref,
+                  _domain=None):
     """The single Raw operator for dynamic and compact cached outcomes.
 
     Storage identities are supplied by the owner; arithmetic, null precedence,
@@ -198,37 +227,43 @@ def _forward_rows(records, field_meta, ctx, *, calendar, features, horizon_sessi
     _require(type(horizon_sessions) is int and horizon_sessions > 0,
              "horizon_sessions must be a positive integer")
     _require(set(features) <= set(calendar), "feature sessions must belong to the supplied calendar")
-    q, securities, anchor, cutoff = _query_context(ctx, calendar)
-    keys = {(security, session) for security in securities for session in q["sessions"]}
-    indexed = _keyed(records, keys, "label record")
-    metadata = {}
-    for field in ("open", "close"):
-        definition = field_meta.get(field) or {}
-        _require(isinstance(definition, dict), "malformed " + field + " metadata")
-        metadata[field] = _keyed(definition.get("by_key", []), keys, field + " provenance")
-    positions = {session: index for index, session in enumerate(calendar)}
-    for feature in features:
-        position = positions[feature]
-        start = calendar[position + 1] if position + 1 < len(calendar) else None
-        end = calendar[position + horizon_sessions] if position + horizon_sessions < len(calendar) else None
-        for security in securities:
-            value, available, reason = None, None, "calendar_endpoint_uncovered"
-            if start is not None and end is not None:
-                opening, start_clocks, start_reason = _endpoint(indexed, metadata["open"],
-                    (security, start), "open", anchor, cutoff)
-                closing, end_clocks, end_reason = _endpoint(indexed, metadata["close"],
-                    (security, end), "close", anchor, cutoff)
-                reason = start_reason or end_reason
-                if reason is None:
-                    value = closing / opening - 1.0
-                    if not math.isfinite(value):
-                        value, reason = None, "nonfinite_return"
-                    else:
-                        available = max(start_clocks + end_clocks).isoformat().replace("+00:00", "Z")
-            yield dict(security_id=security, feature_session=feature,
-                start_session=start, end_session=end, **{"return": value},
-                label_available_at=available, valid=reason is None,
-                invalid_reason=reason, source_refs=[source_ref])
+    data = indexed = metadata = positions = None
+    borrowed = False
+    try:
+        if _domain is None:
+            data = _compile_forward_index(records, field_meta, ctx, calendar)
+        else:
+            from .stock_compact_labels import _RawPriceDomain
+            _require(type(_domain) is _RawPriceDomain, "owner-loaded Raw price domain required")
+            data = _domain._borrow(calendar, features, source_ref, horizon_sessions)
+            borrowed = True
+        securities, anchor, cutoff = (data[k] for k in ("securities", "anchor", "cutoff"))
+        indexed, metadata, positions = (data[k] for k in ("indexed", "metadata", "positions"))
+        for feature in features:
+            position = positions[feature]
+            start = calendar[position + 1] if position + 1 < len(calendar) else None
+            end = calendar[position + horizon_sessions] if position + horizon_sessions < len(calendar) else None
+            for security in securities:
+                value, available, reason = None, None, "calendar_endpoint_uncovered"
+                if start is not None and end is not None:
+                    opening, start_clocks, start_reason = _endpoint(indexed, metadata["open"],
+                        (security, start), "open", anchor, cutoff)
+                    closing, end_clocks, end_reason = _endpoint(indexed, metadata["close"],
+                        (security, end), "close", anchor, cutoff)
+                    reason = start_reason or end_reason
+                    if reason is None:
+                        value = closing / opening - 1.0
+                        if not math.isfinite(value):
+                            value, reason = None, "nonfinite_return"
+                        else:
+                            available = max(start_clocks + end_clocks).isoformat().replace("+00:00", "Z")
+                yield dict(security_id=security, feature_session=feature,
+                    start_session=start, end_session=end, **{"return": value},
+                    label_available_at=available, valid=reason is None,
+                    invalid_reason=reason, source_refs=[source_ref])
+    finally:
+        if borrowed: _domain._release()
+        records = field_meta = ctx = data = indexed = metadata = positions = _domain = None
 
 
 def build_forward_labels(batch: Any, *, calendar: tuple[str, ...] | list[str],

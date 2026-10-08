@@ -7,8 +7,11 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import errno
 import json
+import os
+import sys
 import tempfile
 import time
+from weakref import WeakKeyDictionary
 
 from .stock_artifacts import digest, digest_array_rows, file_digest, write_json
 from .stock_fold_inputs import require, seal, validate_spec
@@ -17,6 +20,131 @@ from .stock_label_contracts import (_eligible_reason, _instant, NORMALIZATION_SP
 from .stock_matrix_storage import write_buffer, write_part, instant_us
 from .stock_compact_store import (_view_data, StockFeatureView, load_stock_feature_view,
     iter_feature_rows, iter_feature_eligibility, set_feature_window, OwnedStore, limits, sealed, _size)
+
+_RAW_DOMAINS = WeakKeyDictionary()
+_RAW_DOMAIN_TOKEN = object()
+
+
+class _RawPriceDomain:
+    """Private ownership of detached Data JSON and one lazy Raw key index."""
+    __slots__ = ('__weakref__',)
+
+    def __init__(self, token, value):
+        require(token is _RAW_DOMAIN_TOKEN, 'private Raw price domain required')
+        _RAW_DOMAINS[self] = value
+
+    def _data(self):
+        require(self in _RAW_DOMAINS, 'Raw price domain is closed')
+        value = _RAW_DOMAINS[self]
+        require(value['pid'] == os.getpid(), 'Raw price domain belongs to another process')
+        return value
+
+    @property
+    def source(self):
+        return deepcopy(self._data()['source'])
+
+    @property
+    def source_ref(self):
+        return self._data()['source']['price_view_ref']
+
+    def require_request(self, spec, cutoff, days):
+        value = self._data()
+        require(value['binding'] == (spec['snapshot'], spec['pit_policy'], tuple(spec['calendar']),
+                                     tuple(spec['universe'])) and
+                _instant(cutoff) == value['parsed'][3] and set(days) <= value['features'],
+                'Raw price domain request/cutoff mismatch')
+
+    @staticmethod
+    def _roots(value):
+        # Explicit graphs, including indexed aliases; never charge an opaque
+        # Python handle as if it contained no rows. Metrics are external roots.
+        return [value[k] for k in ('source', 'binding', 'features', 'parsed',
+                                   'records', 'field_meta', 'compiled')]
+
+    def _charge(self):
+        value = self._data(); metrics = value['metrics']
+        old = metrics['_price_view_bytes']; metrics['_price_view_bytes'] = 0
+        try:
+            charge = _measured(metrics, self._roots(value)) + sys.getsizeof(value) + 512
+            _working(metrics, charge)
+        except BaseException:
+            metrics['_price_view_bytes'] = old
+            _sync_feature_charge(metrics)
+            raise
+        metrics['_price_view_bytes'] = charge
+        _sync_feature_charge(metrics)
+        return charge
+
+    @staticmethod
+    def _clear_compiled(compiled):
+        if compiled is not None:
+            compiled['indexed'].clear()
+            for index in compiled['metadata'].values(): index.clear()
+            compiled.clear()
+
+    def _borrow(self, calendar, features, source_ref, horizon_sessions=5):
+        value = self._data(); metrics = value['metrics']
+        require(tuple(calendar) == value['binding'][2] and set(features) <= value['features'] and
+                source_ref == value['source']['price_view_ref'] and horizon_sessions == 5,
+                'Raw price domain selector/source mismatch')
+        if value['compiled'] is None:
+            from .labels import _compile_forward_index
+            # Keys/set + three dict indexes, including table resizing, are
+            # additional to the already charged native JSON graph.
+            count = len(value['parsed'][0]['sessions']) * len(value['parsed'][1])
+            reserve = count * 512 + len(calendar) * 192 + 65536
+            _working(metrics, reserve)
+            metrics['price_domain_index_preflight_bytes'] = max(
+                metrics.get('price_domain_index_preflight_bytes', 0), reserve)
+            metrics['price_domain_index_build_attempts'] = metrics.get('price_domain_index_build_attempts', 0) + 1
+            try:
+                value['compiled'] = _compile_forward_index(value['records'], value['field_meta'], None,
+                    calendar, parsed_query=value['parsed'])
+                peak = self._charge()
+            except BaseException:
+                self._clear_compiled(value['compiled'])
+                value['compiled'] = None
+                raise
+            metrics['price_domain_index_builds'] = metrics.get('price_domain_index_builds', 0) + 1
+            metrics['price_domain_indexed_rows'] = metrics.get('price_domain_indexed_rows', 0) + sum(
+                len(value['compiled'][k]) if k == 'indexed' else sum(len(v) for v in value['compiled'][k].values())
+                for k in ('indexed', 'metadata'))
+            metrics['price_domain_compile_peak_bytes'] = max(metrics.get('price_domain_compile_peak_bytes', 0), peak)
+            # Indexes now own the same private row/provenance dictionaries.
+            # Their old JSON list containers are not another retained view.
+            value['records'] = value['field_meta'] = None
+            self._charge()
+        # Check after lazy compilation, before the generator materializes its
+        # detached output. A retained index and its child rows coexist.
+        _working(metrics, len(features) * len(value['parsed'][1]) * 2048 + 65536)
+        value['borrowers'] += 1
+        return value['compiled']
+
+    def _release(self):
+        value = self._data()
+        require(value['borrowers'] > 0, 'Raw price domain borrower underflow')
+        value['borrowers'] -= 1
+
+    def close(self):
+        value = self._data()
+        require(value['borrowers'] == 0, 'Raw price domain is still borrowed')
+        metrics = value['metrics']; charge = metrics['_price_view_bytes']
+        # Empty private maps as well as dropping roots, so a failed operator's
+        # traceback cannot retain the complete domain through an index alias.
+        compiled = value['compiled']
+        self._clear_compiled(compiled)
+        value.clear(); del _RAW_DOMAINS[self]
+        compiled = value = None
+        metrics['_price_view_bytes'] = 0
+        _sync_feature_charge(metrics)
+        metrics['price_domain_release_calls'] = metrics.get('price_domain_release_calls', 0) + 1
+        metrics['price_domain_released_bytes'] = metrics.get('price_domain_released_bytes', 0) + charge
+
+    def __enter__(self):
+        self._data(); return self
+
+    def __exit__(self, *args):
+        self.close()
 
 
 def _implementation():
@@ -43,7 +171,9 @@ def _raw_implementation():
     from . import labels
     return digest({'operator_version':'forward_5_session_open_close_v1',
         'price_basis':labels.PRICE_BASIS,'functions':{name:inspect.getsource(getattr(labels,name))
-        for name in ('_session','_instant','_sessions','_query_context','_keyed','_endpoint','_forward_rows')}})
+        for name in ('_session','_instant','_sessions','_query_context','_keyed','_endpoint',
+                     '_compile_forward_index','_forward_rows')},
+        'compiled_domain_owner':inspect.getsource(_RawPriceDomain)})
 
 
 def _working(metrics, amount):
@@ -67,7 +197,8 @@ def _sync_feature_charge(metrics):
     """A sequential Feature window changes the live shared byte charge."""
     feature_store=metrics['_feature_store']
     metrics['_feature_bytes']=feature_store.resident_bytes+metrics['_caller_bytes']
-    metrics['_store'].shared_bytes=metrics['_feature_bytes']
+    metrics['_store'].shared_bytes=(metrics['_feature_bytes']+metrics['_retained_raw_bytes']+
+                                   metrics.get('_price_view_bytes',0))
     metrics['_store'].shared_source_bytes=feature_store.metrics['source_bytes']+metrics['_caller_source_bytes']
 
 
@@ -190,17 +321,28 @@ def _price_view(data,spec,cutoff,days,metrics):
     records,meta,context=_versioned(adjusted,'label_outcomes')
     del adjusted
     _working(metrics,2*_measured(metrics,[records,meta,context])+len(days)*len(spec['universe'])*1024)
-    _query_context(context,spec['calendar']); source=_source_view(records,meta,context)
-    metrics['_price_view_bytes']=_measured(metrics,[records,meta,context,source])
+    parsed=_query_context(context,spec['calendar']); source=_source_view(records,meta,context)
+    # to_json returned detached private Data values. The opaque handle exposes
+    # only copied source controls and detached Raw output rows, never these maps.
+    domain=_RawPriceDomain(_RAW_DOMAIN_TOKEN,{'pid':os.getpid(),'borrowers':0,'metrics':metrics,
+        'source':source,'binding':(context['snapshot_id'],context['query']['pit_policy'],
+                                  tuple(spec['calendar']),parsed[1]),
+        'features':set(days),'parsed':parsed,'records':records,'field_meta':meta,'compiled':None})
+    records=meta=context=None
+    try: domain._charge()
+    except BaseException:
+        domain.close(); raise
     metrics['price_domains'].append({'cutoff':cutoff,'query_ref':digest(query_wire),
         'query':query_wire,'price_view_ref':source['price_view_ref'],'data_read_calls':2,
         'resident_bytes':metrics['_price_view_bytes']})
-    return records,meta,context,source
+    return domain
 
 
 def _raw(spec,cutoff,days,cache,metrics,price_view):
     from .labels import _forward_rows
-    records,meta,context,source=price_view
+    require(type(price_view) is _RawPriceDomain,'owner-loaded Raw price domain required')
+    price_view.require_request(spec,cutoff,days)
+    source=price_view.source
     definition={'price_view':source,'snapshot':spec['snapshot'],'cutoff':cutoff,
         'calendar':spec['calendar'],'universe':spec['universe'],'sessions':days,
         'formula':'close(f+5) / open(f+1) - 1','price_basis':'common_anchor_adjusted_v1',
@@ -214,11 +356,25 @@ def _raw(spec,cutoff,days,cache,metrics,price_view):
         _working(metrics,len(rows)*2048); rows=list(rows)
         metrics['raw_cache_hits']+=1
         return {**descriptor,'file_digest':store.hashes[descriptor['path']],'target_ref':value['target_ref']},rows
-    rows=list(_forward_rows(records,meta,context,calendar=spec['calendar'],features=days,
-        horizon_sessions=5,source_ref=source['price_view_ref']))
-    _working(metrics,_measured(metrics,rows))
+    rows=list(_forward_rows(None,None,None,calendar=spec['calendar'],features=days,
+        horizon_sessions=5,source_ref=source['price_view_ref'],_domain=price_view))
+    charge=_measured(metrics,rows)
+    _working(metrics,charge)
     metrics['raw_operator_calls']+=1
-    descriptor=_publish(target,definition,rows,budgets=metrics['_limits'],store=metrics['_store'])
+    previous=metrics['_retained_raw_bytes']
+    try:
+        # The writer and its saved-target byte validation run while both this
+        # child and its source domain remain alive. Charge those external roots
+        # to the same store, not just to the producer's separate peak counter.
+        metrics['_retained_raw_bytes']=previous+charge
+        _working(metrics,len(rows)*1024+65536)
+        descriptor=_publish(target,definition,rows,budgets=metrics['_limits'],store=metrics['_store'])
+    except BaseException:
+        rows=None
+        raise
+    finally:
+        metrics['_retained_raw_bytes']=previous
+        _sync_feature_charge(metrics)
     return descriptor,rows
 
 
@@ -398,21 +554,20 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
         # identity, never an invented sliced DataBatch contract.
         for group in domains.values():
             stats['_price_view_bytes']=0
-            price_view=_price_view(data,spec,group['cutoff'],sorted(group['days']),stats)
-            for use,(i,role,n,days,cutoff) in enumerate(group['jobs']):
-                report=stats['fold_queries'][i]; domain_ref=price_view[3]['price_view_ref']
-                if domain_ref not in report['price_domain_refs']: report['price_domain_refs'].append(domain_ref)
-                if use: stats['admitted_price_view_reuses']+=1; report['admitted_price_view_reuses']+=1
-                else: report['data_read_calls']+=2
-                desc,chunk=_raw(spec,cutoff,days,cache,stats,price_view)
-                if role in ('raw_parts','evaluation_parts'): raw_outputs[i][role][n]=desc
-                else: raw_outputs[i][role]=desc
-                del chunk
-                # Published descriptors, rather than every historical typed
-                # target, are the retained union between cutoff domains.
-                store.release_payloads()
+            with _price_view(data,spec,group['cutoff'],sorted(group['days']),stats) as price_view:
+                for use,(i,role,n,days,cutoff) in enumerate(group['jobs']):
+                    report=stats['fold_queries'][i]; domain_ref=price_view.source_ref
+                    if domain_ref not in report['price_domain_refs']: report['price_domain_refs'].append(domain_ref)
+                    if use: stats['admitted_price_view_reuses']+=1; report['admitted_price_view_reuses']+=1
+                    else: report['data_read_calls']+=2
+                    desc,chunk=_raw(spec,cutoff,days,cache,stats,price_view)
+                    if role in ('raw_parts','evaluation_parts'): raw_outputs[i][role][n]=desc
+                    else: raw_outputs[i][role]=desc
+                    del chunk
+                    # Published descriptors, rather than every historical typed
+                    # target, are the retained union between cutoff domains.
+                    store.release_payloads()
             del price_view
-            stats['_price_view_bytes']=0
         from .stock_compact_batch import read_target
         positions={d:i for i,d in enumerate(spec['feature_sessions'])}
         for i,(fold,training,inference) in enumerate(plans):
