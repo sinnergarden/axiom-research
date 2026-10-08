@@ -734,7 +734,7 @@ def evaluate_stock_signal_input_periods(input_ref, *, scope, destination):
             from .stock_signal_evaluation_derived import _select_joint_period
             selected=None
             selected=_select_joint_period(admission,selected_scope,maximum=root['maximum_resident_bytes'],
-                retained_graph=[root,admission,admitted,result])
+                retained_graph=[root,admission,admitted],saved_results=result)
         else:selected = _select_inputs(admission, selected_scope)
         result['by_year'][year] = _evaluate_prepared((ref, root, selected), destination, marks)
     _check_marks(marks)

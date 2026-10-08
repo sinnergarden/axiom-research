@@ -168,6 +168,33 @@ class ColumnAsOfTests(unittest.TestCase):
             self.test_public_sequence_entry_and_actual_raw_evaluation()
         self.assertEqual(checked,[True])
 
+    def test_joint_year_budget_counts_real_saved_report_payloads_before_selector(self):
+        from axiom_research import stock_signal_evaluation_derived as joint
+        from axiom_research.stock_signal_evaluation_projection import _load_inputs,evaluate_stock_signal_input_periods
+        from axiom_research.stock_compact_store import _size
+        freeze=joint.save_stock_derived_signal_evaluation_inputs;checked=[]
+        def verify(raw,**kwargs):
+            saved=freeze(raw,**kwargs)
+            _,root,selected,admission=_load_inputs(saved,kwargs['scope'],include_admission=True)
+            reports=evaluate_stock_signal_input_periods(saved,scope=kwargs['scope'],
+                destination=Path(kwargs['destination']).parent/'payload-budget-reports')
+            owner_report=next(iter(reports['all'].values()))
+            # Keep a genuine public saved-report object, with a large retained
+            # descriptive payload. Counting its dataclass shell cannot see it.
+            body=deepcopy(owner_report._verified)
+            body['limitations'].append('synthetic retained report text '*131072)
+            object.__setattr__(owner_report,'_verified',body)
+            maximum=_size([root,selected,admission])+1024**2
+            with patch.object(joint,'_select_inputs',side_effect=AssertionError('report payload escaped year budget')), \
+                patch.object(type(owner_report),'to_dict',side_effect=AssertionError('budget copied the saved report')):
+                with self.assertRaisesRegex(ValueError,'accounting workspace budget'):
+                    joint._select_joint_period(admission,kwargs['scope'],maximum=maximum,
+                        retained_graph=[root,admission,selected],saved_results=reports)
+            checked.append(saved.artifact_id);return saved
+        with patch.object(joint,'save_stock_derived_signal_evaluation_inputs',side_effect=verify):
+            self.test_public_sequence_entry_and_actual_raw_evaluation()
+        self.assertEqual(len(checked),1)
+
     def test_public_second_fold_core_failure_releases_warm_normalization_vectors(self):
         from axiom_research import open_stock_ml_batch_preparation
         module=ModuleType('axiom_data');module.QuerySpec=Query

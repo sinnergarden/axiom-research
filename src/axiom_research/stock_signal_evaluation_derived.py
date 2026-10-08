@@ -51,10 +51,15 @@ def _select_joint_inputs(admission,scope,store):
     finally:selected=admission=scope=None
 
 
-def _select_joint_period(admission,scope,*,maximum,retained_graph):
+def _select_joint_period(admission,scope,*,maximum,retained_graph,saved_results):
     """The yearly selector shares the already resident all-session graph."""
     with OwnedStore(_limits(maximum)) as store:
-        store.shared_bytes=_measure(store,retained_graph)
+        # _size traverses wire containers, not dataclass internals. These are
+        # the owner's already verified graphs; to_dict would allocate copies.
+        reports=[saved._verified for group in (saved_results['all'],*saved_results['by_year'].values())
+            for saved in group.values()]
+        require(all(type(report) is dict for report in reports),'owner verified saved report graphs required')
+        store.shared_bytes=_measure(store,[retained_graph,reports])
         return _select_joint_inputs(admission,scope,store)
 
 
