@@ -303,12 +303,15 @@ def _label_source_context(ctx, scope, snapshot, pit, *, price_basis, adjustment_
             cutoff=cutoff, purpose='label_outcomes')
         native = derivation[name]
         if compact:
-            _require(native.get('domain') == ('market_daily' if name == 'price_query' else 'adjustment_factors'),
+            # The saved Data query excludes its domain. Price and factor
+            # domains live in context.domain and derivation.factor_domain.
+            # Preserve consistency if a query also carries a domain.
+            _require('domain' not in native or native['domain'] ==
+                ('market_daily' if name == 'price_query' else 'adjustment_factors'),
                 'compact native source domain mismatch')
         expected_sessions = set(query['sessions']) | ({derivation['anchor_session']} if name == 'factor_query' else set())
         fields_ok = ({'open', 'close'} <= set(native.get('fields', ())) if name == 'price_query'
-            else (derivation.get('factor_domain') in (None, 'adjustment_factors') if compact
-                 else derivation.get('factor_domain') == 'adjustment_factors') and
+            else derivation.get('factor_domain') == 'adjustment_factors' and
                  derivation.get('factor_field') in native.get('fields', ()))
         _require(set(native['sessions']) == expected_sessions and native.get('price_basis') == 'unadjusted' and
             native.get('adjustment_anchor') is None and

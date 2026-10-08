@@ -30,6 +30,7 @@ from axiom_research import stock_signal_evaluation_projection as frozen
 from axiom_research import stock_signal_evaluation_compact as compact
 from axiom_research.stock_signal_evaluation_matrix import _sources_table, _label_projection_ref, _label_day_ref
 from axiom_engine.core import evaluate_signal_statistics
+from stock_signal_native_wire_fixture import saved_context
 
 
 class OwnerStub:
@@ -50,15 +51,8 @@ class OwnerStub:
             'prepared_view_ref': _read(root/'prepared.json')['prepared_view_ref']}
         endpoints = sorted({self.calendar[-1]} | {self.calendar[self.calendar.index(day)+offset]
             for day in self.days for offset in (1, 5)})
-        query = {'domain': 'market_daily', 'sessions': endpoints, 'symbols': self.universe, 'pit_policy': self.common['pit_policy'],
-            'purpose': 'label_outcomes', 'fields': ['open', 'close'], 'price_basis': 'common_anchor_adjusted_v1',
-            'adjustment_anchor': self.calendar[-1], 'cutoff_by_session': {d: self.cutoff for d in endpoints}}
-        native = {**query, 'price_basis': 'unadjusted', 'adjustment_anchor': None}
-        context = {'snapshot_id': self.common['snapshot'], 'domain': 'market_daily', 'query': query,
-            'derivation': {'decision_cutoff': self.cutoff, 'recipe_version': 'common_anchor_price_v1',
-                'formula': 'price_t * factor_t / factor_anchor', 'anchor_session': self.calendar[-1],
-                'decision_session': self.calendar[-1], 'factor_field': 'factor', 'price_query': native,
-                'factor_query': {**native, 'domain': 'adjustment_factors', 'fields': ['factor']}}}
+        context = saved_context(snapshot=self.common['snapshot'], pit=self.common['pit_policy'],
+            universe=self.universe, sessions=endpoints, anchor=self.calendar[-1], cutoff=self.cutoff)
         from axiom_research.labels import _query_context
         _query_context(context, self.calendar)  # Actual owner validator; no read or preparation.
         price = seal({'contract_version': 'stock_label_price_view_v1', 'context': context,

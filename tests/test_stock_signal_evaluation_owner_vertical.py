@@ -31,6 +31,7 @@ from axiom_engine.core import evaluate_signal_statistics
 import test_stock_compact_v3 as storage_fixtures
 import test_stock_matrix_prepare as matrix_fixtures
 import test_stock_sequential_windows as window_fixtures
+from stock_signal_native_wire_fixture import SHAPE, native_data_fixture
 
 
 class CrossYearFeature(matrix_fixtures.PrepareFeatureFixture):
@@ -68,7 +69,6 @@ def readonly_execution(*, allow_statistics):
         original_import = builtins.__import__
         def imports(name, *args, **kwargs):
             blocked = ('axiom_data', 'qlib', 'lightgbm', 'pandas', 'sklearn')
-            if not allow_statistics: blocked += ('axiom_engine',)
             if name.startswith(blocked): raise AssertionError('readonly execution imported '+name)
             return original_import(name, *args, **kwargs)
         stack.enter_context(patch('builtins.__import__', side_effect=imports))
@@ -76,7 +76,15 @@ def readonly_execution(*, allow_statistics):
                 'axiom_research.stock_compact_batch.CompactState.verify_all',
                 'axiom_research.stock_training.fit_predict_stock_model',
                 'test_stock_matrix_prepare.PublicDataFixture.read',
-                'test_stock_matrix_prepare.PublicDataFixture.adjust'):
+                'test_stock_matrix_prepare.PublicDataFixture.adjust',
+                'axiom_engine.core.execute_feature_plan',
+                'axiom_engine.core.execute_feature_plan_batch',
+                'axiom_engine.core.execute_cs_zscore_batch',
+                'axiom_engine.core.execution.execute_feature_plan',
+                'axiom_engine.core.feature_batch.execute_feature_plan_batch',
+                'axiom_engine.core.cs_batch.execute_cs_zscore_batch') + (() if allow_statistics else (
+                    'axiom_engine.core.evaluate_signal_statistics',
+                    'axiom_engine.core.signal_statistics.evaluate_signal_statistics')):
             stack.enter_context(patch(target, side_effect=AssertionError('readonly execution used '+target)))
         yield
 
@@ -87,7 +95,7 @@ class RealOwnerFrozenVerticalTests(unittest.TestCase):
             root = Path(temporary).resolve()
             print('VERTICAL_SYNTHETIC_SETUP_STARTED', flush=True)
             feature, table = storage_fixtures.CompactV3Tests().fixture(root, feature_class=CrossYearFeature)
-            data = matrix_fixtures.PublicDataFixture(feature.spec)
+            data = native_data_fixture(matrix_fixtures.PublicDataFixture)(feature.spec)
             module = types.ModuleType('axiom_data'); module.QuerySpec = matrix_fixtures.Query
             module.adjust_prices = data.adjust
             with patch.dict(sys.modules, {'axiom_data': module}):
@@ -149,6 +157,24 @@ class RealOwnerFrozenVerticalTests(unittest.TestCase):
             def observed(descriptor, *, batch):
                 with admit_stock_signal_evaluation_fold(descriptor, batch=batch) as lease:
                     self.assertFalse(any(hasattr(lease, name) for name in ('X', 'y', 'P', 'training_keys', 'booster')))
+                    documents = lease.documents
+                    self.assertEqual(set(documents), {'manifest.json','fold.json','model.json',
+                        'feature-slice.json','predictions.json'})
+                    for name,shape in [('manifest.json','manifest_fields'),('fold.json','fold_fields'),
+                            ('model.json','model_fields')]:
+                        self.assertEqual(sorted(documents[name]), SHAPE[shape])
+                    self.assertEqual(sorted(documents['manifest.json']['files']), SHAPE['manifest_output_names'])
+                    definition = documents['fold.json']['definition']
+                    self.assertEqual(sorted(definition), SHAPE['fold_definition_fields'])
+                    inputs = definition['input_manifest']
+                    self.assertEqual(sorted(inputs), SHAPE['input_manifest_fields'])
+                    for role in ('inference','evaluation_labels'):
+                        self.assertEqual(sorted(inputs['selectors'][role]), SHAPE['selector_fields'])
+                    for name,shape in [('feature-slice.json','feature_row_fields'),
+                            ('predictions.json','prediction_row_fields')]:
+                        self.assertTrue(all(sorted(row) == SHAPE[shape] for row in documents[name]['rows']))
+                    self.assertEqual(set(lease.common), {'snapshot','pit_policy','calendar','universe'})
+                    self.assertEqual(set(lease.source_fingerprints), {path for path,_ in lease.source_records})
                     targets = lease.evaluation_targets
                     original_days = sorted(lease.documents['fold.json']['definition']['fold_spec']['inference_cutoff_by_session'])
                     self.assertEqual([day for target in targets for day in target['header']['definition']['sessions']], original_days)
@@ -169,6 +195,18 @@ class RealOwnerFrozenVerticalTests(unittest.TestCase):
             self.assertEqual(len(lease_checks), 2*len(leased_rows))
             self.assertTrue(all(rows._rows is None for rows in borrowed))
             root_wire = _read(ref.uri)
+            for source in root_wire['raw_metadata']['sources'].values():
+                header = source['header']; definition = header['definition']; price = definition['price_view']
+                self.assertEqual(sorted(header), SHAPE['raw_header_fields'])
+                self.assertEqual(sorted(definition), SHAPE['raw_definition_fields'])
+                self.assertEqual(sorted(price), SHAPE['price_view_fields'])
+                self.assertEqual(sorted(price['context']), SHAPE['context_fields'])
+                self.assertEqual(sorted(price['context']['derivation']), SHAPE['derivation_fields'])
+                self.assertEqual(price['context']['derivation']['factor_domain'], 'adjustment_factors')
+                for query in [price['context']['query'], *(price['context']['derivation'][name]
+                        for name in ('price_query','factor_query'))]:
+                    self.assertEqual(sorted(query), SHAPE['query_fields'])
+                    self.assertNotIn('domain', query)
             self.assertIn('stock_signal_evaluation_lease.py', root_wire['admission_receipt']['validation_sources'])
             reads = []; original_read = frozen._read_checked
             def read(path, *args, **kwargs):
