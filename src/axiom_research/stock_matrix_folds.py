@@ -190,9 +190,10 @@ def load_matrix_fold(path, *, projection=None,batch=None):
         return _load_matrix_fold(path,projection=projection,batch=batch,ingress=ingress)
 
 
-def _load_matrix_fold(path, *, projection,batch,ingress):
+def _load_matrix_fold(path, *, projection,batch,ingress,_lease=None):
     from .stock_fold_artifacts import _owned_fold
-    path=Path(path).resolve(); manifest=ingress.read_json({'path':str(path/'manifest.json')})
+    path=Path(path).resolve() if _lease is None else Path(path).absolute()
+    manifest=ingress.read_json({'path':str(path/'manifest.json')})
     require(set(manifest)=={'contract_version','fold_ref','files'} and
         manifest['contract_version']=='stock_ml_fold_manifest_v2' and
         set(manifest['files'])=={*OUTPUTS,'fold.json','booster.txt'},'unexpected compact fold manifest')
@@ -215,6 +216,7 @@ def _load_matrix_fold(path, *, projection,batch,ingress):
     saved={}
     for name,key in OUTPUTS.items():
         value=documents[name]; require(value[key]==fold[key],'fold stage reference mismatch'); saved[name]=value
+    if _lease is not None: _lease._prepare(ingress)
     own=projection is None
     if own:
         if batch is not None: projection=batch._project_evaluation(inputs,spec)
@@ -255,6 +257,20 @@ def _load_matrix_fold(path, *, projection,batch,ingress):
         projection._store.check()
         if batch is not None: batch._check_sources()
         ingress.check()
+        if _lease is not None:
+            _lease._admit(manifest,documents,projection,inputs,spec)
+            own=False
+            return _lease
         return _owned_fold(path,documents)
     finally:
         if own: projection.close()
+
+
+def admit_stock_signal_evaluation_fold(prediction_input, *, batch):
+    """Borrow one fully admitted compact saved fold's OOS evidence.
+
+    This context manager uses the ordinary complete saved-fold validator. It
+    does not expose training matrices, execute a model, or scan other folds.
+    """
+    from .stock_signal_evaluation_lease import admit_fold
+    return admit_fold(prediction_input,batch=batch)

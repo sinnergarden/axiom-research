@@ -353,6 +353,42 @@ class CompactState:
         require(batch_ref==self._batch_ref,'compact batch identity mismatch')
         return self._project(inputs,spec,training=False)
 
+    def evaluation_sources(self,inputs,spec):
+        """The actual active fold closure, including reused owned bytes.
+
+        The historical source table is intentionally not used: an eager owner
+        or an earlier sequential fold may have admitted unrelated leaves.
+        """
+        self.check()
+        require(self.compact and self.active>0,'active compact OOS projection required')
+        record=self.store.json[inputs['fold_control']['path']]
+        fd=_view_data(self.feature); training,inference=validate_spec(spec,self.view['definition']['calendar'])
+        paths=set(self._keep_paths)|{inputs['fold_control']['path']}
+        targets=[]
+        for descriptor in [*record['raw_parts'],record['normalized'],*evaluation_parts(record)]:
+            header,rows=self.targets[descriptor['target_ref']]
+            paths.add(descriptor['path']); paths.update(d['path'] for d in header['buffers'].values())
+        for descriptor in evaluation_parts(record):
+            header,rows=self.targets[descriptor['target_ref']]
+            targets.append((descriptor,header,rows))
+        feature_paths=set(fd['control_paths']); ordinals=set()
+        for day in set(training+inference): ordinals.update(fd['day_admissions'][self.positions[day]])
+        for ordinal in ordinals:
+            block=fd['blocks'][ordinal]
+            require(block['parts'] is not None,'evaluation Feature block not admitted')
+            for part in block['descriptors']:
+                feature_paths.add(part['metadata']['path'])
+                feature_paths.update(d['path'] for d in part['buffers'].values())
+        records={}; marks={}
+        for store,chosen in ((self.store,paths),(fd['store'],feature_paths)):
+            for path in chosen:
+                require(path in store.hashes and path in store.marks,'evaluation source not admitted')
+                ref=store.hashes[path]
+                require(path not in records or records[path]==ref,'conflicting evaluation source pin')
+                require(path not in marks or marks[path]==store.marks[path],'conflicting evaluation source fingerprint')
+                records[path]=ref; marks[path]=store.marks[path]
+        return targets,records,marks
+
     def evaluation(self,inputs,spec,*,batch_ref):
         raise ValueError('compact v3 has no legacy signal-evaluation proof projection; use explicit batch audit')
 
