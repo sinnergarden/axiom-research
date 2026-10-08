@@ -18,6 +18,18 @@ from .stock_signal_evaluation_inputs import (
 
 INPUT_VERSION = 'stock_signal_evaluation_inputs_v1'
 MATRIX_INPUT_VERSION = 'stock_signal_evaluation_inputs_v2'
+COMPACT_INPUT_VERSION = 'stock_signal_evaluation_inputs_v3'
+
+
+def _matrix_input(version):
+    return version in (MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION)
+
+
+def _report_version(version):
+    if version == COMPACT_INPUT_VERSION:
+        return 'stock_signal_evidence_v5'
+    return 'stock_signal_evidence_v4' if version == MATRIX_INPUT_VERSION else 'stock_signal_evidence_v3'
+
 ROOT_FIELDS = {'contract_version', 'input_id', 'scope', 'signal_order', 'signal_refs',
     'signal_metadata', 'raw_metadata', 'clock_floor', 'admission_receipt', 'shards'}
 LABEL_FIELDS = {'security_id', 'feature_session', 'start_session', 'end_session',
@@ -63,7 +75,7 @@ def _input_ref(value):
     _require(type(value) is ArtifactRef, 'frozen evaluation ArtifactRef required')
     validate(value)
     _require(value.artifact_type == 'StockSignalEvaluationInputs' and
-        value.artifact_contract_version in (INPUT_VERSION, MATRIX_INPUT_VERSION),
+        value.artifact_contract_version in (INPUT_VERSION, MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION),
         'frozen evaluation input ref type/version mismatch')
     _require(Path(value.uri).is_absolute(), 'fixed absolute frozen input locator required')
     return value
@@ -83,7 +95,7 @@ def _root_id(root):
             return [locations(v) for v in item]
         return item
     body['admission_receipt'] = locations(receipt)
-    if root['contract_version'] == MATRIX_INPUT_VERSION:
+    if _matrix_input(root['contract_version']):
         body['raw_metadata'] = locations(body['raw_metadata'])
     return digest(body)
 
@@ -196,7 +208,8 @@ def _shard(admission, scope, day):
         if 'label_leaf_bindings' in admission:
             frozen_row['label_leaf_ref'] = admission['label_leaf_bindings'][key]
         rows.append(frozen_row)
-    version = 'stock_signal_evaluation_date_v2' if 'label_leaf_bindings' in admission else 'stock_signal_evaluation_date_v1'
+    version = ('stock_signal_evaluation_date_v3' if admission['raw'].get('mode') == 'compact_targets' else
+        'stock_signal_evaluation_date_v2' if 'label_leaf_bindings' in admission else 'stock_signal_evaluation_date_v1')
     return {'contract_version': version, 'session': day, 'rows': rows}
 
 
@@ -263,7 +276,7 @@ def save_stock_signal_evaluation_inputs(signal_inputs, *, raw_label_input=None, 
 
 
 def _verify_root(root, ref, scope):
-    if ref.artifact_contract_version == MATRIX_INPUT_VERSION:
+    if _matrix_input(ref.artifact_contract_version):
         from .stock_signal_evaluation_matrix import _verify_matrix_root
         return _verify_matrix_root(root, ref, scope)
     _require(type(root) is dict and set(root) == ROOT_FIELDS and root['contract_version'] == INPUT_VERSION,
@@ -330,7 +343,7 @@ def _verify_root(root, ref, scope):
     return by_day
 
 
-def _load_inputs(input_ref, scope, *, marks=None):
+def _load_inputs(input_ref, scope, *, marks=None, include_admission=False):
     ref = _input_ref(input_ref); scope = _scope(scope)
     marks = {} if marks is None else marks
     root, _ = _read_checked(ref.uri, ref.content_digest, marks=marks)
@@ -341,7 +354,7 @@ def _load_inputs(input_ref, scope, *, marks=None):
     positions = {day: i for i, day in enumerate(base['calendar'])}
     wanted = set(scope['universe'])
     cutoff = _instant(scope['evaluation_cutoff'])
-    raw = root['raw_metadata']; matrix = ref.artifact_contract_version == MATRIX_INPUT_VERSION
+    raw = root['raw_metadata']; matrix = _matrix_input(ref.artifact_contract_version)
     if matrix:
         from .stock_signal_evaluation_matrix import _matrix_label_context
         label_context = _matrix_label_context(root)
@@ -350,7 +363,8 @@ def _load_inputs(input_ref, scope, *, marks=None):
         descriptor = root['shards'][day]
         shard, _ = _read_checked(Path(ref.uri).parent/descriptor['file'], descriptor['file_digest'], marks=marks)
         _require(set(shard) == {'contract_version', 'session', 'rows'} and
-            shard['contract_version'] == ('stock_signal_evaluation_date_v2' if matrix else 'stock_signal_evaluation_date_v1') and
+            shard['contract_version'] == ('stock_signal_evaluation_date_v3' if ref.artifact_contract_version == COMPACT_INPUT_VERSION else
+                'stock_signal_evaluation_date_v2' if matrix else 'stock_signal_evaluation_date_v1') and
             shard['session'] == day and
             type(shard['rows']) is list and [r['security_id'] for r in shard['rows']] == base['universe'],
             'frozen shard complete ordered keys required')
@@ -424,12 +438,13 @@ def _load_inputs(input_ref, scope, *, marks=None):
     _check_marks(marks)
     admission = {'projected': projected, 'labels': labels, 'raw': raw,
         'refs': {name: root['signal_refs'][name] for name in names}, 'closures': _expand_closure(root['admission_receipt'])}
-    return ref, root, _select_inputs(admission, scope)
+    result = (ref, root, _select_inputs(admission, scope))
+    return (*result, admission) if include_admission else result
 
 
 def _audit_input(input_ref):
     ref = _input_ref(input_ref)
-    if ref.artifact_contract_version == MATRIX_INPUT_VERSION:
+    if _matrix_input(ref.artifact_contract_version):
         from .stock_signal_evaluation_matrix import _audit_matrix_input
         return _audit_matrix_input(ref)
     root, _ = _read_checked(ref.uri, ref.content_digest)
@@ -455,13 +470,15 @@ def _audit_input(input_ref):
     return ref
 
 
-def _implementation_v3(matrix=False):
+def _implementation_v3(matrix=False, compact=False):
     module = import_module('axiom_engine.core.signal_statistics')
     core = Path(module.__file__).parent
     names = ('stock_signal_evaluation.py', 'stock_signal_evaluation_inputs.py',
              'stock_artifacts.py', 'stock_label_contracts.py', 'stock_signal_evaluation_projection.py')
     if matrix:
         names += ('stock_signal_evaluation_matrix.py',)
+    if compact:
+        names += ('stock_signal_evaluation_compact.py', 'stock_compact_controls.py', 'stock_matrix_storage.py')
     return {'research': {name: file_digest(Path(__file__).parent/name) for name in names},
         'core': {name: file_digest(core/name) for name in ('signal_statistics.py', 'contracts.py')},
         'operator': 'axiom_engine.core.evaluate_signal_statistics'}
@@ -469,7 +486,7 @@ def _implementation_v3(matrix=False):
 
 def _group_key(group):
     version = _input_ref(group['input_ref']).artifact_contract_version
-    return digest({'contract_version': 'stock_signal_evidence_v4' if version == MATRIX_INPUT_VERSION else 'stock_signal_evidence_v3',
+    return digest({'contract_version': _report_version(version),
         'input_identity': semantic_identity(_input_ref(group['input_ref'])),
         **{key: group[key] for key in ('scope', 'signal_order', 'spec_ref', 'sample_mask_ref',
             'common_input_ref', 'native_input_ref', 'implementation_ref')}})
@@ -488,7 +505,8 @@ def _group_definition(ref, root, admitted, implementation):
 
 
 def _reports_v3(group, admitted, common, native):
-    matrix = _input_ref(group['input_ref']).artifact_contract_version == MATRIX_INPUT_VERSION
+    version = _input_ref(group['input_ref']).artifact_contract_version
+    matrix = _matrix_input(version)
     reports = {}
     counts = Counter(day for _, day in admitted['common_keys'])
     for name, key in admitted['signal_keys'].items():
@@ -506,8 +524,9 @@ def _reports_v3(group, admitted, common, native):
             row['valid_pair_count'] = counts[row['session']]
         coverage.update(comparison_mode='common_valid_key_intersection', native=own_native,
             common_statistics_ref=common['statistics_ref'], native_statistics_ref=native['statistics_ref'])
-        report = {'contract_version': 'stock_signal_evidence_v4' if matrix else 'stock_signal_evidence_v3',
-            'validation_basis': 'frozen_projection_v2' if matrix else 'frozen_projection_v1', 'evaluation_key': group['evaluation_key'],
+        report = {'contract_version': _report_version(version),
+            'validation_basis': ('frozen_compact_projection_v1' if version == COMPACT_INPUT_VERSION else
+                'frozen_projection_v2' if matrix else 'frozen_projection_v1'), 'evaluation_key': group['evaluation_key'],
             'input_signal_refs': admitted['refs'][name], 'input_evidence': {
                 'input_ref': group['input_ref'], 'signal_name': name,
                 'admission_receipt_ref': group['admission_receipt_ref']},
@@ -524,6 +543,10 @@ def _reports_v3(group, admitted, common, native):
         report['evidence_ref'] = digest({'evaluation_key': group['evaluation_key'], 'signal_name': name})
         if matrix:
             report['limitations'][-1] = 'Evaluation targets are independent of training targets; exact original Label specs and slice lineage remain in the frozen input.'
+        if version == COMPACT_INPUT_VERSION:
+            report['limitations'][-2:] = [
+                'Owner admitted compact saved bytes and query bindings; full Data replay uses the explicit compact owner audit.',
+                'Compact row bindings retain the price-view version and do not claim legacy endpoint proof.']
         report['content_digest'] = digest(report)
         reports[name] = report
     return reports
@@ -583,11 +606,16 @@ def _load_v3_report(path):
 
 def evaluate_stock_signal_inputs(input_ref, *, scope, destination):
     """Verify frozen inputs and return an exact saved group HIT before Core."""
-    from .stock_signal_evaluation import SPEC, _verified_evaluation
     marks = {}
     prepared = _load_inputs(input_ref, scope, marks=marks)
+    return _evaluate_prepared(prepared, destination, marks)
+
+
+def _evaluate_prepared(prepared, destination, marks):
+    from .stock_signal_evaluation import SPEC, _verified_evaluation
     ref, root, admitted = prepared
-    group = _group_definition(ref, root, admitted, _implementation_v3(ref.artifact_contract_version == MATRIX_INPUT_VERSION))
+    group = _group_definition(ref, root, admitted, _implementation_v3(
+        _matrix_input(ref.artifact_contract_version), ref.artifact_contract_version == COMPACT_INPUT_VERSION))
     destination = Path(destination).resolve(); target = destination/group['evaluation_key'][7:]
     if target.exists():
         return _load_group(target, prepared=prepared, marks=marks, expected_key=group['evaluation_key'], reused=True)
@@ -617,6 +645,24 @@ def evaluate_stock_signal_inputs(input_ref, *, scope, destination):
             return winner
     return {name: _verified_evaluation(target/(report['evidence_ref'][7:]+'.json'), False, report)
             for name, report in reports.items()}
+
+
+
+def evaluate_stock_signal_input_periods(input_ref, *, scope, destination):
+    """Return all-session and calendar-year reports from one frozen read.
+
+    Each year uses the same source vintage, cutoff, comparison group and SPEC.
+    The existing selector and Core compute every period; fold IRs are not pooled.
+    """
+    marks = {}
+    ref, root, admitted, admission = _load_inputs(input_ref, scope, marks=marks, include_admission=True)
+    result = {'all': _evaluate_prepared((ref, root, admitted), destination, marks), 'by_year': {}}
+    for year in sorted({day[:4] for day in admitted['scope']['sessions']}):
+        selected_scope = {**admitted['scope'], 'sessions': [day for day in admitted['scope']['sessions'] if day[:4] == year]}
+        selected = _select_inputs(admission, selected_scope)
+        result['by_year'][year] = _evaluate_prepared((ref, root, selected), destination, marks)
+    _check_marks(marks)
+    return result
 
 
 def audit_stock_signal_evaluation(path):

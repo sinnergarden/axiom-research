@@ -272,14 +272,20 @@ def _validate_raw_label_header(raw, scope, snapshot, pit):
         spec.get('label_id') == f"forward_{spec['horizon_sessions']}_session_open_close_v1" and
         spec.get('start_price') == 'open' and spec.get('end_price') == 'close',
         'Raw Label endpoint semantics required')
-    ctx = raw['source_evidence']['context']
+    return _label_source_context(raw['source_evidence']['context'], scope, snapshot, pit,
+        price_basis=spec.get('price_basis'), adjustment_anchor=spec.get('adjustment_anchor'))
+
+
+def _label_source_context(ctx, scope, snapshot, pit, *, price_basis, adjustment_anchor, compact=False):
+    """Shared saved outcome query/anchor/PIT checks without runtime imports."""
+    calendar = scope['calendar']; cutoff = _instant(scope['evaluation_cutoff'])
     _require(ctx.get('snapshot_id') == snapshot, 'Raw Label Snapshot mismatch')
     query = ctx['query']; universe = query['symbols']
     _require(set(scope['universe']) <= set(universe), 'evaluation universe outside Raw Labels')
     _query(query, snapshot=snapshot, pit=pit, universe=universe, cutoff=cutoff, purpose='label_outcomes')
     _require(set(query['sessions']) <= set(calendar), 'Raw Label query outside calendar')
     _require(ctx.get('domain') == 'market_daily' and set(query.get('fields', ())) == {'open', 'close'} and
-        query.get('price_basis') == spec.get('price_basis') == 'common_anchor_adjusted_v1',
+        query.get('price_basis') == price_basis == 'common_anchor_adjusted_v1',
         'Raw Label price basis/domain/fields mismatch')
     clocks = {_instant(c) for c in query['cutoff_by_session'].values()}
     _require(len(clocks) == 1, 'Raw Label requires one outcome query cutoff')
@@ -289,16 +295,20 @@ def _validate_raw_label_header(raw, scope, snapshot, pit):
         derivation.get('recipe_version') == 'common_anchor_price_v1' and
         derivation.get('formula') == 'price_t * factor_t / factor_anchor' and
         derivation.get('decision_session') == query['sessions'][-1] and
-        derivation.get('anchor_session') == spec.get('adjustment_anchor') == query.get('adjustment_anchor') and
+        derivation.get('anchor_session') == adjustment_anchor == query.get('adjustment_anchor') and
         derivation['anchor_session'] in calendar and derivation['anchor_session'] <= query['sessions'][-1],
         'Raw Label source derivation/anchor mismatch')
     for name in ('price_query', 'factor_query'):
         _query(derivation[name], snapshot=snapshot, pit=pit, universe=universe,
             cutoff=cutoff, purpose='label_outcomes')
         native = derivation[name]
+        if compact:
+            _require(native.get('domain') == ('market_daily' if name == 'price_query' else 'adjustment_factors'),
+                'compact native source domain mismatch')
         expected_sessions = set(query['sessions']) | ({derivation['anchor_session']} if name == 'factor_query' else set())
         fields_ok = ({'open', 'close'} <= set(native.get('fields', ())) if name == 'price_query'
-            else derivation.get('factor_domain') == 'adjustment_factors' and
+            else (derivation.get('factor_domain') in (None, 'adjustment_factors') if compact
+                 else derivation.get('factor_domain') == 'adjustment_factors') and
                  derivation.get('factor_field') in native.get('fields', ()))
         _require(set(native['sessions']) == expected_sessions and native.get('price_basis') == 'unadjusted' and
             native.get('adjustment_anchor') is None and

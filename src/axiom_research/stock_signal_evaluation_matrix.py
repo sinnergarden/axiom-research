@@ -230,7 +230,11 @@ def _label_projection_ref(raw):
 def _clock_floor_matrix(metadata, raw):
     clocks = [item['evaluation_clock_floor'] for items in metadata.values() for item in items]
     for header in raw['sources'].values():
-        context = header['source_context']
+        if raw['mode'] == 'compact_targets':
+            from .stock_signal_evaluation_compact import _context
+            context = _context(header)
+        else:
+            context = header['source_context']
         for query in (context['query'], context['derivation']['price_query'], context['derivation']['factor_query']):
             clocks.extend(query['cutoff_by_session'].values())
     return max(map(_instant, clocks)).isoformat().replace('+00:00', 'Z')
@@ -326,6 +330,9 @@ def _admit_matrix(signal_inputs, raw_label_input, scope, batch):
     from .stock_signal_evaluation_projection import _read_checked, _check_marks, _mark
     _data(batch)
     manifest = batch.to_dict()
+    if manifest['contract_version'] == 'stock_ml_batch_inputs_v4':
+        from .stock_signal_evaluation_compact import _admit_compact
+        return _admit_compact(signal_inputs, raw_label_input, scope, batch)
     _require(manifest['contract_version'] == 'stock_ml_batch_inputs_v2', 'verified matrix batch required')
     _require(callable(getattr(batch, '_project_evaluation', None)), 'matrix owner OOS evaluation interface required')
     batch._check_sources()
@@ -480,8 +487,10 @@ def _admit_matrix(signal_inputs, raw_label_input, scope, batch):
 def _save_matrix_inputs(signal_inputs, raw_label_input, scope, destination, batch):
     from .contracts import ArtifactRef
     from .stock_signal_evaluation_projection import (
-        MATRIX_INPUT_VERSION, _root_id, _shard, _load_inputs, _check_marks)
+        MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION, _root_id, _shard, _load_inputs, _check_marks)
     admitted, records, marks, manifest = _admit_matrix(signal_inputs, raw_label_input, scope, batch)
+    compact = manifest['contract_version'] == 'stock_ml_batch_inputs_v4'
+    version = COMPACT_INPUT_VERSION if compact else MATRIX_INPUT_VERSION
     table = [{'path': path, 'file_digest': records[path]} for path in sorted(records)]
     offsets = {record['path']: index for index, record in enumerate(table)}
     closure = {name: [{**{key: value for key, value in source.items() if key != 'source_paths'},
@@ -491,13 +500,16 @@ def _save_matrix_inputs(signal_inputs, raw_label_input, scope, destination, batc
         'stock_signal_evaluation_inputs.py', 'stock_batch.py', 'stock_matrix_reader.py',
         'stock_matrix_folds.py', 'stock_fold_artifacts.py', 'stock_artifacts.py', 'stock_label_contracts.py',
         'stock_native_json.py', 'stock_canonical_json.py')
-    receipt = {'contract_version': 'stock_signal_evaluation_admission_v2',
+    if compact:
+        names += ('stock_signal_evaluation_compact.py', 'stock_compact_batch.py',
+            'stock_compact_store.py', 'stock_compact_controls.py', 'stock_matrix_storage.py')
+    receipt = {'contract_version': 'stock_signal_evaluation_admission_v3' if compact else 'stock_signal_evaluation_admission_v2',
         'signal_inputs': deepcopy(signal_inputs), 'raw_label_input': deepcopy(raw_label_input), 'scope': scope,
         'batch_manifest': manifest, 'batch_ref': manifest['batch_ref'], 'source_records': table,
         'source_closure': closure, 'validation_sources': {
             name: file_digest(Path(__file__).parent/name) for name in names}}
     receipt['receipt_ref'] = digest(receipt)
-    root = {'contract_version': MATRIX_INPUT_VERSION, 'scope': scope,
+    root = {'contract_version': version, 'scope': scope,
         'signal_order': list(signal_inputs), 'signal_refs': admitted['refs'], 'signal_metadata': admitted['metadata'],
         'raw_metadata': admitted['raw'], 'clock_floor': _clock_floor_matrix(admitted['metadata'], admitted['raw']),
         'admission_receipt': receipt, 'shards': {}}
@@ -509,7 +521,7 @@ def _save_matrix_inputs(signal_inputs, raw_label_input, scope, destination, batc
             root['shards'][day] = {'file': name, 'file_digest': file_digest(stage/name)}
         root['input_id'] = _root_id(root); write_json(stage/'manifest.json', root)
         ref = ArtifactRef(artifact_type='StockSignalEvaluationInputs', artifact_id=root['input_id'],
-            artifact_contract_version=MATRIX_INPUT_VERSION, content_digest=file_digest(stage/'manifest.json'),
+            artifact_contract_version=version, content_digest=file_digest(stage/'manifest.json'),
             uri=str(stage/'manifest.json'))
         # The caller owns the batch backing; release this full OOS projection
         # before reading the frozen rows again. No training matrix is retained.
@@ -532,9 +544,11 @@ def _save_matrix_inputs(signal_inputs, raw_label_input, scope, destination, batc
 
 
 def _verify_matrix_root(root, ref, scope):
-    from .stock_signal_evaluation_projection import MATRIX_INPUT_VERSION, ROOT_FIELDS, _root_id, _expand_closure
+    from .stock_signal_evaluation_projection import MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION, ROOT_FIELDS, _root_id, _expand_closure
     from .stock_signal_evaluation_inputs import _scope
-    _require(type(root) is dict and set(root) == ROOT_FIELDS and root['contract_version'] == MATRIX_INPUT_VERSION and
+    compact = ref.artifact_contract_version == COMPACT_INPUT_VERSION
+    version = COMPACT_INPUT_VERSION if compact else MATRIX_INPUT_VERSION
+    _require(type(root) is dict and set(root) == ROOT_FIELDS and root['contract_version'] == version and
         root['input_id'] == ref.artifact_id == _root_id(root), 'frozen matrix input identity/fields mismatch')
     base = _scope(root['scope'])
     _require(base == root['scope'] and scope['calendar'] == base['calendar'] and
@@ -545,15 +559,15 @@ def _verify_matrix_root(root, ref, scope):
         len(names) == len(set(names)) and set(names) == set(root['signal_refs']) == set(root['signal_metadata']),
         'frozen comparison axes mismatch')
     receipt = root['admission_receipt']; _verify_ref(receipt, 'receipt_ref')
-    _require(set(receipt) == RECEIPT_FIELDS and receipt['contract_version'] == 'stock_signal_evaluation_admission_v2' and
+    _require(set(receipt) == RECEIPT_FIELDS and receipt['contract_version'] == ('stock_signal_evaluation_admission_v3' if compact else 'stock_signal_evaluation_admission_v2') and
         receipt['scope'] == base and set(receipt['signal_inputs']) == set(names) == set(receipt['source_closure']),
         'frozen matrix admission receipt mismatch')
     manifest = receipt['batch_manifest']; _verify_ref(manifest, 'content_digest')
-    _require(manifest['contract_version'] == 'stock_ml_batch_inputs_v2' and manifest['status'] == 'COMPLETE' and
+    _require(manifest['contract_version'] == ('stock_ml_batch_inputs_v4' if compact else 'stock_ml_batch_inputs_v2') and manifest['status'] == 'COMPLETE' and
         manifest['batch_ref'] == receipt['batch_ref'] == digest({key: value for key, value in manifest.items()
             if key not in ('content_digest', 'batch_ref')}), 'frozen matrix batch identity mismatch')
     raw = root['raw_metadata']
-    _require(type(raw) is dict and set(raw) == RAW_METADATA_FIELDS and raw['mode'] in ('fold_targets', 'raw_override') and
+    _require(type(raw) is dict and set(raw) == RAW_METADATA_FIELDS and raw['mode'] in (('compact_targets',) if compact else ('fold_targets', 'raw_override')) and
         raw['calendar_ref'] == digest({'contract_version': 'stock_label_calendar_v1', 'sessions': base['calendar']}) and
         type(raw['snapshot']) is str and raw['snapshot'] not in ('', 'latest', 'current') and
         type(raw['pit_policy']) is str and bool(raw['pit_policy']) and
@@ -561,6 +575,66 @@ def _verify_matrix_root(root, ref, scope):
         set(raw['label_shard_refs']) == set(base['sessions']) and all(_ref(x) for x in raw['label_shard_refs'].values()),
         'frozen matrix Label metadata mismatch')
     records = _sources_table(receipt['source_records'])
+    if compact:
+        from .stock_signal_evaluation_compact import _verify_raw
+        compact_folds = _verify_raw(root, scope, records)
+    else:
+        _verify_legacy_raw(root, scope, records)
+    expanded = _expand_closure(receipt)
+    by_day = {name: {} for name in names}
+    for name in names:
+        metadata, sources = root['signal_metadata'][name], expanded[name]
+        descriptors = receipt['signal_inputs'][name]
+        descriptors = descriptors if type(descriptors) is list else [descriptors]
+        _require(type(metadata) is list and bool(metadata) and len(metadata) == len(sources) == len(descriptors) and
+            [item['signal_run_ref'] for item in metadata] == root['signal_refs'][name] ==
+            [source['signal_input']['signal_run_ref'] for source in sources] and
+            [source['signal_input'] for source in sources] == descriptors, 'frozen matrix Signal version binding mismatch')
+        for item, source in zip(metadata, sources):
+            descriptor = source['signal_input']
+            _require(records.get(descriptor['path']) == descriptor['file_digest'],
+                'frozen Signal original byte binding mismatch')
+            _verify_ref(item['model'], 'model_ref')
+            if compact:
+                _require(item['input_ref'] in compact_folds and _ref(item['fold_ref']) and
+                    item['model']['contract_version'] == 'stock_model_release_v2' and
+                    item['model']['clock_basis'] == 'declared_simulation' and
+                    _instant(item['model']['fit_cutoff']) < _instant(item['model']['simulated_available_at']),
+                    'frozen compact model/input contract mismatch')
+                inputs, spec = compact_folds[item['input_ref']]
+                source_records = _sources_table(source['source_records'])
+                _require(item['fold_spec_ref'] == digest(spec) and
+                    item['prediction_sessions'] == sorted(spec['inference_cutoff_by_session']) and
+                    source_records.get(inputs['fold_control']['path']) == inputs['fold_control']['file_digest'],
+                    'frozen compact original Signal/fold/control mismatch')
+            _require(item['signal_contract_version'] == 'stock_prediction_run_v2' and
+                item['feature_contract_version'] == 'stock_feature_slice_v3' and
+                item['model']['model_ref'] == source['model_ref'] and item['feature_ref'] == source['feature_ref'] and
+                item['signal_stage'] == 'prediction_raw' and item['score_unit'] == 'dimensionless' and
+                item['score_semantics'] == item['model']['target_semantics'] and
+                (item['snapshot'], item['pit_policy']) == (raw['snapshot'], raw['pit_policy']),
+                'frozen matrix Signal stage/model/Snapshot/PIT mismatch')
+            days = item['prediction_sessions']
+            _require(type(days) is list and bool(days) and days == sorted(set(days)) and set(days) <= set(base['calendar']),
+                'frozen matrix ordered prediction dates required')
+            for day in days:
+                _require(day not in by_day[name], 'frozen weekly Signal date overlap')
+                by_day[name][day] = item
+    if compact:
+        _require({item['input_ref'] for items in root['signal_metadata'].values() for item in items} ==
+            {target['input_ref'] for target in raw['label_inputs']}, 'complete compact consumed target lineage required')
+    _require(root['clock_floor'] == _clock_floor_matrix(root['signal_metadata'], raw) and
+        _instant(scope['evaluation_cutoff']) >= _instant(root['clock_floor']),
+        'evaluation cutoff precedes frozen source revision/Signal visibility')
+    _require(set(root['shards']) == set(base['sessions']) and all(
+        set(descriptor) == {'file', 'file_digest'} and descriptor['file'] == day+'.json' and _ref(descriptor['file_digest'])
+        for day, descriptor in root['shards'].items()), 'complete frozen matrix date shards required')
+    return by_day
+
+
+
+def _verify_legacy_raw(root, scope, records):
+    raw, base, receipt = root['raw_metadata'], root['scope'], root['admission_receipt']
     for raw_ref, header in raw['sources'].items():
         _require(type(header) is dict and _raw_header_fields(header) and header['label_ref'] == raw_ref and
             _ref(raw_ref) and type(header['sessions']) is list and bool(header['sessions']) and
@@ -595,44 +669,12 @@ def _verify_matrix_root(root, ref, scope):
                 set(target['raw_label_refs']) <= set(raw['sources']), 'frozen original target slice lineage mismatch')
             target_refs.append(target['label_ref'])
         _require(target_refs == sorted(set(target_refs)), 'frozen target slice order/identity mismatch')
-    expanded = _expand_closure(receipt)
-    by_day = {name: {} for name in names}
-    for name in names:
-        metadata, sources = root['signal_metadata'][name], expanded[name]
-        descriptors = receipt['signal_inputs'][name]
-        descriptors = descriptors if type(descriptors) is list else [descriptors]
-        _require(type(metadata) is list and bool(metadata) and len(metadata) == len(sources) == len(descriptors) and
-            [item['signal_run_ref'] for item in metadata] == root['signal_refs'][name] ==
-            [source['signal_input']['signal_run_ref'] for source in sources] and
-            [source['signal_input'] for source in sources] == descriptors, 'frozen matrix Signal version binding mismatch')
-        for item, source in zip(metadata, sources):
-            descriptor = source['signal_input']
-            _require(records.get(descriptor['path']) == descriptor['file_digest'],
-                'frozen Signal original byte binding mismatch')
-            _verify_ref(item['model'], 'model_ref')
-            _require(item['signal_contract_version'] == 'stock_prediction_run_v2' and
-                item['feature_contract_version'] == 'stock_feature_slice_v3' and
-                item['model']['model_ref'] == source['model_ref'] and item['feature_ref'] == source['feature_ref'] and
-                item['signal_stage'] == 'prediction_raw' and item['score_unit'] == 'dimensionless' and
-                item['score_semantics'] == item['model']['target_semantics'] and
-                (item['snapshot'], item['pit_policy']) == (raw['snapshot'], raw['pit_policy']),
-                'frozen matrix Signal stage/model/Snapshot/PIT mismatch')
-            days = item['prediction_sessions']
-            _require(type(days) is list and bool(days) and days == sorted(set(days)) and set(days) <= set(base['calendar']),
-                'frozen matrix ordered prediction dates required')
-            for day in days:
-                _require(day not in by_day[name], 'frozen weekly Signal date overlap')
-                by_day[name][day] = item
-    _require(root['clock_floor'] == _clock_floor_matrix(root['signal_metadata'], raw) and
-        _instant(scope['evaluation_cutoff']) >= _instant(root['clock_floor']),
-        'evaluation cutoff precedes frozen source revision/Signal visibility')
-    _require(set(root['shards']) == set(base['sessions']) and all(
-        set(descriptor) == {'file', 'file_digest'} and descriptor['file'] == day+'.json' and _ref(descriptor['file_digest'])
-        for day, descriptor in root['shards'].items()), 'complete frozen matrix date shards required')
-    return by_day
 
 
 def _matrix_label_context(root):
+    if root['raw_metadata']['mode'] == 'compact_targets':
+        from .stock_signal_evaluation_compact import _label_context
+        return _label_context(root)
     sources = {day: {} for day in root['scope']['sessions']}
     for header in root['raw_metadata']['sources'].values():
         compiled = (header, _instant(header['source_context']['derivation']['decision_cutoff']),
@@ -650,6 +692,10 @@ def _validate_matrix_label(root, row, key, context):
         type(label['source_refs']) is list and bool(label['source_refs']) and
         label['source_refs'] == sorted(set(label['source_refs'])) and
         set(label['source_refs']) <= set(available_sources), 'frozen matrix Label original source binding mismatch')
+    if raw['mode'] == 'compact_targets':
+        from .stock_signal_evaluation_compact import _binding
+        _require(row['label_leaf_ref'] == _binding(raw['label_spec'], raw['snapshot'], label),
+            'frozen compact original row/source binding mismatch')
     if raw['mode'] == 'raw_override':
         header = next(iter(raw['sources'].values()))
         _require(label['source_refs'] == [header['source_ref']] and
@@ -672,7 +718,8 @@ def _audit_matrix_input(ref):
     receipt = root['admission_receipt']
     # A fresh public batch admission hashes its common closure once. Do not
     # separately hash that same large graph before calling the owner loader.
-    with load_stock_ml_batch_inputs(receipt['batch_manifest']) as batch:
+    options = {'residency': 'sequential'} if receipt['batch_manifest']['contract_version'] == 'stock_ml_batch_inputs_v4' else {}
+    with load_stock_ml_batch_inputs(receipt['batch_manifest'], **options) as batch:
         original, records, source_marks, _ = _admit_matrix(
             {name: receipt['signal_inputs'][name] for name in root['signal_order']},
             receipt['raw_label_input'], root['scope'], batch)

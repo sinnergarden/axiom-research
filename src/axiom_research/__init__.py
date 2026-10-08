@@ -14,7 +14,7 @@ from .stock_feature_inputs import StockFeatureInputs, load_stock_feature_inputs
 from .stock_signal_evaluation import (StockSignalEvaluation, evaluate_stock_signal,
     evaluate_stock_signals, save_stock_signal_evaluation, load_stock_signal_evaluation)
 from .stock_signal_evaluation_projection import (save_stock_signal_evaluation_inputs,
-    evaluate_stock_signal_inputs, audit_stock_signal_evaluation)
+    evaluate_stock_signal_inputs, evaluate_stock_signal_input_periods, audit_stock_signal_evaluation)
 
 __version__ = "0.2.6"
 
