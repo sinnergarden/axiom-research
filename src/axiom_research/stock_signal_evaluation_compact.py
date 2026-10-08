@@ -237,7 +237,7 @@ def _verify_raw(root, scope, records):
             inputs['fold_spec_ref'] == digest(spec) and inputs['prepared_view'] == batch['prepared_view'] and
             inputs['input_ref'] not in by_input, 'frozen compact batch fold identity mismatch')
         by_input[inputs['input_ref']] = (inputs, spec)
-    seen = set()
+    seen = set(); consumed_refs = set()
     for target in raw['label_inputs']:
         _require(set(target) == {'input_ref', 'fold_spec_ref', 'fold_control', 'selector', 'sessions'} and
             target['sessions'] == sorted(set(target['sessions'])) and
@@ -266,6 +266,8 @@ def _verify_raw(root, scope, records):
         _require(selector['ranges'] == grid_ranges(days, feature_days, width), 'compact original selector ranges mismatch')
         descriptor = target['fold_control']
         _require(records.get(descriptor['path']) == descriptor['file_digest'], 'frozen original fold control pin mismatch')
+        consumed_refs.update(selector['target_refs'])
+    _require(set(raw['sources']) == consumed_refs, 'compact Raw sources must equal consumed evaluation targets')
     return by_input
 
 

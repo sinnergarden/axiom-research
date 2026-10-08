@@ -28,7 +28,7 @@ from axiom_research.stock_signal_evaluation_inputs import _select_inputs, _valid
 from axiom_research.stock_signal_evaluation import SPEC
 from axiom_research import stock_signal_evaluation_projection as frozen
 from axiom_research import stock_signal_evaluation_compact as compact
-from axiom_research.stock_signal_evaluation_matrix import _sources_table
+from axiom_research.stock_signal_evaluation_matrix import _sources_table, _label_projection_ref, _label_day_ref
 from axiom_engine.core import evaluate_signal_statistics
 
 
@@ -287,6 +287,42 @@ class CompactEvaluationTests(unittest.TestCase):
             context['derivation'].pop('factor_domain')
             with self.assertRaisesRegex(ValueError, 'native source query mismatch'):
                 _validate_raw_label_header(raw, owner.scope, owner.common['snapshot'], owner.common['pit_policy'])
+
+    def test_unselected_pinned_raw_source_cannot_enter_frozen_projection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); owner = OwnerStub(root/'sources'); ref = owner.freeze(root/'inputs')
+            wire = _read(ref.uri); raw = wire['raw_metadata']; receipt = wire['admission_receipt']
+            source = deepcopy(next(iter(raw['sources'].values()))); header = source['header']
+            price = header['definition']['price_view']; price['records_ref'] = digest('unselected Raw source')
+            price['price_view_ref'] = digest({k: v for k, v in price.items() if k != 'price_view_ref'})
+            header['definition_ref'] = digest(header['definition'])
+            header['target_ref'] = digest({k: v for k, v in header.items() if k != 'target_ref'})
+            path = Path(source['descriptor']['path']).with_name('unselected-target.json'); write_json(path, header)
+            source['descriptor'] = {'path': str(path), 'file_digest': file_digest(path), 'target_ref': header['target_ref']}
+            raw['sources'][header['target_ref']] = source
+            old_records = receipt['source_records']; records = _sources_table(old_records)
+            records[str(path)] = file_digest(path)
+            receipt['source_records'] = [{'path': p, 'file_digest': records[p]} for p in sorted(records)]
+            indices = {item['path']: n for n, item in enumerate(receipt['source_records'])}
+            for closures in receipt['source_closure'].values():
+                for closure in closures:
+                    closure['source_record_indices'] = [indices[old_records[n]['path']] for n in closure['source_record_indices']]
+            # Every header and pin is valid; only its absence from evaluation
+            # selectors forbids this otherwise fully resealed row/source rebind.
+            compact._header(source, owner.scope, owner.common, records)
+            for day in header['definition']['sessions']:
+                shard_path = Path(ref.uri).parent/wire['shards'][day]['file']; shard = _read(shard_path)
+                for row in shard['rows']:
+                    row['label']['source_refs'] = [price['price_view_ref']]
+                    row['label_leaf_ref'] = compact._binding(raw['label_spec'], raw['snapshot'], row['label'])
+                raw['label_shard_refs'][day] = _label_day_ref(shard)
+                write_json(shard_path, shard); wire['shards'][day]['file_digest'] = file_digest(shard_path)
+            raw['label_ref'] = _label_projection_ref(raw)
+            receipt['receipt_ref'] = digest({k: v for k, v in receipt.items() if k != 'receipt_ref'})
+            wire['input_id'] = frozen._root_id(wire); write_json(ref.uri, wire)
+            changed = replace(ref, artifact_id=wire['input_id'], content_digest=file_digest(ref.uri))
+            with self.assertRaisesRegex(ValueError, 'Raw sources must equal consumed evaluation targets'):
+                evaluate_stock_signal_inputs(changed, scope=owner.scope, destination=root/'reports')
 
     def test_resealed_frozen_prediction_clock_and_member_conflicts(self):
         for case in ('clock', 'membership'):
