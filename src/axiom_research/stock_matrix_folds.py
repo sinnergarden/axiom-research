@@ -36,7 +36,6 @@ def _dataset(projection,inputs,spec):
         'training_rows_ref':projection.training_rows_ref,'training_row_count':len(projection.training_keys),
         'excluded':projection.excluded,'target_semantics':TARGET_SEMANTICS,
         'normalization':NORMALIZATION_SPEC,'validation':'none_fixed_parameters_no_early_stopping'}
-    if 'model_feature_selection' in projection.common: value['model_feature_selection']=projection.common['model_feature_selection']
     return seal(value,'dataset_ref')
 
 
@@ -126,9 +125,6 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,traini
                 'booster_digest':file_digest(stage/'booster.txt'),
                 'feature_normalization':'same_date_visible_members_cs_zscore_no_fit',
                 'label_normalization':NORMALIZATION_SPEC},'model_ref')
-            if 'model_feature_selection' in common:
-                model=seal({**{k:v for k,v in model.items() if k!='model_ref'},
-                    'model_feature_selection':common['model_feature_selection']},'model_ref')
             predictions=seal({'contract_version':'stock_prediction_run_v2','signal_stage':'prediction_raw',
                 'score_semantics':TARGET_SEMANTICS,'score_unit':'dimensionless','feature_ref':features['feature_ref'],
                 'model_ref':model['model_ref'],'fold_spec_ref':digest(spec),'clock_basis':'declared_simulation',
@@ -248,8 +244,7 @@ def _load_matrix_fold(path, *, projection,batch,ingress):
         require((binding is None or binding['labels']==labels) and dataset==expected_dataset and
                 expected_dataset['training_row_count']>=40,'saved compact training selection mismatch')
         require(model['contract_version']=='stock_model_release_v2','unsupported saved model contract')
-        require(model.get('model_feature_selection')==common.get('model_feature_selection') and
-                definition.get('model_feature_selection')==common.get('model_feature_selection'),
+        require(definition.get('model_feature_selection')==common.get('model_feature_selection'),
                 'saved model selection/schema mismatch')
         for actual,expected in ((model['dataset_ref'],dataset['dataset_ref']),(model['feature_ref'],features['feature_ref']),
             (model['label_ref'],labels['label_ref']),(model['raw_label_refs'],expected_raw_refs),

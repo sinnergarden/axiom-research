@@ -430,9 +430,6 @@ class CompactState:
                     'selectors':inputs['selectors'],'training_keys_digest':digest(keys),'training_rows_ref':training_ref,
                     'training_row_count':len(keys),'excluded':excluded,'target_semantics':TARGET_SEMANTICS,
                     'normalization':NORMALIZATION_SPEC,'validation':'none_fixed_parameters_no_early_stopping'},'dataset_ref')
-                if self.model_binding is not None:
-                    dataset=seal({**{k:v for k,v in dataset.items() if k!='dataset_ref'},
-                        'model_feature_selection':self.model_binding},'dataset_ref')
                 payload['fold_binding']={'dataset':dataset,'labels':labels}
             lease=_size(payload,maximum=self.store.maximum_matrix_bytes,
                 retained=self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes)+sum(

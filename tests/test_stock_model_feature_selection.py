@@ -1,6 +1,8 @@
 """Small 300-column saved-table acceptance; no Feature execution or real fit."""
 from copy import deepcopy
+from contextlib import nullcontext
 import gc
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -11,8 +13,8 @@ from unittest.mock import patch
 
 from axiom_research import (load_stock_feature_view,prepare_stock_ml_batch_inputs,
     load_stock_ml_batch_inputs,build_stock_ml_fold_from_saved_inputs,load_stock_ml_fold)
-from axiom_research.stock_artifacts import _read,digest
-from axiom_research.stock_fold_inputs import validate_spec
+from axiom_research.stock_artifacts import _read,digest,write_json
+from axiom_research.stock_fold_inputs import validate_spec,seal
 from axiom_research.stock_compact_store import (OwnedStore,_view_data,
     feature_rows,training_matrix,iter_feature_eligibility,set_feature_window,clear_feature_window)
 from axiom_research.stock_compact_batch import read_target
@@ -186,9 +188,13 @@ class ModelFeatureSelectionTests(unittest.TestCase):
 
     def test_raw_reuse_changed_cohort_original_core_and_saved_model_bindings(self):
         from axiom_engine.core import FeaturePlan,FactBatch,ExecutionContext,execute_feature_plan
+        from axiom_engine.runtime import stock_prediction_schedule
         from axiom_research.stock_label_contracts import normalization_section_inputs
-        with tempfile.TemporaryDirectory() as temp:
-            root=Path(temp); f,path=self.fixture(root); origin=self.raw_batch(f,path,root)
+        from axiom_research.stock_ml import predict_stock_model
+        review_root=os.environ.get('AXIOM_MODEL_SUBSET_REVIEW_ROOT')
+        with (nullcontext(review_root) if review_root else tempfile.TemporaryDirectory()) as temp:
+            root=Path(temp); root.mkdir(parents=True,exist_ok=True)
+            f,path=self.fixture(root); origin=self.raw_batch(f,path,root)
             a=self.selection(f,0,100); b=self.selection(f,50,150)
             with load_stock_feature_view(path,residency='sequential') as view, \
                  load_stock_ml_batch_inputs(origin,feature_inputs=view,residency='sequential') as source:
@@ -261,8 +267,8 @@ class ModelFeatureSelectionTests(unittest.TestCase):
                      patch('axiom_research.stock_training.fit_predict_stock_model',side_effect=backend), \
                      patch('axiom_research.stock_ml._implementation',return_value=f.implementation), \
                      patch('axiom_research.stock_ml._environment',return_value=f.environment):
-                    runs=[]
-                    for batch_manifest,selection in ((chosen_b,b),(reordered,reversed_b)):
+                    runs=[]; schedules=[]; saved_cases=[]
+                    for batch_manifest,selection in ((chosen,a),(chosen_b,b),(reordered,reversed_b)):
                         with load_stock_ml_batch_inputs(batch_manifest,feature_inputs=view,residency='sequential') as batch:
                             fold=batch_manifest['folds'][0]
                             run=build_stock_ml_fold_from_saved_inputs(fold['input_manifest'],fold_spec=fold['fold_spec'],
@@ -270,15 +276,62 @@ class ModelFeatureSelectionTests(unittest.TestCase):
                             runs.append(run)
                             model=_read(run.path/'model.json'); dataset=_read(run.path/'dataset.json')
                             self.assertEqual(model['ordered_features'],[s['id'] for s in selection])
-                            self.assertEqual(model['model_feature_selection'],dataset['model_feature_selection'])
-                            self.assertEqual(model['model_feature_selection']['feature_view_ref'],view.identity)
+                            self.assertEqual(model['feature_selection'],selection)
+                            self.assertEqual(len(model),20); self.assertEqual(len(dataset),17)
+                            self.assertNotIn('model_feature_selection',model)
+                            self.assertNotIn('model_feature_selection',dataset)
+                            self.assertEqual(model['dataset_ref'],dataset['dataset_ref'])
+                            common=_read(batch_manifest['prepared_view']['path'])['definition']
+                            self.assertEqual(common['model_feature_selection']['feature_view_ref'],view.identity)
+                            self.assertEqual(dataset['prepared_view_ref'],batch_manifest['prepared_view']['prepared_view_ref'])
                             self.assertEqual(load_stock_ml_fold(run.path,batch=batch).identity,run.identity)
+                            predictions=_read(run.path/'predictions.json'); saved_fold=_read(run.path/'fold.json')
+                            self.assertEqual(model['feature_ref'],predictions['feature_ref'])
+                            schedule=stock_prediction_schedule(folds=[{'fold_ref':saved_fold['fold_ref'],
+                                'fold_spec':fold['fold_spec'],'model':model,'prediction_frame':predictions}],
+                                calendar=f.calendar).to_dict()
+                            self.assertEqual([s['trade_session'] for s in schedule['trade_schedule']],
+                                fold['fold_spec']['oos_trade_sessions'])
+                            schedules.append(schedule)
+                            saved_cases.append({'path':str(run.path),'model_ref':model['model_ref'],
+                                'dataset_ref':dataset['dataset_ref'],'ordered_features':model['ordered_features']})
                             with patch('axiom_research.stock_compact_batch.training_matrix',side_effect=AssertionError('X reached')):
                                 with self.assertRaisesRegex(ValueError,'prepared cohort'):
                                     build_stock_ml_fold_from_saved_inputs(fold['input_manifest'],fold_spec=fold['fold_spec'],
-                                        destination=root/'wrong',batch=batch,model_feature_selection=a)
-                    self.assertNotEqual(runs[0].identity,runs[1].identity)
+                                        destination=root/'wrong',batch=batch,
+                                        model_feature_selection=b if selection==a else a)
+                    self.assertEqual(len({run.identity for run in runs}),3)
+                    self.assertEqual(len({case['dataset_ref'] for case in saved_cases}),3)
                     self.assertEqual(load_stock_ml_fold(runs[0].path).identity,runs[0].identity)
+                tampered=deepcopy(chosen_b)
+                bad_binding=tampered['definition']['model_feature_selection']; bad_binding['schema'][0]['unit']='wrong_unit'
+                tampered['definition']['model_feature_selection']=seal(
+                    {k:v for k,v in bad_binding.items() if k!='model_feature_selection_ref'},'model_feature_selection_ref')
+                tampered['definition_ref']=digest(tampered['definition'])
+                tampered['batch_ref']=digest({k:v for k,v in tampered.items() if k not in ('batch_ref','content_digest')})
+                tampered=seal({k:v for k,v in tampered.items() if k!='content_digest'},'content_digest')
+                with patch.object(OwnedStore,'buffer',side_effect=AssertionError('schema mismatch reached column IO')):
+                    with self.assertRaisesRegex(ValueError,'selection/schema/source'):
+                        load_stock_ml_batch_inputs(tampered,feature_inputs=view,residency='sequential')
+                # Prediction guards use saved order/versions and reject a
+                # native booster's different schema before numerical inference.
+                model=_read(runs[1].path/'model.json'); rows=[{'values':[float(i) for i in range(100)]}]
+                module=types.ModuleType('lightgbm')
+                class WrongBooster:
+                    def __init__(self,**kwargs): pass
+                    def feature_name(self): return list(reversed(model['ordered_features']))
+                    def predict(self,*args,**kwargs): raise AssertionError('numerical predict reached')
+                module.Booster=WrongBooster
+                with patch.dict(sys.modules,{'lightgbm':module}):
+                    with self.assertRaisesRegex(ValueError,'feature order'):
+                        predict_stock_model(runs[1].path,rows,ordered_features=list(reversed(model['ordered_features'])),
+                            feature_selection=model['feature_selection'])
+                    with self.assertRaisesRegex(ValueError,'semantic versions'):
+                        predict_stock_model(runs[1].path,rows,ordered_features=model['ordered_features'],
+                            feature_selection=[{**s,'semantic_version':'wrong'} for s in model['feature_selection']])
+                    with self.assertRaisesRegex(ValueError,'booster feature schema'):
+                        predict_stock_model(runs[1].path,rows,ordered_features=model['ordered_features'],
+                            feature_selection=model['feature_selection'])
                 missing_selected=prepare_stock_ml_batch_inputs(None,feature_inputs=view,fold_specs=f.folds()[:1],
                     destination=root/'subsets',preparation_options=self.options,
                     model_feature_selection=self.selection(f,299,300),reuse_raw_from_batch=source)
@@ -301,6 +354,14 @@ class ModelFeatureSelectionTests(unittest.TestCase):
                         prepare_stock_ml_batch_inputs(None,feature_inputs=view,fold_specs=f.folds()[:1],destination=root/'bad-plan',
                             preparation_options={**self.options,'row_block_sessions':32},model_feature_selection=a,
                             reuse_raw_from_batch=source)
+                if review_root:
+                    write_json(root/'engine-schedules.json',schedules)
+                    write_json(root/'acceptance.json',{'status':'PASS','scope':'synthetic saved closure and public Engine schedule',
+                        'feature_view_ref':original['feature_view_ref'],'feature_path':str(path),
+                        'models':saved_cases,'engine_schedule_count':len(schedules),
+                        'source_unchanged':view.to_dict()==original,'model_fields':20,'dataset_fields':17,
+                        'real_data_calls':0,'real_feature_calls':0,'real_fit_calls':0,'numerical_predict_calls':0,'account_calls':0,
+                        'schema_mismatch_rejected':True,'prediction_order_version_booster_mismatch_rejected':True})
 
 
 if __name__=='__main__': unittest.main()
