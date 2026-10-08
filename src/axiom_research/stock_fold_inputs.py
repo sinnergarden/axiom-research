@@ -165,26 +165,41 @@ def validate_spec(spec, calendar):
     require(set(spec) == {'contract_version', 'training_window', 'fit_session', 'fit_cutoff',
         'simulated_model_available_at', 'oos_trade_sessions', 'inference_cutoff_by_session',
         'evaluation_cutoff'} and spec['contract_version'] in
-        ('stock_ml_fold_spec_v1', 'stock_ml_fold_spec_v2'), 'unsupported fold spec')
+        ('stock_ml_fold_spec_v1', 'stock_ml_fold_spec_v2', 'stock_ml_fold_spec_v3'), 'unsupported fold spec')
     window = spec['training_window']
     fit = spec['fit_session']; require(fit in calendar, 'fit session outside frozen calendar')
     i = calendar.index(fit)
+    configured=spec['contract_version']=='stock_ml_fold_spec_v3'
+    if configured:
+        require(type(window) is dict and window.get('unit') in ('feature_sessions','calendar_years') and
+            type(window.get('length')) is int and window['length']>0 and
+            window.get('end')=='previous_fit_session', 'positive configured training window required')
+        wanted={'unit','length','end'} if window['unit']=='feature_sessions' else {
+            'unit','length','end','start','leap_day'}
+        require(set(window)==wanted and (window['unit']=='feature_sessions' or
+            (window['start']=='fit_date_minus_years_inclusive' and window['leap_day']=='clamp_feb_28')),
+            'unsupported configured training window rule')
+        ordered(calendar,'calendar'); [_session(d) for d in calendar]
     if spec['contract_version'] == 'stock_ml_fold_spec_v1':
         require(window == {'unit': 'feature_sessions', 'length': 65, 'end': 'previous_fit_session'} and
                 type(window['length']) is int, 'this bounded profile requires 65 actual feature sessions')
         require(i >= 65, 'insufficient frozen training calendar')
         training = calendar[i-65:i]
+    elif configured and window['unit']=='feature_sessions':
+        require(i>=window['length'],'insufficient configured training calendar')
+        training=calendar[i-window['length']:i]
     else:
-        require(window == {'unit': 'calendar_years', 'length': 2, 'end': 'previous_fit_session',
+        require(configured or window == {'unit': 'calendar_years', 'length': 2, 'end': 'previous_fit_session',
                 'start': 'fit_date_minus_years_inclusive', 'leap_day': 'clamp_feb_28'} and
                 type(window['length']) is int, 'this bounded profile requires two calendar years')
         ordered(calendar, 'calendar'); [_session(d) for d in calendar]
         fit_date = date.fromisoformat(fit)
+        years=window['length']; require(fit_date.year>years,'configured year boundary outside date domain')
         try:
-            boundary = fit_date.replace(year=fit_date.year-2).isoformat()
+            boundary = fit_date.replace(year=fit_date.year-years).isoformat()
         except ValueError:
             require(fit_date.month == 2 and fit_date.day == 29, 'unsupported calendar-year boundary')
-            boundary = fit_date.replace(year=fit_date.year-2, day=28).isoformat()
+            boundary = fit_date.replace(year=fit_date.year-years, day=28).isoformat()
         require(calendar[0] < boundary, 'insufficient frozen two-year training calendar/lookback')
         training = [day for day in calendar[:i] if day >= boundary]
         require(bool(training) and training[-1] == calendar[i-1],
@@ -195,10 +210,19 @@ def validate_spec(spec, calendar):
     clocks = spec['inference_cutoff_by_session']
     require(set(clocks) == set(prediction), 'strict previous-session inference clocks required')
     fit_time = _instant(spec['fit_cutoff']); available = _instant(spec['simulated_model_available_at'])
-    require(fit_time == _instant(fit+'T20:30:00+08:00') and
-            available == _instant(fit+'T20:45:00+08:00'), 'bounded fit/model clock conflict')
-    require(all(_instant(clocks[d]) == _instant(d+'T21:00:00+08:00') and
-                fit_time < available < _instant(clocks[d]) for d in prediction), 'fold inference clock conflict')
+    if configured:
+        from zoneinfo import ZoneInfo
+        exchange=ZoneInfo('Asia/Shanghai')
+        require(fit_time.astimezone(exchange).date().isoformat()==fit and
+                available.astimezone(exchange).date().isoformat()==fit and fit_time<available,
+                'configured fit/model clocks must belong to the fit session and be ordered')
+        require(all(_instant(clocks[d]).astimezone(exchange).date().isoformat()==d and
+                    available<_instant(clocks[d]) for d in prediction), 'configured inference clock conflict')
+    else:
+        require(fit_time == _instant(fit+'T20:30:00+08:00') and
+                available == _instant(fit+'T20:45:00+08:00'), 'bounded fit/model clock conflict')
+        require(all(_instant(clocks[d]) == _instant(d+'T21:00:00+08:00') and
+                    fit_time < available < _instant(clocks[d]) for d in prediction), 'fold inference clock conflict')
     require(_instant(spec['evaluation_cutoff']) > max(map(_instant, clocks.values())),
             'OOS evaluation cutoff must follow inference')
     return training, prediction

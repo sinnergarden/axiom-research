@@ -50,7 +50,7 @@ class _FoldLease:
         targets=records=marks=selected=metadata=value=rows=view=target=None
         store=self._state.store
         try:
-            require(inputs['contract_version']=='stock_ml_saved_inputs_v4','compact v4 evaluation lease required')
+            require(inputs['contract_version'] in ('stock_ml_saved_inputs_v4','stock_ml_saved_inputs_v5'),'compact v4 evaluation lease required')
             targets,records,marks=self._state.evaluation_sources(inputs,spec)
             for path,ref in self._ingress.hashes.items():
                 require(path not in records or records[path]==ref,'conflicting saved evaluation source pin')
@@ -60,7 +60,7 @@ class _FoldLease:
             selected={'manifest.json':manifest,**{name:documents[name] for name in
                 ('fold.json','model.json','feature-slice.json','predictions.json')}}
             metadata={'documents':selected,'common':{key:projection.common[key] for key in
-                ('snapshot','pit_policy','calendar','universe')},
+                ('snapshot','pit_policy','calendar','universe',*(['target_spec'] if 'target_spec' in projection.common else []))},
                 'evaluation_targets':[{'descriptor':d,'header':h} for d,h,_ in targets],
                 'source_records':tuple(sorted(records.items())),'source_fingerprints':marks}
             estimate=_size(metadata,maximum=store.maximum_matrix_bytes,

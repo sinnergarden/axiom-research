@@ -20,20 +20,29 @@ from .stock_signal_evaluation_matrix import (_sources_table, _compact_features, 
 
 
 def _spec(definition):
-    _require(definition['formula'] == 'close(f+5) / open(f+1) - 1' and
-        type(definition['horizon_sessions']) is int and definition['horizon_sessions'] == 5 and
+    columnar='label_definition_ref' in definition;h=definition['horizon_sessions'] if columnar else 5
+    _require(type(h) is int and h>0 and definition['formula'] == f'close(f+{h}) / open(f+1) - 1' and
+        type(definition['horizon_sessions']) is int and definition['horizon_sessions'] == h and
         type(definition['start_session_offset']) is int and definition['start_session_offset'] == 1 and
-        type(definition['end_session_offset']) is int and definition['end_session_offset'] == 5 and
+        type(definition['end_session_offset']) is int and definition['end_session_offset'] == h and
         definition['price_basis'] == 'common_anchor_adjusted_v1' and
         definition['missing_policy'] == 'invalid_null_preserve_grid', 'compact Raw semantics mismatch')
-    return {'label_id': 'forward_5_session_open_close_v1', 'normalization': 'none',
+    return {'label_id': f'forward_{h}_session_open_close_v1', 'normalization': 'none',
+        **({'label_definition_ref':definition['label_definition_ref'],'source_contract':'data_column_selection_v1'} if columnar else {}),
         **{k: definition[k] for k in ('formula', 'horizon_sessions', 'start_session_offset',
             'end_session_offset', 'price_basis', 'missing_policy', 'implementation_ref')},
         'start_price': 'open', 'end_price': 'close'}
 
 
 def _context(source):
-    return source['header']['definition']['price_view']['context']
+    view=source['header']['definition']['price_view']
+    if view['contract_version']=='stock_label_column_price_view_v1':
+        # An explicit projection of the new owner proof, never a DataBatch wire.
+        return {'contract_version':'stock_column_label_context_v1','snapshot_id':view['snapshot_ref'],
+            'domain':'market_daily','query':view['query_binding'],'derivation':{
+                **view['adjustment_binding'],'price_query':view['input_queries']['price'],
+                'factor_query':view['input_queries']['factor'],'factor_domain':'adjustment_factors'}}
+    return view['context']
 
 
 def _header(source, scope, common, records):
@@ -48,7 +57,8 @@ def _header(source, scope, common, records):
         'row_count', 'reason_dictionary', 'source_dictionary', 'buffers', 'core_ref', 'cohort', 'target_ref'},
         'exact compact target header required')
     _verify_ref(header, 'target_ref'); definition = header['definition']
-    _require(header['contract_version'] == 'stock_compact_raw_v1' and
+    columnar=header['contract_version']=='stock_compact_raw_v2'
+    _require(header['contract_version'] in ('stock_compact_raw_v1','stock_compact_raw_v2') and
         header['target_ref'] == descriptor['target_ref'] and header['definition_ref'] == digest(definition) and
         definition['calendar'] == scope['calendar'] and definition['universe'] == common['universe'] and
         definition['snapshot'] == common['snapshot'], 'compact original target identity/axes mismatch')
@@ -72,6 +82,11 @@ def _header(source, scope, common, records):
             'compact Raw physical dtype/shape mismatch')
         _require(records.get(descriptor['path']) == descriptor['file_digest'], 'compact original buffer pin mismatch')
     source_view = definition['price_view']; _verify_ref(source_view, 'price_view_ref')
+    if columnar:
+        from .stock_column_inputs import validate_column_raw_binding
+        validate_column_raw_binding(definition,{**common,'calendar':scope['calendar']},definition['cutoff'])
+        _require(_instant(definition['cutoff'])<=_instant(scope['evaluation_cutoff']),'column outcome cutoff exceeds evaluation')
+        return _spec(definition)
     _require(source_view['contract_version'] == 'stock_label_price_view_v1' and
         _ref(source_view['records_ref']) and _ref(source_view['field_meta_ref']), 'compact price-view refs required')
     context = _context(source); cutoff = _instant(scope['evaluation_cutoff'])
@@ -111,7 +126,7 @@ def _join(targets, inputs, fold_spec, common, scope, records, state, wanted):
         # Only the current leased evaluation part becomes a detached list.
         indexed = _grid(list(item['rows']), common['universe'], definition['sessions'], 'feature_session', 'compact Raw')
         for key, row in indexed.items():
-            _target(row, key, common['calendar'], _instant(definition['cutoff']), 5)
+            _target(row, key, common['calendar'], _instant(definition['cutoff']), spec['horizon_sessions'])
             _require(row['source_refs'] == [definition['price_view']['price_view_ref']], 'compact row original source mismatch')
             if key[0] not in wanted_securities or key[1] not in wanted_sessions: continue
             binding = _binding(spec, common['snapshot'], row)
@@ -183,9 +198,11 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
                     'compact Signal outside saved batch definition')
                 control = inputs['fold_control']
                 _require(pins.get(control['path']) == control['file_digest'], 'compact original fold control pin required')
-                _require(inputs['contract_version'] == 'stock_ml_saved_inputs_v4' and
-                    fold['contract_version'] == 'stock_ml_fold_v3' and model['contract_version'] == 'stock_model_release_v2' and
-                    signal['contract_version'] == 'stock_prediction_run_v2', 'compact saved stage versions mismatch')
+                columnar=inputs['contract_version']=='stock_ml_saved_inputs_v5'
+                _require(inputs['contract_version'] in ('stock_ml_saved_inputs_v4','stock_ml_saved_inputs_v5') and
+                    fold['contract_version'] == ('stock_ml_fold_v4' if columnar else 'stock_ml_fold_v3') and
+                    model['contract_version'] == ('stock_model_release_v3' if columnar else 'stock_model_release_v2') and
+                    signal['contract_version'] == ('stock_prediction_run_v3' if columnar else 'stock_prediction_run_v2'), 'compact saved stage versions mismatch')
                 _require(set(descriptor) == {'path', 'file_digest', 'signal_run_ref'} and
                     Path(descriptor['path']).name == 'predictions.json' and Path(descriptor['path']).is_absolute() and
                     pins.get(descriptor['path']) == descriptor['file_digest'] and
@@ -194,6 +211,7 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
                     signal['fold_spec_ref'] == digest(spec),
                     'compact saved Signal/fold/model binding mismatch')
                 identity = {k: deepcopy(lease.common[k]) for k in ('snapshot', 'pit_policy', 'calendar', 'universe')}
+                if columnar:identity['target_spec']=deepcopy(lease.common['target_spec'])
                 _require(common is None or common == identity, 'comparison compact common scope mismatch')
                 common = identity
                 _require(common['calendar'] == scope['calendar'] and wanted[0] <= set(common['universe']),
@@ -241,6 +259,8 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
 def _verify_raw(root, scope, records):
     raw = root['raw_metadata']; common = {'universe': next(iter(raw['sources'].values()))['header']['definition']['universe'],
         'snapshot': raw['snapshot'], 'pit_policy': raw['pit_policy']}
+    if 'target_spec' in root['admission_receipt']['batch_manifest']['definition']:
+        common['target_spec']=root['admission_receipt']['batch_manifest']['definition']['target_spec']
     _require(raw['mode'] == 'compact_targets' and root['admission_receipt']['raw_label_input'] is None and
         raw['label_ref'] == _label_projection_ref(raw), 'frozen compact Raw mode/identity mismatch')
     for ref, source in raw['sources'].items():
@@ -251,7 +271,7 @@ def _verify_raw(root, scope, records):
     by_input = {}
     for fold in batch['folds']:
         inputs, spec = fold['input_manifest'], fold['fold_spec']; _verify_ref(inputs, 'input_ref')
-        _require(inputs['contract_version'] == 'stock_ml_saved_inputs_v4' and
+        _require(inputs['contract_version'] in ('stock_ml_saved_inputs_v4','stock_ml_saved_inputs_v5') and
             inputs['fold_spec_ref'] == digest(spec) and inputs['prepared_view'] == batch['prepared_view'] and
             inputs['input_ref'] not in by_input, 'frozen compact batch fold identity mismatch')
         by_input[inputs['input_ref']] = (inputs, spec)

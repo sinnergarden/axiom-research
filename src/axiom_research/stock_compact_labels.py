@@ -186,13 +186,16 @@ class _RawPriceDomain:
         self.close()
 
 
-def _implementation():
+def _implementation(*,columnar=False):
     import inspect
     sources={name:file_digest(Path(__file__).with_name(name)) for name in (
         'labels.py','stock_label_contracts.py','stock_compact_labels.py',
         'stock_compact_store.py','stock_compact_batch.py','stock_batch.py',
         'stock_fold_inputs.py','stock_matrix_storage.py','stock_compact_controls.py')}
     sources['canonical_training_binding']=inspect.getsource(digest_array_rows)
+    if columnar:
+        sources.update({name:file_digest(Path(__file__).with_name(name)) for name in
+            ('stock_column_inputs.py','stock_target_spec.py','stock_training_blocks.py')})
     return digest(sources)
 
 
@@ -213,6 +216,45 @@ def _raw_implementation():
         for name in ('_session','_instant','_sessions','_query_context','_keyed','_endpoint',
                      '_compile_forward_index','_forward_rows')},
         'compiled_domain_owner':inspect.getsource(_RawPriceDomain)})
+
+
+def _column_raw_implementation():
+    """Bind the actual Core array kernel and the new endpoint qualifier only."""
+    import inspect
+    from axiom_engine.core import execute_forward_returns
+    from axiom_engine.core.cs_batch import _snapshot_buffer,_descriptor
+    from axiom_engine.core.cs_batch import _BUFFER_TYPES
+    from axiom_engine.core import contracts
+    from importlib.metadata import version
+    from .stock_column_inputs import ColumnPriceDomain,query_binding
+    return digest({'operator':'core_forward_returns_batch',
+        'kernel':inspect.getsource(execute_forward_returns),
+        'buffer_admission':inspect.getsource(_snapshot_buffer),
+        'buffer_descriptor':inspect.getsource(_descriptor),
+        'buffer_types':{name:_BUFFER_TYPES[name] for name in ('values','value_validity')},
+        'core_contracts':file_digest(contracts.__file__),'numpy':version('numpy'),
+        'qualification':inspect.getsource(ColumnPriceDomain.rows),
+        'dependency_binding':inspect.getsource(ColumnPriceDomain._endpoint_dependency),
+        'query_binding':inspect.getsource(query_binding)})
+
+
+def _column_normalization_implementation():
+    """The actual CS kernel and eligibility dependencies, not the Core repo."""
+    import inspect
+    from axiom_engine.core import cs_batch,contracts,plan,execution
+    from .stock_target_spec import eligible_target_reason
+    from .stock_column_inputs import ColumnMathReuse
+    from importlib.metadata import version
+    import platform
+    return digest({'operator':'core_cs_zscore_batch_v1','core':{
+        name:file_digest(module.__file__) for name,module in
+        (('cs_batch',cs_batch),('contracts',contracts),('plan',plan))},
+        'arithmetic':{name:inspect.getsource(getattr(execution,name)) for name in
+            ('_Cell','_merge','_std','_cs_zscore_scale','_cs_zscore_value')},
+        'eligibility':inspect.getsource(eligible_target_reason),
+        'normalization_projection':inspect.getsource(_normalized),
+        'numerical_binding':inspect.getsource(ColumnMathReuse.vector_ref),
+        'numpy':version('numpy'),'python':platform.python_version()})
 
 
 def _working(metrics, amount):
@@ -252,7 +294,7 @@ def _sync_feature_charge(metrics):
     state=metrics.get('_owner_state')
     external=0 if state is None else max(0,state._fixed_shared_bytes-metrics['_owner_shared_baseline'])
     metrics['raw_reuse_live_bytes']=reused
-    metrics['_feature_bytes']=feature_store.resident_bytes+metrics['_caller_bytes']+reused+metrics.get('_checkpoint_bytes',0)+external
+    metrics['_feature_bytes']=feature_store.resident_bytes+metrics['_caller_bytes']+reused+metrics.get('_checkpoint_bytes',0)+external+metrics.get('_column_math_bytes',0)
     metrics['_store'].shared_bytes=(metrics['_feature_bytes']+metrics['_retained_raw_bytes']+
                                    metrics.get('_price_view_bytes',0))
     metrics['_store'].shared_source_bytes=feature_store.metrics['source_bytes']+metrics['_caller_source_bytes']+reused_source
@@ -300,7 +342,9 @@ def _write(root, definition, rows, *, normalized=False, core_ref=None, cohort=No
     if final_root is not None:
         for descriptor in buffers.values():
             descriptor['path']=str(Path(final_root)/Path(descriptor['path']).relative_to(Path(root).resolve()))
-    value=seal({'contract_version':'stock_compact_normalized_v1' if normalized else 'stock_compact_raw_v1',
+    columnar='label_definition_ref' in definition or definition.get('normalization_proof_version')=='stock_normalization_reuse_v1'
+    value=seal({'contract_version':('stock_compact_normalized_v2' if columnar else 'stock_compact_normalized_v1')
+        if normalized else ('stock_compact_raw_v2' if columnar else 'stock_compact_raw_v1'),
         'definition':definition,'definition_ref':digest(definition),'row_count':len(rows),
         'reason_dictionary':dictionary,'source_dictionary':[list(r) for r in sources],
         'buffers':buffers,'core_ref':core_ref,'cohort':cohort},'target_ref')
@@ -351,7 +395,8 @@ def _query(spec,cutoff,days):
     positions={d:i for i,d in enumerate(calendar)}; endpoints={anchor}
     for day in days:
         pos=positions[day]
-        for offset in (1,5):
+        from .stock_target_spec import label_horizon
+        for offset in (1,label_horizon(spec)):
             if pos+offset<len(calendar) and calendar[pos+offset]<=anchor: endpoints.add(calendar[pos+offset])
     query=QuerySpec(domain='market_daily',fields=('open','close'),symbols=tuple(spec['universe']),
         sessions=tuple(sorted(endpoints)),pit_policy=spec['pit_policy'],
@@ -400,14 +445,20 @@ def _price_view(data,spec,cutoff,days,metrics):
 
 def _raw(spec,cutoff,days,cache,metrics,price_view):
     from .labels import _forward_rows
-    require(type(price_view) is _RawPriceDomain,'owner-loaded Raw price domain required')
-    price_view.require_request(spec,cutoff,days)
+    from .stock_column_inputs import ColumnPriceDomain
+    columnar=type(price_view) is ColumnPriceDomain
+    require(type(price_view) in (_RawPriceDomain,ColumnPriceDomain),'owner-loaded Raw price domain required')
+    if not columnar:price_view.require_request(spec,cutoff,days)
+    else:require(price_view.spec==spec and set(days)<=set(spec['feature_sessions']),'column Raw request mismatch')
+    from .stock_target_spec import label_horizon
+    h=label_horizon(spec)
     source=price_view.source
     definition={'price_view':source,'snapshot':spec['snapshot'],'cutoff':cutoff,
         'calendar':spec['calendar'],'universe':spec['universe'],'sessions':days,
-        'formula':'close(f+5) / open(f+1) - 1','price_basis':'common_anchor_adjusted_v1',
-        'horizon_sessions':5,'start_session_offset':1,'end_session_offset':5,
-        'missing_policy':'invalid_null_preserve_grid','implementation_ref':_raw_implementation()}
+        'formula':f'close(f+{h}) / open(f+1) - 1','price_basis':'common_anchor_adjusted_v1',
+        'horizon_sessions':h,'start_session_offset':1,'end_session_offset':h,
+        'missing_policy':'invalid_null_preserve_grid','implementation_ref':_column_raw_implementation() if columnar else _raw_implementation()}
+    if columnar:definition['label_definition_ref']=spec['target_spec']['label_definition_ref']
     key=digest(definition); target=(Path(cache)/'raw'/key[7:]).resolve(); artifact=target/'target.json'
     if artifact.exists():
         from .stock_compact_batch import read_target
@@ -416,8 +467,13 @@ def _raw(spec,cutoff,days,cache,metrics,price_view):
         _working(metrics,len(rows)*2048); rows=list(rows)
         metrics['raw_cache_hits']+=1
         return {**descriptor,'file_digest':store.hashes[descriptor['path']],'target_ref':value['target_ref']},rows
-    rows=list(_forward_rows(None,None,None,calendar=spec['calendar'],features=days,
-        horizon_sessions=5,source_ref=source['price_view_ref'],_domain=price_view))
+    if columnar:
+        from axiom_engine.core import execute_forward_returns
+        rows=list(price_view.rows(days,horizon=h,forward_operator=execute_forward_returns,
+            reuse=metrics['_column_targets'],role=metrics.get('_column_role','training')))
+    else:
+        rows=list(_forward_rows(None,None,None,calendar=spec['calendar'],features=days,
+            horizon_sessions=h,source_ref=source['price_view_ref'],_domain=price_view))
     charge=_measured(metrics,rows)
     _working(metrics,charge)
     metrics['raw_operator_calls']+=1
@@ -452,7 +508,8 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
     binding=model_feature_binding(feature,selection)
     feature_count=len(spec['ordered_features']) if binding is None else len(binding['ordered_features'])
     for row,facts in zip(rows,iter_feature_eligibility(feature,offsets,model_feature_selection=selection)):
-        reason=_eligible_reason(row,facts,feature_count,instant)
+        from .stock_target_spec import eligible_target_reason
+        reason=eligible_target_reason(row,facts,feature_count,instant,spec)
         if reason is None:
             require(facts.maximum_available_at_utc_us is not None and
                     facts.maximum_available_at_utc_us<=cutoff_us,
@@ -467,14 +524,40 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
     definition={'calendar':spec['calendar'],'universe':spec['universe'],'sessions':days,'cutoff':cutoff,
         'raw_refs':cohort['raw_refs'],'cohort_ref':cohort_ref,'normalization_spec':NORMALIZATION_SPEC,
         'implementation_ref':_implementation(),'core_implementation_ref':IMPLEMENTATION_REF}
+    if metrics.get('_column_targets') is not None:
+        numerical_implementation=_column_normalization_implementation()
+        definition.update(implementation_ref=numerical_implementation,
+            core_implementation_ref=numerical_implementation)
     key=digest(definition); target=(Path(cache)/'normalized'/key[7:]).resolve(); artifact=target/'target.json'
     if artifact.exists():
         from .stock_compact_batch import read_target
         store=metrics['_store']; desc={'path':str(artifact.absolute())}
-        value,normalized=read_target(store,desc,expected=definition,raw_rows=rows)
+        value,normalized=read_target(store,desc,expected=None if metrics.get('_column_targets') is not None else definition,raw_rows=rows)
+        if metrics.get('_column_targets') is not None:
+            require({k:v for k,v in value['definition'].items() if k not in
+                ('normalization_proof_version','numerical_origins')}==definition,
+                'normalized column logical request mismatch')
         metrics['normalized_cache_hits']+=1
         fd['store'].check()
         return {**desc,'file_digest':store.hashes[desc['path']],'target_ref':value['target_ref']},list(normalized),value['core_ref'],cohort
+    reuse=metrics.get('_column_targets');daily={};core_days=days
+    if reuse is not None:
+        import numpy as np
+        core_days=[]
+        for i,day in enumerate(days):
+            _working(metrics,width*32+4096)
+            values=np.asarray([rows[i*width+j]['return'] if reasons[i*width+j] is None else 0.0
+                for j in range(width)],dtype='<f8')
+            members=np.asarray([reasons[i*width+j] is None for j in range(width)],dtype='?')
+            values.flags.writeable=members.flags.writeable=False
+            numeric=digest({'vectors':reuse.vector_ref((values,members)),
+                'normalization_spec_ref':digest(NORMALIZATION_SPEC)})
+            cached=reuse.normalization(day,numeric)
+            daily[day]={'input_numeric_ref':numeric,'cached':cached}
+            if cached is None:core_days.append(day)
+            else:metrics['normalized_daily_reuses']=metrics.get('normalized_daily_reuses',0)+1
+        values=members=cached=None
+    day_positions={day:i for i,day in enumerate(days)}
     arrays={name:array(code) for name,code in {'values':'d','value_validity':'B','value_reason_codes':'i',
         'fact_available_at_utc_us':'q','reference_member':'B','reference_available_at_utc_us':'q',
         'selection_cutoff_utc_us':'q','fact_source_codes':'i','reference_source_codes':'i'}.items()}
@@ -482,7 +565,8 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
     sources={}; calendar_ref=digest({'contract_version':'stock_label_calendar_v1','sessions':spec['calendar']})
     raw_ref=digest(cohort['raw_refs'])
     _working(metrics,_measured(metrics,cohort)+len(rows)*4096)
-    for i,day in enumerate(days):
+    for day in core_days:
+        i=day_positions[day]
         eligible=[[security,day] for j,security in enumerate(spec['universe']) if reasons[i*width+j] is None]
         bindings=_normalization_sources(raw_ref,feature_ref,day,cutoff,eligible)
         sources[day]={'bindings':sorted(bindings,key=lambda r:r['id']),
@@ -498,7 +582,7 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
     # Core accepts immutable readonly buffer views; its arithmetic remains the
     # existing operator, not a Research vectorized substitute.
     carrier={'contract_version':'core_cs_zscore_batch_input_v1','calendar_ref':calendar_ref,
-        'schema':RAW_TARGET_SCHEMA,'output_schema':NORMALIZED_TARGET_SCHEMA,'sessions':days,
+        'schema':RAW_TARGET_SCHEMA,'output_schema':NORMALIZED_TARGET_SCHEMA,'sessions':core_days,
         'security_ids':spec['universe'],'reason_dictionary':dictionary,'source_bindings_by_session':sources,
         **{k:memoryview(v.tobytes()).cast('?' if k in ('value_validity','reference_member') else v.typecode)
            for k,v in arrays.items()}}
@@ -507,22 +591,54 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
     # before normalized rows/cohort publication are allocated.
     del arrays
     try:
-        result=execute_cs_zscore_batch(carrier,params=NORMALIZATION_SPEC['params'])
+        result=execute_cs_zscore_batch(carrier,params=NORMALIZATION_SPEC['params']) if core_days else None
     finally:
         # A retained exception traceback must not turn the producer frame into
         # an owner of the detached Core input buffers.
         del carrier,sources,dictionary
-    metrics['core_calls']+=1; metrics['label_core_calls']+=1
-    core_ref=result['metadata']['result_ref']; normalized=[]
+    if core_days:
+        metrics['core_calls']+=1; metrics['label_core_calls']+=1
+        if reuse is not None:metrics['normalization_core_calls']=metrics.get('normalization_core_calls',0)+1
+    normalized=[]
+    if reuse is not None:
+        import numpy as np
+        for i,day in enumerate(core_days):
+            # Keep only numerical outputs and their real Core origin; current
+            # availability/source bindings remain a separate logical layer.
+            _working(metrics,width*18+4096)
+            vals=np.frombuffer(result['values'][i*width:(i+1)*width].tobytes(),dtype='<f8')
+            flags=np.frombuffer(result['value_validity'][i*width:(i+1)*width].tobytes(),dtype='?')
+            daily[day]['cached']=reuse.remember_normalization(day,daily[day]['input_numeric_ref'],
+                vals,flags,result['metadata']['result_ref'])
+        origins=[{'session':day,'input_numeric_ref':daily[day]['input_numeric_ref'],
+            'output_numeric_ref':reuse.vector_ref((daily[day]['cached']['values'],daily[day]['cached']['validity']))}
+            for day in days]
+        if core_days:
+            metrics.setdefault('normalization_core_receipts',[]).append({
+                'core_result_ref':result['metadata']['result_ref'],
+                'sessions':list(core_days),'numerical_bindings':[r for r in origins if r['session'] in core_days]})
+        proof={'contract_version':'stock_normalization_reuse_v1','normalization_spec_ref':digest(NORMALIZATION_SPEC),
+            'numerical_origins':origins}
+        core_ref=digest(proof)
+        definition.update(normalization_proof_version='stock_normalization_reuse_v1',numerical_origins=origins)
+        # The declared logical cutoff and original Core dependency projection
+        # set valid target clocks; cached numerical vectors carry no old clock.
+        normalized_clock=core_clock(cutoff)
+    else:core_ref=result['metadata']['result_ref']
     for i,row in enumerate(rows):
-        valid=bool(result['value_validity'][i])
+        cached=None if reuse is None else daily[days[i//width]]['cached']
+        valid=bool(result['value_validity'][i] if cached is None else cached['validity'][i%width])
         normalized.append({**row,'raw_return':row['return'],'raw_available_at':row['label_available_at'],
-            'return':float(result['values'][i]) if valid else None,'valid':valid,
-            'label_available_at':_clock(result['available_at_utc_us'][i]) if valid else None,
+            'return':float(result['values'][i] if cached is None else cached['values'][i%width]) if valid else None,'valid':valid,
+            'label_available_at':(_clock(result['available_at_utc_us'][i]) if cached is None else normalized_clock) if valid else None,
             'invalid_reason':None if valid else reasons[i] or 'NORMALIZATION_UNDEFINED'})
     # Neither the Core carrier nor its immutable result is a next-fold cache.
     # Keep only the logical normalized rows and small committed references.
     del result
+    # The directory is keyed by the logical request. New v2's core_ref is an
+    # explicitly versioned deterministic numerical proof, not a legacy Core
+    # execution ref. Actual Core invocation refs are producer receipts and do
+    # not make logical output identity depend on cache warmness/batch packing.
     desc=_publish(target,definition,normalized,budgets=metrics['_limits'],normalized=True,core_ref=core_ref,cohort=cohort,
                   store=metrics['_store'])
     fd['store'].check()
@@ -807,18 +923,24 @@ class _IncrementalPreparation:
     """The existing v4 producer, paused only between verified complete folds."""
     def __init__(self,data,*,feature_inputs,fold_specs,destination,preparation_options,
                  metrics=None,progress=None,model_feature_selection=None,reuse_raw_from_batch=None,
-                 _caller_bytes=0,_caller_source_bytes=0,_saved_definition=None):
+                 _caller_bytes=0,_caller_source_bytes=0,_saved_definition=None,
+                 label_spec=None,column_source=None):
         self.pid=os.getpid();self.closed=False;self.feature=self.store=self.state=self.batch=None
         self.transferred=False;self.own=type(feature_inputs) is not StockFeatureView
         self.data=data;self.metrics=metrics;self.progress=progress;self.begin=time.perf_counter()
         self.cursor=0;self.readonly=_saved_definition is not None;self.checkpoint_mark=None
         self.stats={};self.groups={};self.plans=[];self.raw_outputs=[];self.ready=[]
+        self.columnar=(label_spec is not None or column_source is not None or
+            (_saved_definition is not None and _saved_definition['version']=='axiom.stock_ml_batch_inputs/5'))
+        self.column_source=column_source;self.column_targets=None
+        self.column_previous={}
         self.options=deepcopy(preparation_options)
+        if self.columnar:self.options.setdefault('control_layout','fold_controls_v2')
         required={'row_block_sessions','column_block','maximum_resident_bytes','normalization_backend'}
         require(type(self.options) is dict and required<=set(self.options)<=required|{
             'maximum_source_bytes','maximum_parent_bytes','control_layout'} and
             self.options['normalization_backend']=='core_cs_batch_v1' and
-            self.options.get('control_layout','fold_controls_v1')=='fold_controls_v1' and
+            self.options.get('control_layout','fold_controls_v1')==('fold_controls_v2' if self.columnar else 'fold_controls_v1') and
             all(type(v) is int and v>0 for k,v in self.options.items() if k not in ('normalization_backend','control_layout')),
             'fixed incremental compact v4 options and positive budgets required')
         require(type(_caller_bytes) is int and _caller_bytes>=0 and type(_caller_source_bytes) is int and _caller_source_bytes>=0,
@@ -835,6 +957,13 @@ class _IncrementalPreparation:
             self.binding=model_feature_binding(self.feature,model_feature_selection)
             self.spec=source if self.binding is None else {**source,'ordered_features':self.binding['ordered_features'],
                 'feature_selection':self.binding['selection']}
+            if self.columnar:
+                from .stock_target_spec import resolve_stock_label_spec
+                target=(deepcopy(_saved_definition['target_spec']) if _saved_definition is not None
+                        else resolve_stock_label_spec(label_spec))
+                require(target==resolve_stock_label_spec(target['label_spec']), 'saved stock target profile mismatch')
+                self.spec={**self.spec,'target_spec':target}
+                require(self.readonly or column_source is not None,'shared public column source required for v5 preparation')
             self.width=len(self.spec['universe']);self.positions={d:i for i,d in enumerate(self.spec['feature_sessions'])}
             require(fd['store'].resident_bytes<=self.budgets['maximum_matrix_bytes'] and
                 fd['store'].metrics['source_bytes']<=self.budgets['maximum_source_bytes'] and
@@ -843,6 +972,9 @@ class _IncrementalPreparation:
                 'fold_specs':deepcopy(fold_specs),'preparation_options':self.options,'implementation_ref':_implementation(),
                 'environment':_input_environment(),'price_domain_plan':'fit_window_evaluation_calendar_blocks_v1'}
             if self.binding is not None:self.definition['model_feature_selection']=self.binding
+            if self.columnar:
+                self.definition.update(version='axiom.stock_ml_batch_inputs/5',target_spec=target,
+                    price_domain_plan='column_asof_endpoint_dependencies_v1',implementation_ref=_implementation(columnar=True))
             if _saved_definition is not None:
                 require(all(_saved_definition[k]==self.definition[k] for k in self.definition if k not in
                     ('implementation_ref','environment')),'checkpoint saved source/options mismatch')
@@ -876,6 +1008,8 @@ class _IncrementalPreparation:
                     origin.batch['definition']['preparation_options']['row_block_sessions']==self.options['row_block_sessions'] and
                     origin.batch['definition']['price_domain_plan']==self.definition['price_domain_plan'],
                     'Raw reuse source/fold/query plan mismatch')
+                if self.columnar:require(origin.batch['definition'].get('target_spec')==self.definition['target_spec'],
+                    'Raw reuse source Label definition mismatch')
             reused,reused_source=_raw_reuse_charge(origin,fd['store'])
             self.store=OwnedStore(self.budgets,shared_bytes=fd['store'].resident_bytes+_caller_bytes+reused,
                 shared_source_bytes=fd['store'].metrics['source_bytes']+_caller_source_bytes+reused_source)
@@ -898,7 +1032,10 @@ class _IncrementalPreparation:
             else:
                 require(not self.readonly or self.checkpoint.is_file(),'saved checkpoint required')
                 self.target.mkdir(parents=True,exist_ok=True)
-                view=seal({'contract_version':'stock_ml_prepared_view_v3','definition':model_common(source,self.binding),
+                common=model_common(source,self.binding)
+                if self.columnar:common.update(target_spec=self.spec['target_spec'],source_contract='data_column_selection_v1')
+                view=seal({'contract_version':'stock_ml_prepared_view_v4' if self.columnar else 'stock_ml_prepared_view_v3',
+                    'definition':common,
                     'feature_view':self.feature.to_dict()},'prepared_view_ref')
                 self._immutable_json(self.target/'view.json',view)
                 self._immutable_json(self.target/'definition.json',self.definition)
@@ -913,6 +1050,10 @@ class _IncrementalPreparation:
             self.batch=_compact_batch_handle(self.state,self.state.batch,self.begin)
             self.stats['_owner_state']=self.state
             self.stats['_owner_shared_baseline']=self.state._fixed_shared_bytes
+            if self.columnar:
+                from .stock_column_inputs import ColumnMathReuse
+                self.column_targets=ColumnMathReuse(self.stats)
+                self.stats['_column_targets']=self.column_targets
             self._charge_controls()
         except BaseException:
             self.close();raise
@@ -946,7 +1087,7 @@ class _IncrementalPreparation:
         self.store.reserve(max(0,amount-self.stats['_checkpoint_bytes'])+temporary_bytes)
         self.stats['_checkpoint_bytes']=amount;_sync_feature_charge(self.stats)
         if self.state is None:return
-        baseline=self.stats['_caller_bytes']+self.stats.get('raw_reuse_live_bytes',0)+amount
+        baseline=self.stats['_caller_bytes']+self.stats.get('raw_reuse_live_bytes',0)+amount+self.stats.get('_column_math_bytes',0)
         self.state._fixed_shared_bytes=baseline+external
         self.stats['_owner_shared_baseline']=baseline
         self.state._fixed_shared_source_bytes=self.store.shared_source_bytes-_view_data(self.feature)['store'].metrics['source_bytes']
@@ -990,11 +1131,12 @@ class _IncrementalPreparation:
                 for i,role,n,days,cutoff in group['jobs']:
                     desc=self.raw_outputs[i][role][n];value,rows=read_target(self.store,desc)
                     definition=value['definition']
-                    require(value['contract_version']=='stock_compact_raw_v1' and definition['sessions']==days,
+                    require(value['contract_version']==('stock_compact_raw_v2' if self.columnar else 'stock_compact_raw_v1') and definition['sessions']==days,
                         'checkpoint Raw child mismatch')
                     _raw_binding(definition,self.state.view['definition'],cutoff)
-                    validate_price_part(definition,self.state.view['definition'],self.state.price_domains,
-                        self.options['row_block_sessions'],evaluation=role=='evaluation_parts')
+                    if not self.columnar:
+                        validate_price_part(definition,self.state.view['definition'],self.state.price_domains,
+                            self.options['row_block_sessions'],evaluation=role=='evaluation_parts')
                     desc=value=rows=definition=None;self._release_payloads()
             for fold,outputs in zip(self.ready,self.raw_outputs):
                 record=self.state._parts(fold['input_manifest'],fold['fold_spec'])
@@ -1029,9 +1171,11 @@ class _IncrementalPreparation:
                     self._reuse_raw_group(group)
                     self._charge_controls()
                     continue
-                require(self.data is not None,'checkpoint fold is not prepared')
+                require(self.column_source is not None if self.columnar else self.data is not None,'checkpoint fold is not prepared')
                 self.stats['_price_view_bytes']=0
-                with _price_view(self.data,self.spec,group['cutoff'],sorted(group['days']),self.stats) as price_view:
+                factory=self._column_price_view if self.columnar else lambda cutoff,days,role:_price_view(self.data,self.spec,cutoff,days,self.stats)
+                role=group['jobs'][0][1]
+                with factory(group['cutoff'],sorted(group['days']),role) as price_view:
                     for use,(i,role,n,days,cutoff) in enumerate(group['jobs']):
                         report=self.stats['fold_queries'][i];ref=price_view.source_ref
                         if ref not in report['price_domain_refs']:report['price_domain_refs'].append(ref)
@@ -1042,6 +1186,38 @@ class _IncrementalPreparation:
                 price_view=None
             self._charge_controls()
         finally:origin=control=price_view=chunk=desc=saved=group=None
+
+    def _column_price_view(self,cutoff,days,role):
+        """Call only Data's public selection and common-anchor adjustment API."""
+        from .stock_column_inputs import ColumnPriceDomain
+        query,anchor=_query(self.spec,cutoff,days);source=self.column_source
+        previous=self.column_previous.get(role,{})
+        cells=len(query.sessions)*len(query.symbols)
+        _working(self.stats,cells*160+65536)
+        prices=factors=adjusted=domain=None
+        try:
+            prices=source.select(query=query,previous=previous.get('prices'))
+            factors=source.select(query=replace(query,domain='adjustment_factors',fields=('factor',)),
+                previous=previous.get('factors'))
+            adjusted=source.adjust(prices,factors,fields=('open','close'),anchor_session=anchor,
+                decision_session=anchor,factor_field='factor',previous=previous.get('adjusted'))
+            self.stats['data_read_calls']+=2
+            domain=ColumnPriceDomain(adjusted,spec=self.spec,
+                query=replace(query,price_basis='common_anchor_adjusted_v1',adjustment_anchor=anchor),anchor=anchor,
+                input_queries={'price':prices.query_binding,'factor':factors.query_binding},metrics=self.stats)
+            self.column_previous[role]={'prices':prices,'factors':factors,'adjusted':adjusted}
+            for old in previous.values():old.close()
+            self.stats['_column_role']=role
+            self.stats['_price_view_bytes']=sum(a.nbytes for panel in domain.panels.values()
+                for a in panel.values() if hasattr(a,'nbytes'))+sum(a.nbytes for a in domain.lineage.values())+_size([domain.source,domain.positions])
+            _sync_feature_charge(self.stats);_working(self.stats,0)
+            return domain
+        except BaseException:
+            if domain is not None:domain.close()
+            for selected in (adjusted,factors,prices):
+                if selected is not None:selected.close()
+            raise
+        finally:prices=factors=adjusted=domain=selected=old=None
 
     def _reuse_raw_group(self,group):
         """Reuse every child of the touched final domain under both live budgets."""
@@ -1104,14 +1280,21 @@ class _IncrementalPreparation:
                     (r for r in nrows if r['valid'])):
                     f.update(label=r['return'],raw_return=r['raw_return'],label_available_at=r['raw_available_at'],
                         normalized_available_at=r['label_available_at']);yield f
-            binding={'training_rows_ref':digest_array_rows(joined_rows()),'training_row_count':len(offsets),
+            binding={'training_rows_ref':None if self.columnar else digest_array_rows(joined_rows()),'training_row_count':len(offsets),
                 'training_keys_digest':digest_array_rows([self.spec['universe'][off%self.width],self.spec['feature_sessions'][off//self.width]] for off in offsets)}
             record={'contract_version':'stock_ml_fold_control_v1','fold_spec':deepcopy(fold),'raw_parts':parts,'normalized':norm,
                 'evaluation_parts':self.raw_outputs[index]['evaluation_parts'],'core_ref':core_ref,'cohort_ref':digest(cohort),'training_binding':binding}
             if self.binding is not None:record['model_feature_selection_ref']=self.binding['model_feature_selection_ref']
             selectors=selectors_for(record,self.spec,_view_data(self.feature)['row_index'],offsets)
+            if self.columnar:
+                from .stock_training_blocks import training_block_binding
+                record['contract_version']='stock_ml_fold_control_v2'
+                record['training_binding']=training_block_binding(self.feature,offsets,normalized=norm,
+                    cohort_ref=digest(cohort),selector=selectors['training'],store=self.store,
+                    destination=self.cache/'feature-proofs',model_feature_selection=self.stats['_model_feature_selection'])
             record=seal(record,'fold_control_ref');descriptor=write_part(self.cache/'fold-controls',record,'fold_control_ref')
-            inputs={'contract_version':'stock_ml_saved_inputs_v4','prepared_view':self.state.batch['prepared_view'],'fold_control':descriptor,
+            inputs={'contract_version':'stock_ml_saved_inputs_v5' if self.columnar else 'stock_ml_saved_inputs_v4',
+                'prepared_view':self.state.batch['prepared_view'],'fold_control':descriptor,
                 'fold_spec_ref':digest(fold),'selectors':selectors,'core_result_refs':[core_ref]}
             if self.binding is not None:inputs['model_feature_selection_ref']=self.binding['model_feature_selection_ref']
             item={'input_manifest':seal(inputs,'input_ref'),'fold_spec':deepcopy(fold)}
@@ -1134,7 +1317,8 @@ class _IncrementalPreparation:
         require(len(self.ready)==len(self.plans) and self.cursor==len(self.plans),'complete checkpoint coverage required')
         manifest=None
         try:
-            manifest={'contract_version':'stock_ml_batch_inputs_v4','definition':self.definition,'definition_ref':self.definition_ref,
+            manifest={'contract_version':'stock_ml_batch_inputs_v5' if self.columnar else 'stock_ml_batch_inputs_v4',
+                'definition':self.definition,'definition_ref':self.definition_ref,
                 'prepared_view':self.state.batch['prepared_view'],'folds':self.ready,'status':'COMPLETE'}
             manifest['batch_ref']=digest(manifest);manifest=seal(manifest,'content_digest')
             require(self.state._verified_folds=={digest(f) for f,_,_ in self.plans},
@@ -1175,10 +1359,17 @@ class _IncrementalPreparation:
         elif self.batch is not None:self.batch.close()
         elif self.state is not None:self.state.close()
         elif self.store is not None:self.store.close()
+        if self.column_targets is not None:self.column_targets.close()
         self.stats.clear()
         if self.own and self.feature is not None:self.feature.close()
-        if reads and self.data is not None and callable(getattr(self.data,'clear_cache',None)):self.data.clear_cache()
+        # ColumnSource is caller-owned and shared across preparation/model/OOS.
+        # Clearing Data here would revoke that external source and its borrows.
+        if not self.columnar and reads and self.data is not None and callable(getattr(self.data,'clear_cache',None)):self.data.clear_cache()
         self.batch=self.state=self.store=self.feature=self.data=None
+        for previous in self.column_previous.values():
+            for selection in previous.values():selection.close()
+        self.column_previous.clear()
+        self.column_source=self.column_targets=None
 
 
 @contextmanager
@@ -1221,15 +1412,18 @@ def _load_compact_checkpoint_owner(path,*,feature_inputs=None):
 
 
 def prepare_compact_batch(data,*,feature_inputs,fold_specs,destination,preparation_options,metrics=None,progress=None,
-                          _caller_bytes=0,_caller_source_bytes=0,model_feature_selection=None,reuse_raw_from_batch=None):
+                          _caller_bytes=0,_caller_source_bytes=0,model_feature_selection=None,reuse_raw_from_batch=None,
+                          label_spec=None,column_source=None):
     require(type(preparation_options) is dict,'fixed compact options required')
     if preparation_options.get('control_layout','fold_controls_v1')=='inline_v3':
+        require(label_spec is None and column_source is None,'column targets require the explicit v5 controls')
         return _prepare_legacy_compact_batch(data,feature_inputs=feature_inputs,fold_specs=fold_specs,destination=destination,
             preparation_options=preparation_options,metrics=metrics,progress=progress,_caller_bytes=_caller_bytes,
             _caller_source_bytes=_caller_source_bytes,model_feature_selection=model_feature_selection,reuse_raw_from_batch=reuse_raw_from_batch)
     with _prepare_compact_incrementally(data,feature_inputs=feature_inputs,fold_specs=fold_specs,destination=destination,
         preparation_options=preparation_options,metrics=metrics,progress=progress,_caller_bytes=_caller_bytes,
-        _caller_source_bytes=_caller_source_bytes,model_feature_selection=model_feature_selection,reuse_raw_from_batch=reuse_raw_from_batch) as owner:
+        _caller_source_bytes=_caller_source_bytes,model_feature_selection=model_feature_selection,reuse_raw_from_batch=reuse_raw_from_batch,
+        label_spec=label_spec,column_source=column_source) as owner:
         while owner.next_fold() is not None:pass
         result=owner.finish()
         if not owner.own:owner.transfer()

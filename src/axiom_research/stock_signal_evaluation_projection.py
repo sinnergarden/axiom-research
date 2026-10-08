@@ -19,14 +19,20 @@ from .stock_signal_evaluation_inputs import (
 INPUT_VERSION = 'stock_signal_evaluation_inputs_v1'
 MATRIX_INPUT_VERSION = 'stock_signal_evaluation_inputs_v2'
 COMPACT_INPUT_VERSION = 'stock_signal_evaluation_inputs_v3'
+COLUMN_INPUT_VERSION = 'stock_signal_evaluation_inputs_v4'
+
+
+def _compact_input(version):
+    return version in (COMPACT_INPUT_VERSION,COLUMN_INPUT_VERSION)
 
 
 def _matrix_input(version):
-    return version in (MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION)
+    return version in (MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION,COLUMN_INPUT_VERSION)
 
 
 def _report_version(version):
-    if version == COMPACT_INPUT_VERSION:
+    if version==COLUMN_INPUT_VERSION:return 'stock_signal_evidence_v6'
+    if _compact_input(version):
         return 'stock_signal_evidence_v5'
     return 'stock_signal_evidence_v4' if version == MATRIX_INPUT_VERSION else 'stock_signal_evidence_v3'
 
@@ -75,7 +81,7 @@ def _input_ref(value):
     _require(type(value) is ArtifactRef, 'frozen evaluation ArtifactRef required')
     validate(value)
     _require(value.artifact_type == 'StockSignalEvaluationInputs' and
-        value.artifact_contract_version in (INPUT_VERSION, MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION),
+        value.artifact_contract_version in (INPUT_VERSION, MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION,COLUMN_INPUT_VERSION),
         'frozen evaluation input ref type/version mismatch')
     _require(Path(value.uri).is_absolute(), 'fixed absolute frozen input locator required')
     return value
@@ -208,7 +214,8 @@ def _shard(admission, scope, day):
         if 'label_leaf_bindings' in admission:
             frozen_row['label_leaf_ref'] = admission['label_leaf_bindings'][key]
         rows.append(frozen_row)
-    version = ('stock_signal_evaluation_date_v3' if admission['raw'].get('mode') == 'compact_targets' else
+    version = ('stock_signal_evaluation_date_v4' if admission['raw']['label_spec'].get('source_contract')=='data_column_selection_v1' else
+        'stock_signal_evaluation_date_v3' if admission['raw'].get('mode') == 'compact_targets' else
         'stock_signal_evaluation_date_v2' if 'label_leaf_bindings' in admission else 'stock_signal_evaluation_date_v1')
     return {'contract_version': version, 'session': day, 'rows': rows}
 
@@ -364,7 +371,8 @@ def _load_inputs(input_ref, scope, *, marks=None, include_admission=False, _vali
         descriptor = root['shards'][day]
         shard, _ = _read_checked(Path(ref.uri).parent/descriptor['file'], descriptor['file_digest'], marks=marks)
         _require(set(shard) == {'contract_version', 'session', 'rows'} and
-            shard['contract_version'] == ('stock_signal_evaluation_date_v3' if ref.artifact_contract_version == COMPACT_INPUT_VERSION else
+            shard['contract_version'] == ('stock_signal_evaluation_date_v4' if ref.artifact_contract_version==COLUMN_INPUT_VERSION else
+                'stock_signal_evaluation_date_v3' if _compact_input(ref.artifact_contract_version) else
                 'stock_signal_evaluation_date_v2' if matrix else 'stock_signal_evaluation_date_v1') and
             shard['session'] == day and
             type(shard['rows']) is list and [r['security_id'] for r in shard['rows']] == base['universe'],
@@ -413,7 +421,7 @@ def _load_inputs(input_ref, scope, *, marks=None, include_admission=False, _vali
                 _require(_instant(meta['evaluation_clock_floor']) >= knowledge,
                          'frozen Signal admission clock floor mismatch')
                 _require(_instant(meta['model']['fit_cutoff']) <= available, 'frozen model fit clock mismatch')
-                if meta['signal_contract_version'] == 'stock_prediction_run_v2':
+                if meta['signal_contract_version'] in ('stock_prediction_run_v2','stock_prediction_run_v3'):
                     model_clock = meta['model']['simulated_available_at']
                     _require(prediction['simulated_model_available_at'] == model_clock and
                         _instant(model_clock) < available and _instant(prediction['feature_knowledge_cutoff']) <= knowledge,
@@ -530,7 +538,7 @@ def _reports_v3(group, admitted, common, native):
         coverage.update(comparison_mode='common_valid_key_intersection', native=own_native,
             common_statistics_ref=common['statistics_ref'], native_statistics_ref=native['statistics_ref'])
         report = {'contract_version': _report_version(version),
-            'validation_basis': ('frozen_compact_projection_v1' if version == COMPACT_INPUT_VERSION else
+            'validation_basis': ('frozen_compact_projection_v1' if _compact_input(version) else
                 'frozen_projection_v2' if matrix else 'frozen_projection_v1'), 'evaluation_key': group['evaluation_key'],
             'input_signal_refs': admitted['refs'][name], 'input_evidence': {
                 'input_ref': group['input_ref'], 'signal_name': name,
@@ -548,7 +556,7 @@ def _reports_v3(group, admitted, common, native):
         report['evidence_ref'] = digest({'evaluation_key': group['evaluation_key'], 'signal_name': name})
         if matrix:
             report['limitations'][-1] = 'Evaluation targets are independent of training targets; exact original Label specs and slice lineage remain in the frozen input.'
-        if version == COMPACT_INPUT_VERSION:
+        if _compact_input(version):
             report['limitations'][-2:] = [
                 'Owner admitted compact saved bytes and query bindings; full Data replay uses the explicit compact owner audit.',
                 'Compact row bindings retain the price-view version and do not claim legacy endpoint proof.']
@@ -620,7 +628,7 @@ def _evaluate_prepared(prepared, destination, marks):
     from .stock_signal_evaluation import SPEC, _verified_evaluation
     ref, root, admitted = prepared
     group = _group_definition(ref, root, admitted, _implementation_v3(
-        _matrix_input(ref.artifact_contract_version), ref.artifact_contract_version == COMPACT_INPUT_VERSION))
+        _matrix_input(ref.artifact_contract_version), _compact_input(ref.artifact_contract_version)))
     destination = Path(destination).resolve(); target = destination/group['evaluation_key'][7:]
     if target.exists():
         return _load_group(target, prepared=prepared, marks=marks, expected_key=group['evaluation_key'], reused=True)

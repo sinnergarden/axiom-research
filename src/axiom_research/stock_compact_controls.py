@@ -27,7 +27,8 @@ def validate_input(fold, manifest, row_index, common):
         'core_result_refs','input_ref'}|extra,'exact compact v4 saved inputs required'); sealed(inputs,'input_ref')
     require(inputs.get('model_feature_selection_ref')==(None if binding is None else binding['model_feature_selection_ref']),
             'compact input model selection mismatch')
-    require(inputs['contract_version']=='stock_ml_saved_inputs_v4' and inputs['fold_spec_ref']==digest(spec) and
+    input_version='stock_ml_saved_inputs_v5' if 'target_spec' in common else 'stock_ml_saved_inputs_v4'
+    require(inputs['contract_version']==input_version and inputs['fold_spec_ref']==digest(spec) and
         inputs['prepared_view']==manifest['prepared_view'] and type(inputs['core_result_refs']) is list and
         len(inputs['core_result_refs'])==1 and reference(inputs['core_result_refs'][0]),'compact v4 input linkage mismatch')
     desc=inputs['fold_control']; fields(desc,{'path','file_digest','fold_control_ref'},'exact fold control descriptor required')
@@ -77,13 +78,27 @@ def validate_controls(fold, record, view, manifest, row_index):
     require(record.get('model_feature_selection_ref')==(None if binding is None else binding['model_feature_selection_ref']),
             'compact control model selection mismatch')
     sealed(record,'fold_control_ref')
-    require(record['contract_version']=='stock_ml_fold_control_v1' and record['fold_spec']==spec and
+    v5=inputs['contract_version']=='stock_ml_saved_inputs_v5'
+    require(record['contract_version']==('stock_ml_fold_control_v2' if v5 else 'stock_ml_fold_control_v1') and record['fold_spec']==spec and
         record['fold_control_ref']==inputs['fold_control']['fold_control_ref'],'fold control linkage mismatch')
     training,inference=validate_input(fold,manifest,row_index,common)
     binding=record['training_binding']
-    fields(binding,{'training_rows_ref','training_row_count','training_keys_digest'},'exact compact training binding required')
+    if v5:
+        fields(binding,{'contract_version','ordered_features','feature_blocks','training_selector_ref',
+            'training_row_count','cohort_ref','eligibility_mask','target_refs',
+            'training_keys_digest','dependency_ref','binding_ref'},'exact v5 training block binding required')
+        sealed(binding,'binding_ref')
+        require(binding['contract_version']=='stock_training_binding_v2' and
+            binding['cohort_ref']==record['cohort_ref'] and
+            binding['target_refs']==[record['normalized']['target_ref']] and
+            binding['training_selector_ref']==inputs['selectors']['training']['selector_ref'] and
+            binding['ordered_features']==common['ordered_features'], 'training block control linkage mismatch')
+        training_ref=binding['binding_ref']
+    else:
+        fields(binding,{'training_rows_ref','training_row_count','training_keys_digest'},'exact compact training binding required')
+        training_ref=binding['training_rows_ref']
     require(reference(record['core_ref']) and reference(record['cohort_ref']) and
-        reference(binding['training_rows_ref']) and reference(binding['training_keys_digest']) and
+        reference(training_ref) and reference(binding['training_keys_digest']) and
         type(binding['training_row_count']) is int and binding['training_row_count']>=0 and
         type(record['raw_parts']) is list and bool(record['raw_parts']) and
         type(record['evaluation_parts']) is list and bool(record['evaluation_parts']),'invalid compact fold control')

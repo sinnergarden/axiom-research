@@ -39,6 +39,18 @@ _RUNTIME_EXPORTS = {
     "normalize_forward_labels": ".stock_label_normalization",
     "load_feature_catalog": ".feature_catalog", "build_feature_plan": ".feature_catalog",
     "build_forward_labels": ".labels", "mature_training_rows": ".labels",
+    "load_stock_experiment_specs": ".stock_experiment_config",
+    "resolve_stock_training_spec": ".stock_training",
+    "open_stock_ml_batch_preparation": ".stock_sequential_api",
+    "open_stock_signal_evaluation_freeze": ".stock_sequential_api",
+    "build_stock_derived_signal": ".stock_derived_signal",
+    "load_stock_derived_signal": ".stock_derived_signal",
+    "resolve_stock_label_spec": ".stock_target_spec",
+    "build_stock_sequential_experiment": ".stock_experiment_entry",
+    "evaluate_stock_sequential_signals": ".stock_experiment_entry",
+    "stock_request_with_saved_predictions": ".stock_experiment_entry",
+    "run_saved_stock_strategy": ".stock_experiment_entry",
+    "evaluate_saved_stock_strategy": ".stock_experiment_entry",
 }
 __all__ = [name for name in globals() if not name.startswith("_")] + list(_RUNTIME_EXPORTS)
 

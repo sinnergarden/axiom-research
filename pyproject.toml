@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = ["axiom-engine>=0.3.0"]
 
 [project.optional-dependencies]
+configuration = ["PyYAML>=6"]
 build = ["axiom-data>=0.3.4", "pyarrow>=14"]
 ml = ["axiom-data>=0.3.4", "pyqlib==0.9.7", "lightgbm==4.7.0", "pyarrow>=14"]
 

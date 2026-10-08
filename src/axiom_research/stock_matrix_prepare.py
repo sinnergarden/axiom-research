@@ -349,7 +349,8 @@ def _selector(publisher, *, view_ref, row_index, schema_ref, role, fold_ref, pay
 
 def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destination,
                                  preparation_options, metrics=None, progress=None,
-                                 model_feature_selection=None,reuse_raw_from_batch=None):
+                                 model_feature_selection=None,reuse_raw_from_batch=None,
+                                 label_spec=None,column_source=None):
     """Prepare the selected model cohort over an unchanged saved Feature table.
 
     model_feature_selection is an ordered list of exact id/version dictionaries.
@@ -360,4 +361,5 @@ def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destinati
     from .stock_compact_labels import prepare_compact_batch
     return prepare_compact_batch(data,feature_inputs=feature_inputs,fold_specs=fold_specs,
         destination=destination,preparation_options=preparation_options,metrics=metrics,progress=progress,
-        model_feature_selection=model_feature_selection,reuse_raw_from_batch=reuse_raw_from_batch)
+        model_feature_selection=model_feature_selection,reuse_raw_from_batch=reuse_raw_from_batch,
+        label_spec=label_spec,column_source=column_source)

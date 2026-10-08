@@ -33,7 +33,7 @@ class TargetRows:
         if not 0<=index<len(self): raise IndexError(index)
         value=self.value; definition=value['definition']; a=self.arrays; calendar=definition['calendar']
         universe=definition['universe']; valid=bool(a['validity'][index]); code=int(a['reason_codes'][index])
-        normalized=value['contract_version']=='stock_compact_normalized_v1'
+        normalized=value['contract_version'] in ('stock_compact_normalized_v1','stock_compact_normalized_v2')
         if normalized:
             require(self.raw_rows is not None,'normalized target requires its admitted Raw table')
             row=self.raw_rows[index]
@@ -66,7 +66,7 @@ def read_target(store,descriptor,expected=None,raw_rows=None):
     value=store.read_json(descriptor,key='target_ref'); definition=value['definition']
     fields(value,{'contract_version','definition','definition_ref','row_count','reason_dictionary',
         'source_dictionary','buffers','core_ref','cohort','target_ref'},'exact compact target required')
-    require(value['contract_version'] in ('stock_compact_raw_v1','stock_compact_normalized_v1') and
+    require(value['contract_version'] in ('stock_compact_raw_v1','stock_compact_normalized_v1','stock_compact_raw_v2','stock_compact_normalized_v2') and
             value['definition_ref']==digest(definition) and (expected is None or definition==expected),
             'compact target definition mismatch')
     if 'target_ref' in descriptor: require(value['target_ref']==descriptor['target_ref'],'compact target reference mismatch')
@@ -77,7 +77,7 @@ def read_target(store,descriptor,expected=None,raw_rows=None):
     for item in value['buffers'].values():
         require(Path(item['path']).resolve().is_relative_to(root),'compact target buffer escaped its owner directory')
     raw={'values','validity','availability','availability_validity','reason_codes'}
-    normalized=value['contract_version']=='stock_compact_normalized_v1'
+    normalized=value['contract_version'] in ('stock_compact_normalized_v1','stock_compact_normalized_v2')
     expected_types={'values':'float64_le','validity':'bool_u8','availability':'int64_le',
         'availability_validity':'bool_u8','reason_codes':'int32_le'}
     if not normalized: expected_types.update(start_session='int32_le',end_session='int32_le',source_codes='int32_le')
@@ -114,7 +114,8 @@ def read_target(store,descriptor,expected=None,raw_rows=None):
             if not normalized:
                 start,end=int(arrays['start_session'][i]),int(arrays['end_session'][i])
                 pos=positions[days[i//len(universe)]]
-                require(start==(pos+1 if pos+1<len(calendar) else -1) and end==(pos+5 if pos+5<len(calendar) else -1) and
+                h=definition['horizon_sessions'] if value['contract_version']=='stock_compact_raw_v2' else 5
+                require(type(h) is int and h>0 and start==(pos+1 if pos+1<len(calendar) else -1) and end==(pos+h if pos+h<len(calendar) else -1) and
                         (not valid or start>=0 and end>=0 and calendar[end]<=cutoff_day),
                         'compact target endpoint offset mismatch')
                 require(0<=int(arrays['source_codes'][i])<len(value['source_dictionary']), 'compact target source code mismatch')
@@ -122,6 +123,27 @@ def read_target(store,descriptor,expected=None,raw_rows=None):
             if not at: require(int(arrays['availability'][i])==0,'compact null physical clock must be zero')
             require(not at or int(arrays['availability'][i])<=cutoff, 'compact target clock exceeds cutoff')
         require(raw_rows is None or len(raw_rows)==count,'normalized Raw key alignment mismatch')
+        if value['contract_version']=='stock_compact_normalized_v2':
+            from .stock_column_inputs import ColumnMathReuse
+            proof={'contract_version':'stock_normalization_reuse_v1',
+                'normalization_spec_ref':digest(NORMALIZATION_SPEC),
+                'numerical_origins':definition['numerical_origins']}
+            require(definition['normalization_proof_version']==proof['contract_version'] and
+                value['core_ref']==digest(proof) and len(proof['numerical_origins'])==len(days),
+                'normalized block numerical proof mismatch')
+            width=len(universe)
+            for n,(day,origin) in enumerate(zip(days,proof['numerical_origins'])):
+                fields(origin,{'session','input_numeric_ref','output_numeric_ref'},'exact numerical proof required')
+                require(origin['session']==day and reference(origin['input_numeric_ref']) and
+                    origin['output_numeric_ref']==ColumnMathReuse.vector_ref((
+                        arrays['values'][n*width:(n+1)*width],
+                        arrays['validity'][n*width:(n+1)*width].view('?'))),
+                    'normalized numerical output differs from admitted bytes')
+                if raw_rows is not None:
+                    members=np.asarray([r is None for r in value['cohort']['eligibility_reasons'][n*width:(n+1)*width]],dtype='?')
+                    raw_values=np.asarray([raw_rows[n*width+j]['return'] if members[j] else 0.0 for j in range(width)],dtype='<f8')
+                    require(origin['input_numeric_ref']==digest({'vectors':ColumnMathReuse.vector_ref((raw_values,members)),
+                        'normalization_spec_ref':digest(NORMALIZATION_SPEC)}),'normalized numerical input differs from Raw/cohort')
         store.check(); return value,TargetRows(value,arrays,raw_rows)
     except BaseException:
         # Tracebacks keep frame locals. Drop array views and decoded aliases
@@ -143,9 +165,10 @@ class CompactState:
         self.feature_options=({} if self.model_binding is None else
             {'model_feature_selection':self.model_binding['selection']})
         self._control_charge=0; self._target_charge=0; self._source_charge=0
-        self.compact=batch['contract_version']=='stock_ml_batch_inputs_v4'; self._control_path=None
+        self.columnar=batch['contract_version']=='stock_ml_batch_inputs_v5'
+        self.compact=batch['contract_version'] in ('stock_ml_batch_inputs_v4','stock_ml_batch_inputs_v5'); self._control_path=None
         self.price_domains=price_domain_ranges([{'fold_spec':s} for s in batch['definition']['fold_specs']],view['definition']['calendar'],
-            batch['definition']['preparation_options']['row_block_sessions']) if self.compact else None
+            batch['definition']['preparation_options']['row_block_sessions']) if self.compact and not self.columnar else None
         self.selectors={(digest(f['input_manifest']),digest(f['fold_spec'])):f['input_manifest']['selectors'] for f in batch['folds']}
         self.records={(digest(f['input_manifest']),digest(f['fold_spec'])):(f,r)
             for f,r in zip(batch['folds'],[f['input_manifest']['fold_control'] for f in batch['folds']]
@@ -155,7 +178,7 @@ class CompactState:
         self._fixed_shared_source_bytes=max(0,store.shared_source_bytes-fd['store'].metrics['source_bytes'])
         self.positions={d:i for i,d in enumerate(fd['definition']['spec']['feature_sessions'])}
         self._keep_paths={batch['prepared_view']['path']} | {path for path,value in store.json.items()
-            if value.get('contract_version') in ('stock_ml_batch_inputs_v3','stock_ml_batch_inputs_v4') and value.get('batch_ref')==self._batch_ref}
+            if value.get('contract_version') in ('stock_ml_batch_inputs_v3','stock_ml_batch_inputs_v4','stock_ml_batch_inputs_v5') and value.get('batch_ref')==self._batch_ref}
         self._source_table={}; self.source_records=()
         self._verified_folds=set()
         self._sync_shared()
@@ -197,13 +220,14 @@ class CompactState:
         self.records[key]=(fold,fold['input_manifest']['fold_control'])
         self.selectors[key]=fold['input_manifest']['selectors']
         self._account_controls()
-        record=None
+        record=None; admitted=False
         try:
             record=self._parts(fold['input_manifest'],fold['fold_spec'])
             self._activate(fold,record);self.check()
+            admitted=True
         finally:
             record=None
-            self._release_window(keep_feature=True)
+            self._release_window(keep_feature=admitted)
 
     def _complete_checkpoint(self,manifest,*,publish):
         require(self.incomplete and self.active==0 and self.store.borrowers==0 and
@@ -326,7 +350,10 @@ class CompactState:
         require(self.active==0 and self.store.borrowers==0,'sequential fold window still borrowed')
         self._control_path=None
         released=self._trim_targets()
-        if not (keep_feature and self.model_binding is not None): clear_feature_window(self.feature)
+        # The immutable window belongs to the shared Feature owner, including
+        # the full-column path. Successful prepare must hand it to the builder
+        # under the same budget; failed admission still clears the window.
+        if not keep_feature: clear_feature_window(self.feature)
         self._active_record=None; self._pending_release=False; self._sync_shared()
         return released
 
@@ -485,9 +512,9 @@ class CompactState:
             evaluation=seal({'contract_version':'stock_matrix_evaluation_target_slice_v1',
                 'prepared_view_ref':self.view['prepared_view_ref'],'fold_spec_ref':digest(spec),
                 'selector':deepcopy(inputs['selectors']['evaluation_labels']),'cutoff':spec['evaluation_cutoff'],'rows':erows},'label_ref')
-            bindings=record['training_binding']; training_ref=bindings['training_rows_ref']
+            bindings=record['training_binding']; training_ref=bindings['binding_ref' if self.columnar else 'training_rows_ref']
             payload={'common':common,'features':features,'labels':labels,'evaluation':evaluation,
-                'training_keys':keys,'training_rows_ref':training_ref,'excluded':excluded,'raw_refs':raw_refs,
+                'training_keys':keys,('training_binding_ref' if self.columnar else 'training_rows_ref'):training_ref,'excluded':excluded,'raw_refs':raw_refs,
                 'candidate_keys':candidate_keys,'feature_rows':rows,'feature_ref':features['feature_ref'],'label_ref':labels['label_ref']}
             if training:
                 gather_rows=min(1024,len(keys)); feature_width=len(common['ordered_features'])
@@ -503,12 +530,9 @@ class CompactState:
                 self.store.metrics['matrix_allocated_bytes']=self.store.metrics.get('matrix_allocated_bytes',0)+sum(a.nbytes for a in (X,y,P))
             else:
                 self.store.metrics['evaluation_projection_calls']=self.store.metrics.get('evaluation_projection_calls',0)+1
-                dataset=seal({'contract_version':'stock_fold_dataset_v3','prepared_view_ref':self.view['prepared_view_ref'],
-                    'feature_ref':features['feature_ref'],'label_ref':labels['label_ref'],'raw_label_refs':raw_refs,
-                    'fold_spec_ref':digest(spec),'fit_cutoff':spec['fit_cutoff'],'ordered_features':common['ordered_features'],
-                    'selectors':inputs['selectors'],'training_keys_digest':digest(keys),'training_rows_ref':training_ref,
-                    'training_row_count':len(keys),'excluded':excluded,'target_semantics':TARGET_SEMANTICS,
-                    'normalization':NORMALIZATION_SPEC,'validation':'none_fixed_parameters_no_early_stopping'},'dataset_ref')
+                from .stock_dataset_binding import dataset_binding
+                dataset=dataset_binding(common=common,features=features,labels=labels,raw_refs=raw_refs,
+                    keys=keys,training_ref=training_ref,excluded=excluded,inputs=inputs,spec=spec)
                 payload['fold_binding']={'dataset':dataset,'labels':labels}
             lease=_size(payload,maximum=self.store.maximum_matrix_bytes,
                 retained=self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes)+sum(
@@ -604,14 +628,15 @@ def _admit_fold(store,feature,view,fold,record,targets,positions=None,price_doma
         binding=common.get('model_feature_selection')
         require(nv['cohort'].get('model_feature_eligibility_ref')==model_eligibility_ref(binding),
                 'compact selected cohort mismatch')
-        if binding is not None:
+        if binding is not None or inputs['contract_version']=='stock_ml_saved_inputs_v5':
             from .stock_compact_store import iter_feature_eligibility
             from .stock_label_contracts import _eligible_reason
             if positions is None: positions={d:i for i,d in enumerate(fd['definition']['spec']['feature_sessions'])}
             offsets=[positions[d]*len(common['universe'])+i for d in training for i in range(len(common['universe']))]
-            facts=iter_feature_eligibility(feature,offsets,model_feature_selection=binding['selection'])
+            facts=iter_feature_eligibility(feature,offsets,model_feature_selection=None if binding is None else binding['selection'])
             cutoff=_instant(spec['fit_cutoff'])
-            reasons=[_eligible_reason(row,cell,len(binding['ordered_features']),cutoff)
+            from .stock_target_spec import eligible_target_reason
+            reasons=[eligible_target_reason(row,cell,len(common['ordered_features']),cutoff,common)
                 for row,cell in zip(concatenated,facts)]
             require(reasons==nv['cohort']['eligibility_reasons'],'selected Feature cohort differs from admitted bytes')
         if positions is None: positions={d:i for i,d in enumerate(fd['definition']['spec']['feature_sessions'])}
@@ -627,6 +652,11 @@ def _admit_fold(store,feature,view,fold,record,targets,positions=None,price_doma
         require(record['training_binding']['training_keys_digest']==digest([[universe[o%len(universe)],
             fd['definition']['spec']['feature_sessions'][o//len(universe)]] for o in offsets]),
             'compact training keys digest mismatch')
+        if inputs['contract_version']=='stock_ml_saved_inputs_v5':
+            from .stock_training_blocks import validate_training_block_binding
+            validate_training_block_binding(record['training_binding'],feature,offsets,normalized=nv,
+                cohort_ref=record['cohort_ref'],selector=inputs['selectors']['training'],store=store,
+                model_feature_selection=None if binding is None else binding['selection'])
         return offsets
     except BaseException:
         raw_rows.clear()
@@ -649,7 +679,7 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
     require(residency in ('eager','sequential'),'compact residency must be eager or sequential')
     fields(manifest,{'contract_version','definition','definition_ref','prepared_view','folds','status','batch_ref','content_digest'},
            'exact compact batch manifest required')
-    require(manifest['contract_version'] in ('stock_ml_batch_inputs_v3','stock_ml_batch_inputs_v4') and manifest['status']=='COMPLETE',
+    require(manifest['contract_version'] in ('stock_ml_batch_inputs_v3','stock_ml_batch_inputs_v4','stock_ml_batch_inputs_v5') and manifest['status']=='COMPLETE',
             'complete compact batch required')
     sealed(manifest,'content_digest'); require(manifest['batch_ref']==digest({k:v for k,v in manifest.items() if k not in
         ('batch_ref','content_digest')}) and manifest['definition_ref']==digest(manifest['definition']),'compact batch identity mismatch')
@@ -680,19 +710,25 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
                     'compact source byte budget exceeded')
         if resolver is not None: store.resolve=resolver
         store.check_hook=fd['store'].check
-        compact=manifest['contract_version']=='stock_ml_batch_inputs_v4'
+        columnar=manifest['contract_version']=='stock_ml_batch_inputs_v5'
+        compact=manifest['contract_version'] in ('stock_ml_batch_inputs_v4','stock_ml_batch_inputs_v5')
         view=store.read_json(manifest['prepared_view'],key='prepared_view_ref')
         fields(view,{'contract_version','definition','feature_view','prepared_view_ref'} | (set() if compact else {'fold_targets'}),
                'exact compact prepared view required')
-        require(view['contract_version']==('stock_ml_prepared_view_v3' if compact else 'stock_ml_prepared_view_v2') and
+        require(view['contract_version']==('stock_ml_prepared_view_v4' if columnar else 'stock_ml_prepared_view_v3' if compact else 'stock_ml_prepared_view_v2') and
             view['prepared_view_ref']==manifest['prepared_view']['prepared_view_ref'] and view['feature_view']==expected,
             'compact prepared view identity mismatch')
         common=model_common(fd['definition']['spec'],binding)
-        require(view['definition']==common and definition['version']==('axiom.stock_ml_batch_inputs/4' if compact else 'axiom.stock_ml_batch_inputs/3') and
+        if columnar:
+            from .stock_target_spec import resolve_stock_label_spec
+            target=resolve_stock_label_spec(definition['target_spec']['label_spec'])
+            require(target==definition['target_spec'],'saved target profile identity mismatch')
+            common.update(target_spec=target,source_contract='data_column_selection_v1')
+        require(view['definition']==common and definition['version']==('axiom.stock_ml_batch_inputs/5' if columnar else 'axiom.stock_ml_batch_inputs/4' if compact else 'axiom.stock_ml_batch_inputs/3') and
                 [f['fold_spec'] for f in manifest['folds']]==definition['fold_specs'] and
                 (compact or len(manifest['folds'])==len(view['fold_targets'])) and bool(manifest['folds']),
                 'compact common/fold definition mismatch')
-        if compact: require(definition['price_domain_plan']=='fit_window_evaluation_calendar_blocks_v1','compact query plan mismatch')
+        if compact: require(definition['price_domain_plan']==('column_asof_endpoint_dependencies_v1' if columnar else 'fit_window_evaluation_calendar_blocks_v1'),'compact query plan mismatch')
         previous=None
         for n,fold in enumerate(manifest['folds']):
             if compact: validate_input(fold,manifest,fd['row_index'],common)
@@ -737,8 +773,9 @@ def _load_checkpoint_state(definition,view_descriptor,plan_descriptor,folds,*,fe
         fd=_view_data(feature_inputs);store=publication_store
         require(type(store) is OwnedStore and not store.closed and store.borrowers==0,'active checkpoint byte owner required')
         plan=store.read_json(plan_descriptor)
-        require(plan==definition and definition['version']=='axiom.stock_ml_batch_inputs/4' and
-            definition['price_domain_plan']=='fit_window_evaluation_calendar_blocks_v1' and
+        columnar=definition['version']=='axiom.stock_ml_batch_inputs/5'
+        require(plan==definition and definition['version'] in ('axiom.stock_ml_batch_inputs/4','axiom.stock_ml_batch_inputs/5') and
+            definition['price_domain_plan']==('column_asof_endpoint_dependencies_v1' if columnar else 'fit_window_evaluation_calendar_blocks_v1') and
             definition['feature_view']==feature_inputs.to_dict(), 'checkpoint final plan/source mismatch')
         binding=definition.get('model_feature_selection')
         require(binding==model_feature_binding(feature_inputs,None if binding is None else binding['selection']),
@@ -746,11 +783,17 @@ def _load_checkpoint_state(definition,view_descriptor,plan_descriptor,folds,*,fe
         view=store.read_json(view_descriptor,key='prepared_view_ref')
         fields(view,{'contract_version','definition','feature_view','prepared_view_ref'},'exact checkpoint prepared view required')
         common=model_common(fd['definition']['spec'],binding)
-        require(view['contract_version']=='stock_ml_prepared_view_v3' and view['definition']==common and
+        if columnar:
+            from .stock_target_spec import resolve_stock_label_spec
+            target=resolve_stock_label_spec(definition['target_spec']['label_spec'])
+            require(target==definition['target_spec'],'checkpoint target profile mismatch')
+            common.update(target_spec=target,source_contract='data_column_selection_v1')
+        require(view['contract_version']==('stock_ml_prepared_view_v4' if columnar else 'stock_ml_prepared_view_v3') and view['definition']==common and
             view['feature_view']==definition['feature_view'], 'checkpoint prepared view/source mismatch')
         require(type(folds) is list and len(folds)<=len(definition['fold_specs']) and
             [f['fold_spec'] for f in folds]==definition['fold_specs'][:len(folds)], 'checkpoint ready prefix mismatch')
-        manifest={'contract_version':'stock_ml_batch_inputs_v4','definition':definition,'definition_ref':digest(definition),
+        manifest={'contract_version':'stock_ml_batch_inputs_v5' if columnar else 'stock_ml_batch_inputs_v4',
+            'definition':definition,'definition_ref':digest(definition),
             'prepared_view':view_descriptor,'folds':folds}
         for fold in folds:validate_input(fold,manifest,fd['row_index'],common)
         state=CompactState(store,feature_inputs,manifest,view,{},False,residency='sequential')
@@ -766,6 +809,9 @@ def _load_checkpoint_state(definition,view_descriptor,plan_descriptor,folds,*,fe
 
 
 def _raw_binding(definition,common,cutoff):
+    if 'target_spec' in common:
+        from .stock_column_inputs import validate_column_raw_binding
+        return validate_column_raw_binding(definition,common,cutoff)
     source=definition['price_view']; sealed(source,'price_view_ref'); context=source['context']; query=context['query']
     require(definition['universe']==common['universe'] and definition['calendar']==common['calendar'] and
         definition['snapshot']==common['snapshot'] and definition['cutoff']==cutoff and

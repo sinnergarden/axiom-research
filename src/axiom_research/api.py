@@ -176,8 +176,13 @@ def _semantics(obj: c.Contract) -> None:
     if isinstance(obj, c.LabelSpec):
         start, end = obj.return_start_offset_sessions, obj.return_end_offset_sessions
         if type(start) is int and type(end) is int:
-            _require(start >= 0 and end - start == obj.horizon_sessions,
-                     "Label offsets/horizon mismatch")
+            if obj.contract_version == "2":
+                _require(type(obj.horizon_sessions) is int and obj.horizon_sessions > 0 and
+                         start == 1 and end == obj.horizon_sessions,
+                         "Stock Label v2 requires open(T+1) -> close(T+h)")
+            else:
+                _require(start >= 0 and end - start == obj.horizon_sessions,
+                         "Label offsets/horizon mismatch")
             if isinstance(obj.maturity, c.MaturitySpec):
                 _require(obj.maturity.lag_sessions >= end, "Label matures before return end")
     if isinstance(obj, c.SplitSpec):

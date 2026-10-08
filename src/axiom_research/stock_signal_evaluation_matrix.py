@@ -330,7 +330,7 @@ def _admit_matrix(signal_inputs, raw_label_input, scope, batch):
     from .stock_signal_evaluation_projection import _read_checked, _check_marks, _mark
     _data(batch)
     manifest = batch.to_dict()
-    if manifest['contract_version'] == 'stock_ml_batch_inputs_v4':
+    if manifest['contract_version'] in ('stock_ml_batch_inputs_v4','stock_ml_batch_inputs_v5'):
         from .stock_signal_evaluation_compact import _admit_compact
         return _admit_compact(signal_inputs, raw_label_input, scope, batch)
     _require(manifest['contract_version'] == 'stock_ml_batch_inputs_v2', 'verified matrix batch required')
@@ -485,9 +485,10 @@ def _admit_matrix(signal_inputs, raw_label_input, scope, batch):
 
 
 def _matrix_input_root(signal_inputs, raw_label_input, scope, admitted, records, manifest):
-    from .stock_signal_evaluation_projection import MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION
-    compact = manifest['contract_version'] == 'stock_ml_batch_inputs_v4'
-    version = COMPACT_INPUT_VERSION if compact else MATRIX_INPUT_VERSION
+    from .stock_signal_evaluation_projection import MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION,COLUMN_INPUT_VERSION,_compact_input
+    compact = manifest['contract_version'] in ('stock_ml_batch_inputs_v4','stock_ml_batch_inputs_v5')
+    columnar=manifest['contract_version']=='stock_ml_batch_inputs_v5'
+    version = COLUMN_INPUT_VERSION if columnar else COMPACT_INPUT_VERSION if compact else MATRIX_INPUT_VERSION
     table = [{'path': path, 'file_digest': records[path]} for path in sorted(records)]
     offsets = {record['path']: index for index, record in enumerate(table)}
     closure = {name: [{**{key: value for key, value in source.items() if key != 'source_paths'},
@@ -501,7 +502,7 @@ def _matrix_input_root(signal_inputs, raw_label_input, scope, admitted, records,
         names += ('stock_signal_evaluation_compact.py', 'stock_signal_evaluation_lease.py', 'stock_compact_batch.py',
             'stock_compact_store.py', 'stock_compact_controls.py', 'stock_matrix_storage.py',
             'stock_signal_evaluation_build.py')
-    receipt = {'contract_version': 'stock_signal_evaluation_admission_v3' if compact else 'stock_signal_evaluation_admission_v2',
+    receipt = {'contract_version': 'stock_signal_evaluation_admission_v4' if columnar else 'stock_signal_evaluation_admission_v3' if compact else 'stock_signal_evaluation_admission_v2',
         'signal_inputs': deepcopy(signal_inputs), 'raw_label_input': deepcopy(raw_label_input), 'scope': scope,
         'batch_manifest': manifest, 'batch_ref': manifest['batch_ref'], 'source_records': table,
         'source_closure': closure, 'validation_sources': {
@@ -555,10 +556,11 @@ def _publish_matrix_inputs(root, stage, destination, batch, marks):
 
 
 def _verify_matrix_root(root, ref, scope):
-    from .stock_signal_evaluation_projection import MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION, ROOT_FIELDS, _root_id, _expand_closure
+    from .stock_signal_evaluation_projection import MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION,COLUMN_INPUT_VERSION,_compact_input, ROOT_FIELDS, _root_id, _expand_closure
     from .stock_signal_evaluation_inputs import _scope
-    compact = ref.artifact_contract_version == COMPACT_INPUT_VERSION
-    version = COMPACT_INPUT_VERSION if compact else MATRIX_INPUT_VERSION
+    compact = _compact_input(ref.artifact_contract_version)
+    columnar=ref.artifact_contract_version==COLUMN_INPUT_VERSION
+    version = COLUMN_INPUT_VERSION if columnar else COMPACT_INPUT_VERSION if compact else MATRIX_INPUT_VERSION
     _require(type(root) is dict and set(root) == ROOT_FIELDS and root['contract_version'] == version and
         root['input_id'] == ref.artifact_id == _root_id(root), 'frozen matrix input identity/fields mismatch')
     base = _scope(root['scope'])
@@ -570,11 +572,11 @@ def _verify_matrix_root(root, ref, scope):
         len(names) == len(set(names)) and set(names) == set(root['signal_refs']) == set(root['signal_metadata']),
         'frozen comparison axes mismatch')
     receipt = root['admission_receipt']; _verify_ref(receipt, 'receipt_ref')
-    _require(set(receipt) == RECEIPT_FIELDS and receipt['contract_version'] == ('stock_signal_evaluation_admission_v3' if compact else 'stock_signal_evaluation_admission_v2') and
+    _require(set(receipt) == RECEIPT_FIELDS and receipt['contract_version'] == ('stock_signal_evaluation_admission_v4' if columnar else 'stock_signal_evaluation_admission_v3' if compact else 'stock_signal_evaluation_admission_v2') and
         receipt['scope'] == base and set(receipt['signal_inputs']) == set(names) == set(receipt['source_closure']),
         'frozen matrix admission receipt mismatch')
     manifest = receipt['batch_manifest']; _verify_ref(manifest, 'content_digest')
-    _require(manifest['contract_version'] == ('stock_ml_batch_inputs_v4' if compact else 'stock_ml_batch_inputs_v2') and manifest['status'] == 'COMPLETE' and
+    _require(manifest['contract_version'] == ('stock_ml_batch_inputs_v5' if columnar else 'stock_ml_batch_inputs_v4' if compact else 'stock_ml_batch_inputs_v2') and manifest['status'] == 'COMPLETE' and
         manifest['batch_ref'] == receipt['batch_ref'] == digest({key: value for key, value in manifest.items()
             if key not in ('content_digest', 'batch_ref')}), 'frozen matrix batch identity mismatch')
     raw = root['raw_metadata']
@@ -608,7 +610,7 @@ def _verify_matrix_root(root, ref, scope):
             _verify_ref(item['model'], 'model_ref')
             if compact:
                 _require(item['input_ref'] in compact_folds and _ref(item['fold_ref']) and
-                    item['model']['contract_version'] == 'stock_model_release_v2' and
+                    item['model']['contract_version'] == ('stock_model_release_v3' if columnar else 'stock_model_release_v2') and
                     item['model']['clock_basis'] == 'declared_simulation' and
                     _instant(item['model']['fit_cutoff']) < _instant(item['model']['simulated_available_at']),
                     'frozen compact model/input contract mismatch')
@@ -618,10 +620,10 @@ def _verify_matrix_root(root, ref, scope):
                     item['prediction_sessions'] == sorted(spec['inference_cutoff_by_session']) and
                     source_records.get(inputs['fold_control']['path']) == inputs['fold_control']['file_digest'],
                     'frozen compact original Signal/fold/control mismatch')
-            _require(item['signal_contract_version'] == 'stock_prediction_run_v2' and
+            _require(item['signal_contract_version'] == ('stock_prediction_run_v3' if columnar else 'stock_prediction_run_v2') and
                 item['feature_contract_version'] == 'stock_feature_slice_v3' and
                 item['model']['model_ref'] == source['model_ref'] and item['feature_ref'] == source['feature_ref'] and
-                item['signal_stage'] == 'prediction_raw' and item['score_unit'] == 'dimensionless' and
+                item['signal_stage'] == ('raw_prediction' if columnar else 'prediction_raw') and item['score_unit'] == 'dimensionless' and
                 item['score_semantics'] == item['model']['target_semantics'] and
                 (item['snapshot'], item['pit_policy']) == (raw['snapshot'], raw['pit_policy']),
                 'frozen matrix Signal stage/model/Snapshot/PIT mismatch')
@@ -729,7 +731,7 @@ def _audit_matrix_input(ref):
     receipt = root['admission_receipt']
     # A fresh public batch admission hashes its common closure once. Do not
     # separately hash that same large graph before calling the owner loader.
-    options = {'residency': 'sequential'} if receipt['batch_manifest']['contract_version'] == 'stock_ml_batch_inputs_v4' else {}
+    options = {'residency': 'sequential'} if receipt['batch_manifest']['contract_version'] in ('stock_ml_batch_inputs_v4','stock_ml_batch_inputs_v5') else {}
     with load_stock_ml_batch_inputs(receipt['batch_manifest'], **options) as batch:
         original, records, source_marks, _ = _admit_matrix(
             {name: receipt['signal_inputs'][name] for name in root['signal_order']},
