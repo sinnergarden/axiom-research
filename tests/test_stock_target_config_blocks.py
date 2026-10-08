@@ -124,6 +124,50 @@ class TargetConfigTests(unittest.TestCase):
 
 
 class TrainingBlockTests(unittest.TestCase):
+    def test_consuming_proof_failure_clears_detached_graph_before_refunding_lease(self):
+        from unittest.mock import patch
+        from axiom_research.stock_compact_store import OwnedStore
+        from axiom_research.stock_matrix_storage import write_part
+        from axiom_research.stock_fold_inputs import seal
+        from axiom_research.stock_artifacts import digest
+        from axiom_research.stock_training_blocks import training_block_binding,validate_training_block_binding
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);f,path=CompactV3Tests().fixture(root)
+            with load_stock_feature_view(path,residency='sequential') as feature,OwnedStore() as store:
+                offsets=list(range(20));set_feature_window(feature,offsets)
+                store.shared_bytes=_view_data(feature)['store'].resident_bytes
+                header=seal({'buffers':{'validity':{'buffer_digest':digest('mask')}}},'target_ref')
+                normalized={**write_part(root,header,'target_ref'),'buffers':header['buffers']}
+                selector={'selector_ref':digest('selector'),'keys_digest':digest('keys')};cohort=digest('cohort')
+                def fail(*args,**kwargs):
+                    try:raise RuntimeError('synthetic downstream proof read failure')
+                    finally:args=kwargs=None
+                binding=training_block_binding(feature,offsets,normalized=normalized,cohort_ref=cohort,
+                    selector=selector,store=store,destination=root/'proofs')
+                calls=(lambda:training_block_binding(feature,offsets,normalized=normalized,cohort_ref=cohort,
+                    selector=selector,store=store,destination=root/'proofs'),
+                    lambda:validate_training_block_binding(binding,feature,offsets,normalized=normalized,
+                        cohort_ref=cohort,selector=selector,store=store))
+                checked=set()
+                for call in calls:
+                    try:
+                        with patch.object(store,'read_json',side_effect=fail):call()
+                    except RuntimeError as error:
+                        traceback=error.__traceback__
+                        while traceback:
+                            name=traceback.tb_frame.f_code.co_name
+                            if name in ('training_block_binding','_training_block_binding',
+                                'validate_training_block_binding','_validate_training_block_binding'):
+                                checked.add(name)
+                                self.assertIsNone(traceback.tb_frame.f_locals['blocks'])
+                                self.assertIsNone(traceback.tb_frame.f_locals['feature'])
+                                self.assertIsNone(traceback.tb_frame.f_locals['store'])
+                            traceback=traceback.tb_next
+                    else:self.fail('downstream proof read failure expected')
+                    self.assertEqual(store.lease_bytes,0)
+                self.assertEqual(checked,{'training_block_binding','_training_block_binding',
+                    'validate_training_block_binding','_validate_training_block_binding'})
+
     def test_proof_work_uses_combined_owner_budget_and_cleans_failure_aliases(self):
         from axiom_research.stock_compact_store import OwnedStore
         from axiom_research.stock_matrix_storage import write_buffer
