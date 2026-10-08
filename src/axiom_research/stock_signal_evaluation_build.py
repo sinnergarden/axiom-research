@@ -62,7 +62,8 @@ class _BuildOOSWriter:
         self.batch=batch; self.state=_data(batch)['matrix_state']
         require(self.state.compact and self.state.active==0,'idle compact v4 owner required')
         require(type(name) is str and bool(name),'named Signal required')
-        self.scope=_scope(scope); self.name=name; self.manifest=batch.to_dict()
+        self.scope=_scope(scope); self.name=name; self.manifest=batch._ready_manifest()
+        self._manifest_pending=self.state.incomplete
         common=self.manifest['definition']['feature_view']['spec']
         require(self.scope['calendar']==common['calendar'] and
             set(self.scope['universe'])<=set(common['universe']), 'build OOS scope differs from owner')
@@ -75,7 +76,9 @@ class _BuildOOSWriter:
         self.metrics={'folds':0,'build_projection_borrows':0,'saved_oos_admissions':0,'shards':0,
                       'maximum_fold_rows':0,'retained_control_bytes':0}
         try:
-            initial=_size([self.manifest,self.scope],maximum=self.state.store.maximum_matrix_bytes,
+            self._manifest_charge=_size(self.manifest,maximum=self.state.store.maximum_matrix_bytes,
+                retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes)
+            initial=self._manifest_charge+_size(self.scope,maximum=self.state.store.maximum_matrix_bytes,
                 retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes)
             self._retain(initial+65536)
             self.state._build_oos_borrowers=getattr(self.state,'_build_oos_borrowers',0)+1
@@ -99,11 +102,29 @@ class _BuildOOSWriter:
 
     def _require_inputs(self,inputs,spec):
         self._check()
+        self._refresh_manifest()
         require(any(f['input_manifest']==inputs and f['fold_spec']==spec for f in self.manifest['folds']),
                 'build input outside frozen owner')
         days=sorted(spec['inference_cutoff_by_session'])
         require(self.previous is None or self.previous<days[0],'build OOS folds must be ordered and disjoint')
         require(set(days)&set(self.scope['sessions']),'build fold outside requested OOS dates')
+
+    def _refresh_manifest(self):
+        if not self._manifest_pending:return
+        current=None
+        try:
+            from .stock_batch import _data
+            value=_data(self.batch)
+            if value.get('incomplete',False) and len(value['manifest']['folds'])==len(self.manifest['folds']):return
+            current=self.batch._ready_manifest()
+            charge=_size(current,maximum=self.state.store.maximum_matrix_bytes,
+                retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes)
+            self._retain(charge)
+            self.manifest=current;current=None
+            self.state._fixed_shared_bytes-=self._manifest_charge;self.charge-=self._manifest_charge
+            self._manifest_charge=charge;self.state._sync_shared()
+            self._manifest_pending=value.get('incomplete',False)
+        finally:current=value=None
 
     def _consume(self,descriptor,lease):
         from .stock_signal_evaluation_compact import _admit_compact
@@ -165,6 +186,8 @@ class _BuildOOSWriter:
         from .stock_signal_evaluation_matrix import _matrix_input_root,_publish_matrix_inputs,_label_projection_ref
         try:
             self._check(); require(self.state.active==0,'finish requires released build projection')
+            self._refresh_manifest()
+            require(not self.state.incomplete,'complete checkpoint batch required before OOS publication')
             require(set(self.shards)==set(self.scope['sessions']),'complete build OOS date scope required')
             self.state.store.reserve(self.charge*4+len(self.scope['universe'])*16384+65536)
             self.raw['sources']={r:self.raw['sources'][r] for r in sorted(self.raw['sources'])}

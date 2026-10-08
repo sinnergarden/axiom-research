@@ -15,7 +15,7 @@ import test_stock_compact_v4 as fixtures
 
 class RawReuseBudgetTests(unittest.TestCase):
     def test_a_b_c_operation_lifecycle_cold_hit_and_failed_transfer(self):
-        reserve=OwnedStore.reserve; verify=CompactState.verify_all; working=producer._working
+        reserve=OwnedStore.reserve; verify=CompactState.verify_all; working=producer._working; sync=producer._sync_feature_charge
         for same_handle in (True,False):
             with self.subTest(same_handle=same_handle),tempfile.TemporaryDirectory() as temp:
                 root=Path(temp); f,path,manifest,_=fixtures.CompactV4Tests().prepare(root,block=64)
@@ -40,13 +40,17 @@ class RawReuseBudgetTests(unittest.TestCase):
                                         extra+=source_feature.resident_bytes+source_feature.lease_bytes
                                     # Held Python Raw panels/domain indexes are
                                     # external roots as well as borrowed stores.
-                                    scratch=producer_stats[0].get('_retained_raw_bytes',0)+producer_stats[0].get('_price_view_bytes',0)
+                                    scratch=(producer_stats[0].get('_retained_raw_bytes',0)+producer_stats[0].get('_price_view_bytes',0)+
+                                        producer_stats[0].get('_checkpoint_bytes',0))
                                     self.assertEqual(owner.shared_bytes,fstore.resident_bytes+caller+extra+scratch)
                                     checks.append(extra)
                                 return reserve(owner,amount)
                             def check_working(stats,amount):
                                 producer_stats[0]=stats
                                 return working(stats,amount)
+                            def check_sync(stats):
+                                producer_stats[0]=stats
+                                return sync(stats)
                             def check_verify(state):
                                 if created and state.store is created[-1] and fail:
                                     raise RuntimeError('synthetic transfer validation failure')
@@ -54,6 +58,7 @@ class RawReuseBudgetTests(unittest.TestCase):
                             metrics={}
                             with patch.object(producer,'OwnedStore',new=create), \
                                  patch.object(OwnedStore,'reserve',new=check_reserve), \
+                                 patch.object(producer,'_sync_feature_charge',new=check_sync), \
                                  patch.object(producer,'_working',new=check_working), \
                                  patch.object(CompactState,'verify_all',new=check_verify):
                                 kwargs=dict(feature_inputs=feature,fold_specs=f.folds()[:2],destination=root/name,
@@ -128,7 +133,7 @@ class RawReuseBudgetTests(unittest.TestCase):
                 # A historical peak deliberately bears no relation to live bytes.
                 raw.metrics['peak_resident_bytes']=64*1024**3
                 prior=(raw.limits,state._fixed_shared_bytes,state._fixed_shared_source_bytes)
-                reserve=OwnedStore.reserve; working=producer._working
+                reserve=OwnedStore.reserve; working=producer._working; sync=producer._sync_feature_charge
                 for same_handle in (True,False):
                     context=nullcontext(original) if same_handle else load_stock_feature_view(path,residency='sequential')
                     with self.subTest(same_handle=same_handle),context as feature:
@@ -145,7 +150,8 @@ class RawReuseBudgetTests(unittest.TestCase):
                             if targets:
                                 target,stores,live,blind=ledger()
                                 if owner in stores:
-                                    scratch=producer_stats[0].get('_retained_raw_bytes',0)+producer_stats[0].get('_price_view_bytes',0)
+                                    scratch=(producer_stats[0].get('_retained_raw_bytes',0)+producer_stats[0].get('_price_view_bytes',0)+
+                                        producer_stats[0].get('_checkpoint_bytes',0))
                                     self.assertEqual(owner.shared_bytes,live-owner.resident_bytes-owner.lease_bytes+scratch)
                                     observations.append((blind+scratch+amount,live+scratch+amount))
                                     raw_live.add(raw.resident_bytes+raw.lease_bytes)
@@ -154,16 +160,20 @@ class RawReuseBudgetTests(unittest.TestCase):
                             producer_stats[0]=stats
                             producer._sync_feature_charge(stats)
                             target,stores,live,blind=ledger()
-                            scratch=stats['_retained_raw_bytes']+stats.get('_price_view_bytes',0)+amount
+                            scratch=stats['_retained_raw_bytes']+stats.get('_price_view_bytes',0)+stats.get('_checkpoint_bytes',0)+amount
                             self.assertEqual(target.shared_bytes,live-target.resident_bytes-target.lease_bytes+scratch-amount)
                             observations.append((blind+scratch,live+scratch))
                             raw_live.add(raw.resident_bytes+raw.lease_bytes)
                             return working(stats,amount)
+                        def observe_sync(stats):
+                            producer_stats[0]=stats
+                            return sync(stats)
                         options={'row_block_sessions':64,'column_block':32,'maximum_resident_bytes':64*1024**2,
                             'normalization_backend':'core_cs_batch_v1'}
                         selection=f.selection[:1]; destination=root/('shared' if same_handle else 'separate')
                         with patch.object(producer,'OwnedStore',new=create_store), \
                              patch.object(OwnedStore,'reserve',new=observe_reserve), \
+                             patch.object(producer,'_sync_feature_charge',new=observe_sync), \
                              patch.object(producer,'_working',new=observe_working):
                             metrics={}
                             result=prepare_stock_ml_batch_inputs(None,feature_inputs=feature,fold_specs=f.folds()[:2],
@@ -193,7 +203,9 @@ class RawReuseBudgetTests(unittest.TestCase):
                                     model_feature_selection=selection,reuse_raw_from_batch=source)
                             self.assertTrue(any(blind<=budget<full for blind,full in observations))
                             self.assertTrue(targets[-1].closed)
-                            self.assertFalse((destination/'tight').exists())
+                            # Only a verified full manifest is public. A failed
+                            # incremental task may retain immutable input leaves.
+                            self.assertEqual(list((destination/'tight').glob('*/batch.json')),[])
                         self.assertEqual((raw.limits,state._fixed_shared_bytes,state._fixed_shared_source_bytes),prior)
                         self.assertFalse(state.closed); state.check()
                         print('RAW_REUSE_LIVE_BUDGET '+str({'same_feature_handle':same_handle,'blind_peak':blind_peak,

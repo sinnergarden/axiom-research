@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 from weakref import WeakKeyDictionary
+from contextlib import contextmanager
 
 from .stock_artifacts import digest, digest_array_rows, file_digest, write_json
 from .stock_fold_inputs import require, seal, validate_spec
@@ -248,8 +249,10 @@ def _sync_feature_charge(metrics):
     """A sequential Feature window changes the live shared byte charge."""
     feature_store=metrics['_feature_store']
     reused,reused_source=_raw_reuse_charge(metrics.get('_raw_origin'),feature_store)
+    state=metrics.get('_owner_state')
+    external=0 if state is None else max(0,state._fixed_shared_bytes-metrics['_owner_shared_baseline'])
     metrics['raw_reuse_live_bytes']=reused
-    metrics['_feature_bytes']=feature_store.resident_bytes+metrics['_caller_bytes']+reused
+    metrics['_feature_bytes']=feature_store.resident_bytes+metrics['_caller_bytes']+reused+metrics.get('_checkpoint_bytes',0)+external
     metrics['_store'].shared_bytes=(metrics['_feature_bytes']+metrics['_retained_raw_bytes']+
                                    metrics.get('_price_view_bytes',0))
     metrics['_store'].shared_source_bytes=feature_store.metrics['source_bytes']+metrics['_caller_source_bytes']+reused_source
@@ -526,7 +529,7 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
     return desc,normalized,core_ref,cohort
 
 
-def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,preparation_options,metrics=None,progress=None,
+def _prepare_legacy_compact_batch(data, *, feature_inputs,fold_specs,destination,preparation_options,metrics=None,progress=None,
                           _caller_bytes=0,_caller_source_bytes=0,model_feature_selection=None,reuse_raw_from_batch=None):
     from .stock_compact_batch import load_compact_state
     begin=time.perf_counter(); own=type(feature_inputs) is not StockFeatureView
@@ -798,3 +801,436 @@ def prepare_compact_batch(data, *, feature_inputs,fold_specs,destination,prepara
         else: store.close()
         if own: feature.close()
         if stats['data_read_calls'] and callable(getattr(data,'clear_cache',None)): data.clear_cache()
+
+
+class _IncrementalPreparation:
+    """The existing v4 producer, paused only between verified complete folds."""
+    def __init__(self,data,*,feature_inputs,fold_specs,destination,preparation_options,
+                 metrics=None,progress=None,model_feature_selection=None,reuse_raw_from_batch=None,
+                 _caller_bytes=0,_caller_source_bytes=0,_saved_definition=None):
+        self.pid=os.getpid();self.closed=False;self.feature=self.store=self.state=self.batch=None
+        self.transferred=False;self.own=type(feature_inputs) is not StockFeatureView
+        self.data=data;self.metrics=metrics;self.progress=progress;self.begin=time.perf_counter()
+        self.cursor=0;self.readonly=_saved_definition is not None;self.checkpoint_mark=None
+        self.stats={};self.groups={};self.plans=[];self.raw_outputs=[];self.ready=[]
+        self.options=deepcopy(preparation_options)
+        required={'row_block_sessions','column_block','maximum_resident_bytes','normalization_backend'}
+        require(type(self.options) is dict and required<=set(self.options)<=required|{
+            'maximum_source_bytes','maximum_parent_bytes','control_layout'} and
+            self.options['normalization_backend']=='core_cs_batch_v1' and
+            self.options.get('control_layout','fold_controls_v1')=='fold_controls_v1' and
+            all(type(v) is int and v>0 for k,v in self.options.items() if k not in ('normalization_backend','control_layout')),
+            'fixed incremental compact v4 options and positive budgets required')
+        require(type(_caller_bytes) is int and _caller_bytes>=0 and type(_caller_source_bytes) is int and _caller_source_bytes>=0,
+                'nonnegative owner audit accounting required')
+        self.budgets=limits({'maximum_matrix_bytes':self.options['maximum_resident_bytes'],
+            **{k:self.options[k] for k in ('maximum_source_bytes','maximum_parent_bytes') if k in self.options}})
+        try:
+            from .stock_compact_store import model_feature_binding,model_common
+            from .stock_compact_batch import _load_checkpoint_state,load_compact_state
+            from .stock_batch import _compact_batch_handle
+            require(not self.own or isinstance(feature_inputs,(str,Path)),'Feature input must be an owner handle or path')
+            self.feature=load_stock_feature_view(feature_inputs,limits=self.budgets,residency='sequential') if self.own else feature_inputs
+            fd=_view_data(self.feature);source=fd['definition']['spec']
+            self.binding=model_feature_binding(self.feature,model_feature_selection)
+            self.spec=source if self.binding is None else {**source,'ordered_features':self.binding['ordered_features'],
+                'feature_selection':self.binding['selection']}
+            self.width=len(self.spec['universe']);self.positions={d:i for i,d in enumerate(self.spec['feature_sessions'])}
+            require(fd['store'].resident_bytes<=self.budgets['maximum_matrix_bytes'] and
+                fd['store'].metrics['source_bytes']<=self.budgets['maximum_source_bytes'] and
+                fd['store'].metrics['largest_parent_bytes']<=self.budgets['maximum_parent_bytes'],'borrowed Feature budget incompatible')
+            self.definition={'version':'axiom.stock_ml_batch_inputs/4','feature_view':self.feature.to_dict(),
+                'fold_specs':deepcopy(fold_specs),'preparation_options':self.options,'implementation_ref':_implementation(),
+                'environment':_input_environment(),'price_domain_plan':'fit_window_evaluation_calendar_blocks_v1'}
+            if self.binding is not None:self.definition['model_feature_selection']=self.binding
+            if _saved_definition is not None:
+                require(all(_saved_definition[k]==self.definition[k] for k in self.definition if k not in
+                    ('implementation_ref','environment')),'checkpoint saved source/options mismatch')
+                self.definition=deepcopy(_saved_definition)
+            self.definition_ref=digest(self.definition)
+            self.target=Path(destination).absolute()/self.definition_ref[7:];self.cache=Path(destination).absolute()/'compact-cache'
+            self.checkpoint=self.target/'checkpoint.json'
+            require(type(fold_specs) is list and bool(fold_specs),'explicit ordered folds required')
+            previous=None;calendar_positions={d:n for n,d in enumerate(self.spec['calendar'])}
+            for i,fold in enumerate(self.definition['fold_specs']):
+                training,inference=validate_spec(fold,self.spec['calendar'])
+                require((previous is None or fold['oos_trade_sessions'][0]>previous) and
+                    set(training+inference)<=set(self.spec['feature_sessions']),'fold grid/chronology mismatch')
+                previous=fold['oos_trade_sessions'][-1];self.plans.append((fold,training,inference))
+                chunks=[training[n:n+self.options['row_block_sessions']] for n in range(0,len(training),self.options['row_block_sessions'])]
+                evaluation={}
+                for day in inference:evaluation.setdefault(calendar_positions[day]//self.options['row_block_sessions'],[]).append(day)
+                self.raw_outputs.append({'raw_parts':[None]*len(chunks),'evaluation_parts':[None]*len(evaluation)})
+                jobs=[('raw_parts',n,days,fold['fit_cutoff'],None) for n,days in enumerate(chunks)]
+                jobs.extend(('evaluation_parts',n,days,fold['evaluation_cutoff'],block) for n,(block,days) in enumerate(evaluation.items()))
+                for role,n,days,cutoff,block in jobs:
+                    key=(_instant(cutoff).isoformat(),role,block)
+                    group=self.groups.setdefault(key,{'cutoff':cutoff,'days':set(),'jobs':[]})
+                    group['days'].update(days);group['jobs'].append((i,role,n,days,cutoff))
+            origin=None
+            if reuse_raw_from_batch is not None:
+                from .stock_batch import _data
+                origin=_data(reuse_raw_from_batch)['matrix_state'];origin.check()
+                require(origin.compact and origin.active==0 and origin.batch['definition']['feature_view']==self.feature.to_dict() and
+                    origin.batch['definition']['fold_specs']==self.definition['fold_specs'] and
+                    origin.batch['definition']['preparation_options']['row_block_sessions']==self.options['row_block_sessions'] and
+                    origin.batch['definition']['price_domain_plan']==self.definition['price_domain_plan'],
+                    'Raw reuse source/fold/query plan mismatch')
+            reused,reused_source=_raw_reuse_charge(origin,fd['store'])
+            self.store=OwnedStore(self.budgets,shared_bytes=fd['store'].resident_bytes+_caller_bytes+reused,
+                shared_source_bytes=fd['store'].metrics['source_bytes']+_caller_source_bytes+reused_source)
+            self.store.check_hook=fd['store'].check;self.store.reserve(0)
+            self.stats={'cache_hit':False,'data_read_calls':0,'supplier_calls':0,'feature_core_calls':0,'core_calls':0,
+                'label_core_calls':0,'raw_operator_calls':0,'raw_cache_hits':0,'normalized_cache_hits':0,
+                'admitted_price_view_reuses':0,'account_calls':0,'train_calls':0,'predict_calls':0,'fold_queries':[
+                    {'fold_spec_ref':digest(f),'data_read_calls':0,'admitted_price_view_reuses':0,'price_domain_refs':[]} for f,_,_ in self.plans],
+                'price_domains':[],'maximum_working_bytes':fd['store'].resident_bytes,
+                '_limits':self.budgets,'_feature_bytes':fd['store'].resident_bytes+_caller_bytes,'_retained_raw_bytes':0,
+                '_store':self.store,'_feature_store':fd['store'],'_caller_bytes':_caller_bytes,'_caller_source_bytes':_caller_source_bytes,
+                '_model_feature_selection':model_feature_selection,'_raw_origin':origin,'_checkpoint_bytes':0}
+            self._charge_controls()
+            if (self.target/'batch.json').exists():
+                manifest=self.store.read_json({'path':str(self.target/'batch.json')},key='content_digest')
+                require(manifest['definition']==self.definition,'cached compact definition mismatch')
+                self.state=load_compact_state(manifest,feature_inputs=self.feature,limits=self.budgets,
+                    publication_store=self.store,residency='sequential')
+                self.state.verify_all();self.ready=self.state.batch['folds'];self.stats['cache_hit']=True
+            else:
+                require(not self.readonly or self.checkpoint.is_file(),'saved checkpoint required')
+                self.target.mkdir(parents=True,exist_ok=True)
+                view=seal({'contract_version':'stock_ml_prepared_view_v3','definition':model_common(source,self.binding),
+                    'feature_view':self.feature.to_dict()},'prepared_view_ref')
+                self._immutable_json(self.target/'view.json',view)
+                self._immutable_json(self.target/'definition.json',self.definition)
+                self.view_descriptor={'path':str(self.target/'view.json'),'file_digest':file_digest(self.target/'view.json'),
+                    'prepared_view_ref':view['prepared_view_ref']}
+                plan_descriptor={'path':str(self.target/'definition.json'),'file_digest':file_digest(self.target/'definition.json')}
+                if self.checkpoint.exists():
+                    self._read_checkpoint()
+                self.state=_load_checkpoint_state(self.definition,self.view_descriptor,plan_descriptor,self.ready,
+                    feature_inputs=self.feature,limits=self.budgets,publication_store=self.store)
+                self.ready=self.state.batch['folds'];self._validate_saved_raw()
+            self.batch=_compact_batch_handle(self.state,self.state.batch,self.begin)
+            self.stats['_owner_state']=self.state
+            self.stats['_owner_shared_baseline']=self.state._fixed_shared_bytes
+            self._charge_controls()
+        except BaseException:
+            self.close();raise
+        finally:
+            fd=source=view=manifest=origin=fold_specs=preparation_options=_saved_definition=None
+            training=inference=jobs=chunks=evaluation=calendar_positions=group=key=days=fold=None
+            feature_inputs=data=metrics=progress=model_feature_selection=reuse_raw_from_batch=None
+
+    def _check(self):
+        require(self.pid==os.getpid(),'checkpoint producer belongs to another process')
+        require(not self.closed,'checkpoint producer is closed')
+        self.state.check()
+
+    def _immutable_json(self,path,value):
+        try:
+            if path.exists():
+                require(self.store.read_json({'path':str(path)})==value,'checkpoint immutable source changed');return
+            require(not self.readonly,'checkpoint immutable source missing')
+            with tempfile.TemporaryDirectory(prefix='.checkpoint-control-',dir=self.target) as temporary:
+                stage=Path(temporary)/'control.json';write_json(stage,value)
+                try:os.link(stage,path)
+                except FileExistsError:
+                    require(self.store.read_json({'path':str(path)})==value,'concurrent checkpoint source conflict')
+        finally:value=None
+
+    def _charge_controls(self,*,temporary_bytes=0):
+        external=0 if self.state is None else max(0,self.state._fixed_shared_bytes-self.stats['_owner_shared_baseline'])
+        amount=_size([self.definition,self.plans,self.groups,self.raw_outputs,self.ready,self.positions,
+            {k:v for k,v in self.stats.items() if not k.startswith('_')}],maximum=self.store.maximum_matrix_bytes,
+            retained=self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes+temporary_bytes)
+        self.store.reserve(max(0,amount-self.stats['_checkpoint_bytes'])+temporary_bytes)
+        self.stats['_checkpoint_bytes']=amount;_sync_feature_charge(self.stats)
+        if self.state is None:return
+        baseline=self.stats['_caller_bytes']+self.stats.get('raw_reuse_live_bytes',0)+amount
+        self.state._fixed_shared_bytes=baseline+external
+        self.stats['_owner_shared_baseline']=baseline
+        self.state._fixed_shared_source_bytes=self.store.shared_source_bytes-_view_data(self.feature)['store'].metrics['source_bytes']
+        self.state._sync_shared()
+
+    def _read_checkpoint(self):
+        """Mutable operational bytes get a bounded temporary admission owner."""
+        _sync_feature_charge(self.stats)
+        temporary=OwnedStore(self.budgets,shared_bytes=self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes,
+            shared_source_bytes=self.store.shared_source_bytes+self.store.metrics['source_bytes'])
+        temporary.check_hook=self.stats['_feature_store'].check
+        saved=outputs=actual=expected=None
+        try:
+            saved=temporary.read_json({'path':str(self.checkpoint)},key='checkpoint_ref')
+            require(set(saved)=={'definition_ref','prepared_view','raw_outputs','folds','checkpoint_ref'} and
+                saved['definition_ref']==self.definition_ref and saved['prepared_view']==self.view_descriptor,
+                'checkpoint final plan/fields mismatch')
+            outputs=saved['raw_outputs']
+            require(type(outputs) is list and len(outputs)==len(self.raw_outputs),'checkpoint Raw coverage mismatch')
+            for actual,expected in zip(outputs,self.raw_outputs):
+                require(type(actual) is dict and set(actual)==set(expected) and all(type(actual[k]) is list and
+                    len(actual[k])==len(expected[k]) for k in expected),'checkpoint Raw layout mismatch')
+            self.ready=saved['folds'];self.raw_outputs=outputs
+            self._charge_controls(temporary_bytes=temporary.resident_bytes+temporary.lease_bytes)
+            temporary.check();self.checkpoint_mark=temporary.marks[str(self.checkpoint)]
+        finally:
+            saved=outputs=actual=expected=None;temporary.close();temporary=None
+
+    def _release_payloads(self):
+        self.store.release_payloads(keep_paths=self.state._keep_paths)
+
+    def _validate_saved_raw(self):
+        from .stock_compact_batch import read_target,_raw_binding
+        from .stock_compact_controls import validate_price_part
+        desc=value=rows=definition=None
+        try:
+            for key,group in self.groups.items():
+                present=[self.raw_outputs[i][role][n] is not None for i,role,n,_,_ in group['jobs']]
+                require(not any(present) or all(present),'unfinished checkpoint price domain cannot HIT')
+                if not all(present):continue
+                for i,role,n,days,cutoff in group['jobs']:
+                    desc=self.raw_outputs[i][role][n];value,rows=read_target(self.store,desc)
+                    definition=value['definition']
+                    require(value['contract_version']=='stock_compact_raw_v1' and definition['sessions']==days,
+                        'checkpoint Raw child mismatch')
+                    _raw_binding(definition,self.state.view['definition'],cutoff)
+                    validate_price_part(definition,self.state.view['definition'],self.state.price_domains,
+                        self.options['row_block_sessions'],evaluation=role=='evaluation_parts')
+                    desc=value=rows=definition=None;self._release_payloads()
+            for fold,outputs in zip(self.ready,self.raw_outputs):
+                record=self.state._parts(fold['input_manifest'],fold['fold_spec'])
+                require(record['raw_parts']==outputs['raw_parts'] and record['evaluation_parts']==outputs['evaluation_parts'],
+                    'checkpoint fold/Raw control mismatch')
+                record=None;self.state._release_window(keep_feature=True)
+        finally:
+            desc=value=rows=definition=record=group=None
+
+    def _persist(self):
+        from .stock_fold_inputs import file_fingerprint
+        if self.readonly:return
+        if self.checkpoint_mark is not None:
+            require(file_fingerprint(self.checkpoint)==self.checkpoint_mark,'checkpoint changed during producer lifetime')
+        value=None
+        try:
+            value=seal({'definition_ref':self.definition_ref,'prepared_view':self.state.batch['prepared_view'],
+                'raw_outputs':self.raw_outputs,'folds':self.ready},'checkpoint_ref')
+            with tempfile.TemporaryDirectory(prefix='.checkpoint-save-',dir=self.target) as temporary:
+                stage=Path(temporary)/'checkpoint.json';write_json(stage,value);os.replace(stage,self.checkpoint)
+            self.checkpoint_mark=file_fingerprint(self.checkpoint)
+        finally:value=None
+
+    def _ensure_raw(self,index):
+        origin=self.stats['_raw_origin'];control=price_view=chunk=desc=None
+        try:
+            for group in self.groups.values():
+                if not any(i==index for i,_,_,_,_ in group['jobs']):continue
+                if all(self.raw_outputs[i][role][n] is not None for i,role,n,_,_ in group['jobs']):
+                    self.stats['raw_cache_hits']+=sum(i==index for i,_,_,_,_ in group['jobs']);continue
+                if origin is not None:
+                    self._reuse_raw_group(group)
+                    self._charge_controls()
+                    continue
+                require(self.data is not None,'checkpoint fold is not prepared')
+                self.stats['_price_view_bytes']=0
+                with _price_view(self.data,self.spec,group['cutoff'],sorted(group['days']),self.stats) as price_view:
+                    for use,(i,role,n,days,cutoff) in enumerate(group['jobs']):
+                        report=self.stats['fold_queries'][i];ref=price_view.source_ref
+                        if ref not in report['price_domain_refs']:report['price_domain_refs'].append(ref)
+                        if use:self.stats['admitted_price_view_reuses']+=1;report['admitted_price_view_reuses']+=1
+                        else:report['data_read_calls']+=2
+                        desc,chunk=_raw(self.spec,cutoff,days,self.cache,self.stats,price_view)
+                        self.raw_outputs[i][role][n]=desc;chunk=None;self._release_payloads()
+                price_view=None
+            self._charge_controls()
+        finally:origin=control=price_view=chunk=desc=saved=group=None
+
+    def _reuse_raw_group(self,group):
+        """Reuse every child of the touched final domain under both live budgets."""
+        origin=self.stats['_raw_origin'];control=saved=desc=source_feature=fstore=None
+        try:
+            require(origin.active==0,'Raw reuse source is borrowed');origin.check()
+            for i,role,n,_,_ in group['jobs']:
+                if self.raw_outputs[i][role][n] is not None:continue
+                saved=origin.batch['folds'][i]
+                fstore=self.stats['_feature_store'];source_feature=_view_data(origin.feature,check=False)['store']
+                previous=(origin.store.limits,origin._fixed_shared_bytes,origin._fixed_shared_source_bytes)
+                try:
+                    _sync_feature_charge(self.stats)
+                    external=self.stats['_feature_bytes']-fstore.resident_bytes-self.stats['raw_reuse_live_bytes']
+                    origin.store.limits={k:min(v,self.budgets[k]) for k,v in previous[0].items()}
+                    origin._fixed_shared_bytes=previous[1]+external+self.store.resident_bytes+self.store.lease_bytes
+                    origin._fixed_shared_source_bytes=previous[2]+self.stats['_caller_source_bytes']+self.store.metrics['source_bytes']
+                    if source_feature is not fstore:
+                        origin._fixed_shared_bytes+=fstore.resident_bytes+fstore.lease_bytes
+                        origin._fixed_shared_source_bytes+=fstore.metrics['source_bytes']
+                    origin._sync_shared();origin.store.reserve(0)
+                    control=origin._parts(saved['input_manifest'],saved['fold_spec'])
+                    desc=deepcopy(control[role][n])
+                finally:
+                    origin.store.limits,origin._fixed_shared_bytes,origin._fixed_shared_source_bytes=previous
+                    origin._sync_shared();control=None
+                self.raw_outputs[i][role][n]=desc;desc=None
+                self.stats['raw_cache_hits']+=1
+                _sync_feature_charge(self.stats)
+            origin.check();self.stats['raw_reused_from_batch']=origin._batch_ref
+        finally:origin=control=saved=desc=source_feature=fstore=group=None
+
+    def next_fold(self):
+        from .stock_compact_batch import read_target
+        from .stock_compact_controls import selectors_for
+        from .stock_batch import _data
+        self._check()
+        if self.cursor==len(self.plans):return None
+        index=self.cursor
+        if index<len(self.ready):
+            require(digest(self.ready[index]['fold_spec']) in self.state._verified_folds,
+                    'unfinished checkpoint fold cannot HIT')
+            self.cursor+=1;return deepcopy(self.ready[index])
+        require(not self.readonly,'checkpoint fold is not prepared')
+        fold,training,inference=self.plans[index];rows=[];nrows=cohort=chunk=raw_rows=raw_value=record=selectors=window=joined_rows=None
+        try:
+            self._ensure_raw(index)
+            window=[self.positions[d]*self.width+j for d in training+inference for j in range(self.width)]
+            _producer_feature_window(self.feature,window,self.stats);parts=self.raw_outputs[index]['raw_parts']
+            for desc in parts:
+                _sync_feature_charge(self.stats);raw_value,raw_rows=read_target(self.store,desc);chunk=list(raw_rows)
+                charge=_measured(self.stats,chunk);_working(self.stats,charge);self.stats['_retained_raw_bytes']+=charge
+                rows.extend(chunk);raw_value=raw_rows=chunk=None;self._release_payloads()
+            norm,nrows,core_ref,cohort=_normalized(parts,rows,self.feature,fold['fit_cutoff'],training,self.cache,self.stats)
+            charge=_measured(self.stats,[nrows,cohort]);_working(self.stats,charge);self.stats['_retained_raw_bytes']+=charge
+            self._release_payloads()
+            offsets=[self.positions[r['feature_session']]*self.width+self.spec['universe'].index(r['security_id']) for r in nrows if r['valid']]
+            def joined_rows():
+                for f,r in zip(iter_feature_rows(self.feature,offsets,model_feature_selection=self.stats['_model_feature_selection']),
+                    (r for r in nrows if r['valid'])):
+                    f.update(label=r['return'],raw_return=r['raw_return'],label_available_at=r['raw_available_at'],
+                        normalized_available_at=r['label_available_at']);yield f
+            binding={'training_rows_ref':digest_array_rows(joined_rows()),'training_row_count':len(offsets),
+                'training_keys_digest':digest_array_rows([self.spec['universe'][off%self.width],self.spec['feature_sessions'][off//self.width]] for off in offsets)}
+            record={'contract_version':'stock_ml_fold_control_v1','fold_spec':deepcopy(fold),'raw_parts':parts,'normalized':norm,
+                'evaluation_parts':self.raw_outputs[index]['evaluation_parts'],'core_ref':core_ref,'cohort_ref':digest(cohort),'training_binding':binding}
+            if self.binding is not None:record['model_feature_selection_ref']=self.binding['model_feature_selection_ref']
+            selectors=selectors_for(record,self.spec,_view_data(self.feature)['row_index'],offsets)
+            record=seal(record,'fold_control_ref');descriptor=write_part(self.cache/'fold-controls',record,'fold_control_ref')
+            inputs={'contract_version':'stock_ml_saved_inputs_v4','prepared_view':self.state.batch['prepared_view'],'fold_control':descriptor,
+                'fold_spec_ref':digest(fold),'selectors':selectors,'core_result_refs':[core_ref]}
+            if self.binding is not None:inputs['model_feature_selection_ref']=self.binding['model_feature_selection_ref']
+            item={'input_manifest':seal(inputs,'input_ref'),'fold_spec':deepcopy(fold)}
+            rows=nrows=cohort=chunk=raw_rows=raw_value=joined_rows=None;self.stats['_retained_raw_bytes']=0
+            _sync_feature_charge(self.stats)
+            self.state._append_checkpoint_fold(item)
+            value=_data(self.batch);value['fold_keys'].add((digest(item['input_manifest']),digest(item['fold_spec'])))
+            self._charge_controls();self._persist();self.cursor+=1
+            if self.progress:self.progress({'stage':'compact_labels','completed':len(self.ready),'total':len(self.plans)})
+            return deepcopy(item)
+        finally:
+            rows=nrows=cohort=chunk=raw_rows=raw_value=record=selectors=window=joined_rows=parts=offsets=norm=descriptor=inputs=item=None
+            self.stats['_retained_raw_bytes']=0
+            _sync_feature_charge(self.stats)
+
+    def finish(self):
+        from .stock_batch import _data
+        self._check()
+        if not self.state.incomplete:return self.batch.to_dict()
+        require(len(self.ready)==len(self.plans) and self.cursor==len(self.plans),'complete checkpoint coverage required')
+        manifest=None
+        try:
+            manifest={'contract_version':'stock_ml_batch_inputs_v4','definition':self.definition,'definition_ref':self.definition_ref,
+                'prepared_view':self.state.batch['prepared_view'],'folds':self.ready,'status':'COMPLETE'}
+            manifest['batch_ref']=digest(manifest);manifest=seal(manifest,'content_digest')
+            require(self.state._verified_folds=={digest(f) for f,_,_ in self.plans},
+                    'complete verified checkpoint coverage required')
+            self.state.check()
+            self.state._complete_checkpoint(manifest,publish=lambda:self._immutable_json(self.target/'batch.json',manifest))
+            value=_data(self.batch);value['manifest']=manifest;value['identity']=manifest['batch_ref'];value['incomplete']=False
+            self.stats.update(batch_ref=manifest['batch_ref'],total_seconds=time.perf_counter()-self.begin)
+            return self.batch.to_dict()
+        finally:manifest=None
+
+    def transfer(self):
+        from .stock_batch import _data
+        require(not self.own and not self.state.incomplete,'complete borrowed Feature transfer required')
+        fd=_view_data(self.feature);ref=self.state._batch_ref
+        if ref in fd['prepared']:fd['prepared'][ref].close()
+        fd['prepared'][ref]=self.state;_data(self.batch).clear();_data_guard={'owner_pid':self.pid,'closed':True}
+        from .stock_batch import _DATA
+        _DATA[self.batch].update(_data_guard);self.transferred=True
+
+    def close(self):
+        if self.closed:return
+        require(self.pid==os.getpid(),'checkpoint producer belongs to another process')
+        if self.state is not None:require(self.state.active==0 and getattr(self.state,'_build_oos_borrowers',0)==0,'checkpoint owner still borrowed')
+        self.closed=True
+        if self.stats:
+            self.stats.update(total_seconds=time.perf_counter()-self.begin,
+                feature_file_hash_calls=self.stats['_feature_store'].metrics['file_hash_calls'],
+                label_file_hash_calls=self.store.metrics['file_hash_calls'],label_hash_bytes=self.store.metrics['hash_bytes'],
+                label_released_buffer_bytes=self.store.metrics.get('released_buffer_bytes',0),
+                legacy_ancestor_reads=0,legacy_native_hash_calls=0)
+        if self.metrics is not None:self.metrics.update({k:v for k,v in self.stats.items() if not k.startswith('_')})
+        caller=self.stats.get('_caller_bytes',0);caller_source=self.stats.get('_caller_source_bytes',0)
+        reads=self.stats.get('data_read_calls',0)
+        self.plans=self.groups=self.raw_outputs=self.ready=self.definition=self.spec=self.positions=self.binding=self.options=None
+        if self.transferred:
+            self.state._fixed_shared_bytes=caller;self.state._fixed_shared_source_bytes=caller_source;self.state._sync_shared()
+        elif self.batch is not None:self.batch.close()
+        elif self.state is not None:self.state.close()
+        elif self.store is not None:self.store.close()
+        self.stats.clear()
+        if self.own and self.feature is not None:self.feature.close()
+        if reads and self.data is not None and callable(getattr(self.data,'clear_cache',None)):self.data.clear_cache()
+        self.batch=self.state=self.store=self.feature=self.data=None
+
+
+@contextmanager
+def _prepare_compact_incrementally(data,**kwargs):
+    owner=None
+    try:
+        owner=_IncrementalPreparation(data,**kwargs)
+        kwargs.clear();data=None
+        yield owner
+    finally:
+        kwargs.clear();data=None
+        if owner is not None:owner.close()
+        owner=None
+
+
+@contextmanager
+def _load_compact_checkpoint_owner(path,*,feature_inputs=None):
+    """Read only a private saved checkpoint; no Data or numerical stage."""
+    admission=OwnedStore();definition=saved=source=selection=None
+    try:
+        definition=admission.read_json({'path':str(Path(path).absolute()/'definition.json')})
+        options=definition['preparation_options']
+        admission.limits=limits({'maximum_matrix_bytes':options['maximum_resident_bytes'],
+            **{k:options[k] for k in ('maximum_source_bytes','maximum_parent_bytes') if k in options}})
+        admission.reserve(0)
+        require(admission.metrics['source_bytes']<=admission.limits['maximum_source_bytes'] and
+            admission.metrics['largest_parent_bytes']<=admission.limits['maximum_parent_bytes'],'checkpoint plan byte budget exceeded')
+        saved=definition['feature_view']
+        source=feature_inputs if feature_inputs is not None else Path(saved['source_index']['path']).parent
+        selection=definition.get('model_feature_selection')
+        extra=admission.resident_bytes+admission.lease_bytes;extra_source=admission.metrics['source_bytes']
+        with _prepare_compact_incrementally(None,feature_inputs=source,fold_specs=definition['fold_specs'],
+            destination=Path(path).parent,preparation_options=options,_caller_bytes=extra,_caller_source_bytes=extra_source,
+            model_feature_selection=None if selection is None else selection['selection'],_saved_definition=definition) as owner:
+            definition=saved=source=selection=options=None;admission.close()
+            owner.stats['_caller_bytes']-=extra;owner.stats['_caller_source_bytes']-=extra_source;owner._charge_controls()
+            yield owner.batch
+    finally:
+        definition=saved=source=selection=options=feature_inputs=None;admission.close();admission=owner=None
+
+
+def prepare_compact_batch(data,*,feature_inputs,fold_specs,destination,preparation_options,metrics=None,progress=None,
+                          _caller_bytes=0,_caller_source_bytes=0,model_feature_selection=None,reuse_raw_from_batch=None):
+    require(type(preparation_options) is dict,'fixed compact options required')
+    if preparation_options.get('control_layout','fold_controls_v1')=='inline_v3':
+        return _prepare_legacy_compact_batch(data,feature_inputs=feature_inputs,fold_specs=fold_specs,destination=destination,
+            preparation_options=preparation_options,metrics=metrics,progress=progress,_caller_bytes=_caller_bytes,
+            _caller_source_bytes=_caller_source_bytes,model_feature_selection=model_feature_selection,reuse_raw_from_batch=reuse_raw_from_batch)
+    with _prepare_compact_incrementally(data,feature_inputs=feature_inputs,fold_specs=fold_specs,destination=destination,
+        preparation_options=preparation_options,metrics=metrics,progress=progress,_caller_bytes=_caller_bytes,
+        _caller_source_bytes=_caller_source_bytes,model_feature_selection=model_feature_selection,reuse_raw_from_batch=reuse_raw_from_batch) as owner:
+        while owner.next_fold() is not None:pass
+        result=owner.finish()
+        if not owner.own:owner.transfer()
+        return result

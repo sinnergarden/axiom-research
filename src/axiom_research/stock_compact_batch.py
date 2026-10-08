@@ -135,14 +135,16 @@ def read_target(store,descriptor,expected=None,raw_rows=None):
 class CompactState:
     def __init__(self,store,feature,batch,view,targets,own_feature,*,residency='eager'):
         self.store=store; self.feature=feature; self.batch=batch; self.view=view; self.targets=targets
-        self.closed=False; self.own_feature=own_feature; self.active=0; self._batch_ref=batch['batch_ref']
+        self.closed=False; self.own_feature=own_feature; self.active=0
+        self._batch_ref=batch.get('batch_ref',batch.get('definition_ref'))
+        self.incomplete='batch_ref' not in batch
         self.residency=residency; self._pending_release=False; self._active_record=None
         self.model_binding=batch['definition'].get('model_feature_selection')
         self.feature_options=({} if self.model_binding is None else
             {'model_feature_selection':self.model_binding['selection']})
         self._control_charge=0; self._target_charge=0; self._source_charge=0
         self.compact=batch['contract_version']=='stock_ml_batch_inputs_v4'; self._control_path=None
-        self.price_domains=price_domain_ranges(batch['folds'],view['definition']['calendar'],
+        self.price_domains=price_domain_ranges([{'fold_spec':s} for s in batch['definition']['fold_specs']],view['definition']['calendar'],
             batch['definition']['preparation_options']['row_block_sessions']) if self.compact else None
         self.selectors={(digest(f['input_manifest']),digest(f['fold_spec'])):f['input_manifest']['selectors'] for f in batch['folds']}
         self.records={(digest(f['input_manifest']),digest(f['fold_spec'])):(f,r)
@@ -168,12 +170,52 @@ class CompactState:
             active_target_count=len(self.targets),active_projection_count=self.active,
             current_window_fold_ref=self._active_record)
 
+    def _controls_size(self,batch):
+        try:
+            return _size([batch,self.selectors,self.positions,self.price_domains,{key:None for key in self.records},
+                          self._keep_paths],maximum=self.store.maximum_matrix_bytes,
+                         retained=self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes)
+        finally:batch=None
+
     def _account_controls(self):
-        charge=_size([self.batch,self.selectors,self.positions,self.price_domains,{key:None for key in self.records},
-                      self._keep_paths],maximum=self.store.maximum_matrix_bytes,
-                     retained=self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes)
-        self.store.reserve(charge); self.store.resident_bytes+=charge; self._control_charge=charge
+        charge=self._controls_size(self.batch)
+        delta=charge-self._control_charge
+        if delta>0:self.store.reserve(delta)
+        self.store.resident_bytes+=delta; self._control_charge=charge
         self._remember_sources()
+
+    def _append_checkpoint_fold(self,fold):
+        """Admit one complete control under the original full price-domain plan."""
+        require(self.incomplete and self.active==0 and self.store.borrowers==0,
+                'idle incomplete checkpoint owner required')
+        index=len(self.batch['folds'])
+        require(index<len(self.batch['definition']['fold_specs']) and
+            fold['fold_spec']==self.batch['definition']['fold_specs'][index], 'checkpoint fold is not the next planned fold')
+        validate_input(fold,self.batch,_view_data(self.feature)['row_index'],self.view['definition'])
+        key=(digest(fold['input_manifest']),digest(fold['fold_spec']))
+        self.batch['folds'].append(fold)
+        self.records[key]=(fold,fold['input_manifest']['fold_control'])
+        self.selectors[key]=fold['input_manifest']['selectors']
+        self._account_controls()
+        record=None
+        try:
+            record=self._parts(fold['input_manifest'],fold['fold_spec'])
+            self._activate(fold,record);self.check()
+        finally:
+            record=None
+            self._release_window(keep_feature=True)
+
+    def _complete_checkpoint(self,manifest,*,publish):
+        require(self.incomplete and self.active==0 and self.store.borrowers==0 and
+            len(self.batch['folds'])==len(self.batch['definition']['fold_specs']), 'complete checkpoint coverage required')
+        require(manifest['definition']==self.batch['definition'] and manifest['folds']==self.batch['folds'] and
+            manifest['prepared_view']==self.batch['prepared_view'], 'checkpoint final definition changed')
+        self.check();charge=self._controls_size(manifest);delta=charge-self._control_charge
+        if delta>0:self.store.reserve(delta)
+        self.check();publish()
+        # No fallible admission remains after the public atomic link.
+        self.store.resident_bytes+=delta;self._control_charge=charge
+        self.batch=manifest;self._batch_ref=manifest['batch_ref'];self.incomplete=False
 
     def _account_targets(self):
         if not self.targets:
@@ -686,6 +728,41 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
             if type(store) is OwnedStore: store.close()
             if own and feature is not None: feature.close()
         raise
+
+
+def _load_checkpoint_state(definition,view_descriptor,plan_descriptor,folds,*,feature_inputs,limits,publication_store):
+    """Private partial owner. The public COMPLETE manifest loader stays strict."""
+    state=manifest=view=plan=None
+    try:
+        fd=_view_data(feature_inputs);store=publication_store
+        require(type(store) is OwnedStore and not store.closed and store.borrowers==0,'active checkpoint byte owner required')
+        plan=store.read_json(plan_descriptor)
+        require(plan==definition and definition['version']=='axiom.stock_ml_batch_inputs/4' and
+            definition['price_domain_plan']=='fit_window_evaluation_calendar_blocks_v1' and
+            definition['feature_view']==feature_inputs.to_dict(), 'checkpoint final plan/source mismatch')
+        binding=definition.get('model_feature_selection')
+        require(binding==model_feature_binding(feature_inputs,None if binding is None else binding['selection']),
+                'checkpoint model selection mismatch')
+        view=store.read_json(view_descriptor,key='prepared_view_ref')
+        fields(view,{'contract_version','definition','feature_view','prepared_view_ref'},'exact checkpoint prepared view required')
+        common=model_common(fd['definition']['spec'],binding)
+        require(view['contract_version']=='stock_ml_prepared_view_v3' and view['definition']==common and
+            view['feature_view']==definition['feature_view'], 'checkpoint prepared view/source mismatch')
+        require(type(folds) is list and len(folds)<=len(definition['fold_specs']) and
+            [f['fold_spec'] for f in folds]==definition['fold_specs'][:len(folds)], 'checkpoint ready prefix mismatch')
+        manifest={'contract_version':'stock_ml_batch_inputs_v4','definition':definition,'definition_ref':digest(definition),
+            'prepared_view':view_descriptor,'folds':folds}
+        for fold in folds:validate_input(fold,manifest,fd['row_index'],common)
+        state=CompactState(store,feature_inputs,manifest,view,{},False,residency='sequential')
+        state._keep_paths.add(plan_descriptor['path']);state._account_controls()
+        state.verify_all();state.check()
+        return state
+    except BaseException:
+        if state is not None:state.close()
+        raise
+    finally:
+        definition=view_descriptor=plan_descriptor=folds=manifest=view=plan=fd=common=None
+        state=store=feature_inputs=publication_store=binding=fold=None
 
 
 def _raw_binding(definition,common,cutoff):

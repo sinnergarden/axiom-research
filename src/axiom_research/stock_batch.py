@@ -64,10 +64,19 @@ class StockMLBatchInputs:
 
     @property
     def identity(self):
-        return _data(self)['identity']
+        value=_data(self)
+        require(not value.get('incomplete',False),'checkpoint owner has no complete batch identity')
+        return value['identity']
 
     def to_dict(self):
-        return deepcopy(_data(self)['manifest'])
+        value=_data(self)
+        require(not value.get('incomplete',False),'checkpoint owner is not a COMPLETE batch')
+        return deepcopy(value['manifest'])
+
+    def _ready_manifest(self):
+        """Private ready membership; never a saved COMPLETE batch document."""
+        value=_data(self); self._check_sources()
+        return deepcopy(value['manifest'])
 
     @property
     def metrics(self):
@@ -184,7 +193,8 @@ def _compact_batch_handle(state,manifest,begin):
         metrics[key]+=state.feature.metrics.get(key,0)
     metrics.update(initialization_seconds=time.perf_counter()-begin,legacy_ancestor_reads=0,
         legacy_native_hash_calls=0,common_key_index_builds=1)
-    value={'identity':manifest['batch_ref'],'manifest':manifest,'matrix_state':state,
+    value={'identity':manifest.get('batch_ref',manifest.get('definition_ref')),
+        'incomplete':'batch_ref' not in manifest,'manifest':manifest,'matrix_state':state,
         'fold_keys':{(digest(f['input_manifest']),digest(f['fold_spec'])) for f in manifest['folds']},
         'closed':False,'metrics':metrics}
     return StockMLBatchInputs(_TOKEN,value)
