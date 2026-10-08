@@ -7,12 +7,16 @@ there is no fallback to DataBatch/to_json or Data implementation internals.
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import fields as dataclass_fields
+from datetime import datetime
 import os
 
 from .stock_artifacts import digest
 from .stock_fold_inputs import require, seal
 from .stock_compact_store import reference, sealed
 from .stock_label_contracts import _instant
+
+_QUERY_FIELDS={'domain','fields','symbols','sessions','pit_policy','cutoff_by_session',
+    'purpose','price_basis','adjustment_anchor','universe_id','policy_by_session'}
 
 
 class ColumnMathReuse:
@@ -126,9 +130,21 @@ def _plain(value):
 
 
 def query_binding(query):
+    """Encode the public Data QuerySpec wire without changing its offset.
+
+    Data parses aware cutoff inputs and calls isoformat, preserving the declared
+    timezone. UTC conversion belongs to temporal comparisons, not the original
+    query binding. Optional None values and empty mappings remain distinct.
+    """
     value={f.name:(dict(v) if isinstance(v,Mapping) else list(v) if isinstance(v,tuple) else v)
         for f in dataclass_fields(query) for v in (getattr(query,f.name),)}
-    value['cutoff_by_session']={s:_instant(v).isoformat() for s,v in value['cutoff_by_session'].items()}
+    require(set(value)==_QUERY_FIELDS,'exact public Data QuerySpec fields required')
+    cutoffs={}
+    for session,clock in value['cutoff_by_session'].items():
+        if isinstance(clock,str):clock=datetime.fromisoformat(clock.replace('Z','+00:00'))
+        _instant(clock)  # Validate awareness; preserve Data's original offset.
+        cutoffs[session]=clock.isoformat()
+    value['cutoff_by_session']=cutoffs
     return value
 
 
@@ -152,6 +168,10 @@ def validate_column_raw_binding(definition, common, cutoff):
             type(v.get('unit')) is str and bool(v['unit']) for v in metadata.values()) and
         metadata['open']['unit']==metadata['close']['unit'],'column price dtype/unit/basis mismatch')
     q=source['query_binding'];h=common['target_spec']['horizon_sessions']
+    fields(q,_QUERY_FIELDS,'exact column QuerySpec binding required')
+    fields(source['input_queries'],{'price','factor'},'exact column input queries required')
+    for input_query in source['input_queries'].values():
+        fields(input_query,_QUERY_FIELDS,'exact column input QuerySpec binding required')
     require(definition['calendar']==common['calendar'] and definition['universe']==common['universe'] and
         definition['snapshot']==common['snapshot'] and _instant(definition['cutoff'])==_instant(cutoff) and
         definition['horizon_sessions']==h and type(h) is int and h>0 and
