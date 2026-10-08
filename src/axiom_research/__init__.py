@@ -47,6 +47,8 @@ _RUNTIME_EXPORTS = {
     "build_stock_derived_signal": ".stock_derived_signal",
     "load_stock_derived_signal": ".stock_derived_signal",
     "resolve_stock_label_spec": ".stock_target_spec",
+    "build_stock_evaluation_label_inputs": ".stock_evaluation_labels",
+    "load_stock_evaluation_label_inputs": ".stock_evaluation_labels",
     "build_stock_sequential_experiment": ".stock_experiment_entry",
     "build_configured_stock_sequential_experiment": ".stock_experiment_entry",
     "save_stock_derived_signal_evaluation_inputs": ".stock_signal_evaluation_derived",
