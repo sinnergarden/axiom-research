@@ -230,6 +230,85 @@ class BuildOOSLifecycleTests(unittest.TestCase):
                 self.assertEqual((state.active,state.store.borrowers,state.store.lease_bytes),(0,0,0))
                 self.assertEqual(state._fixed_shared_bytes,fixed)
 
+    def test_consumer_failure_retained_traceback_releases_graph_before_credit(self):
+        from axiom_research import stock_signal_evaluation_compact as admission
+        class Probe: pass
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);f,manifest,scope=self.fixture(root)
+            probes=[];admit=admission._admit_compact;failure=None
+            with load_stock_ml_batch_inputs(manifest,residency='sequential') as batch:
+                state=_data(batch)['matrix_state'];fixed=state._fixed_shared_bytes
+                def observed(*args,**kwargs):
+                    result=admit(*args,**kwargs);admitted,records,_,_=result
+                    # Test-only leaves preserve the ordinary dict/list graph.
+                    # Force failure after its retained control charge is added.
+                    for graph in (admitted,admitted['raw'],admitted['metadata']):
+                        probe=Probe();graph['traceback_probe']=probe;probes.append(weakref.ref(probe))
+                    writer.records[next(iter(records))]='sha256:'+'0'*64
+                    return result
+                try:
+                    with _freeze_build_oos_inputs(batch,scope=scope,destination=root/'trace-consume',signal_name='model') as writer, \
+                         patch.object(admission,'_admit_compact',new=observed):
+                        window_fixtures.SequentialWindowTests().build(f,manifest['folds'][0],batch,root/'folds')
+                except ValueError as exc:failure=exc
+                self.assertIsNotNone(failure);self.assertIn('conflicting build OOS source pin',str(failure))
+                self.assertIsNotNone(failure.__traceback__);gc.collect()
+                self.assertEqual(len(probes),3);self.assertTrue(all(ref() is None for ref in probes))
+                self.assertEqual((state.active,state.store.borrowers,state.store.lease_bytes),(0,0,0))
+                self.assertEqual(state._fixed_shared_bytes,fixed);self.assertEqual(writer.charge,0)
+                self.assertEqual(state._build_oos_borrowers,0)
+                self.assertEqual(list((root/'trace-consume').iterdir()),[])
+                frame=failure.__traceback__;found=False
+                while frame is not None:
+                    if frame.tb_frame.f_code.co_name=='_consume':
+                        found=True
+                        for key in ('admitted','delta','raw','records','marks','new_sources','new_lineages','fold','spec'):
+                            self.assertIsNone(frame.tb_frame.f_locals[key],key)
+                    frame=frame.tb_next
+                self.assertTrue(found)
+
+    def test_finish_failure_retained_traceback_releases_graph_before_credit(self):
+        from axiom_research import stock_signal_evaluation_matrix as publication
+        class Probe: pass
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);f,manifest,scope=self.fixture(root);item=manifest['folds'][0]
+            local={**scope,'sessions':sorted(item['fold_spec']['inference_cutoff_by_session'])}
+            probes=[];make_root=publication._matrix_input_root;failure=None
+            def observed(signal_inputs,raw_label_input,scope,admitted,records,manifest):
+                result=make_root(signal_inputs,raw_label_input,scope,admitted,records,manifest)
+                for graph in (admitted,result):
+                    probe=Probe();graph['traceback_probe']=probe;probes.append(weakref.ref(probe))
+                return result
+            def fail_publication(root,stage,destination,batch,marks):
+                # Isolate the new caller's lifetime from the injected frame.
+                root=stage=destination=batch=marks=None
+                raise RuntimeError('retained traceback publication failure')
+            with load_stock_ml_batch_inputs(manifest,residency='sequential') as batch:
+                state=_data(batch)['matrix_state'];fixed=state._fixed_shared_bytes
+                try:
+                    with _freeze_build_oos_inputs(batch,scope=local,destination=root/'trace-finish',signal_name='model') as writer:
+                        window_fixtures.SequentialWindowTests().build(f,item,batch,root/'folds')
+                        self.assertGreater(writer.charge,0)
+                        with patch.object(publication,'_matrix_input_root',new=observed), \
+                             patch.object(publication,'_publish_matrix_inputs',new=fail_publication):
+                            writer.finish()
+                except RuntimeError as exc:failure=exc
+                self.assertIsNotNone(failure);self.assertIn('retained traceback publication failure',str(failure))
+                self.assertIsNotNone(failure.__traceback__);gc.collect()
+                self.assertEqual(len(probes),2);self.assertTrue(all(ref() is None for ref in probes))
+                self.assertEqual((state.active,state.store.borrowers,state.store.lease_bytes),(0,0,0))
+                self.assertEqual(state._fixed_shared_bytes,fixed);self.assertEqual(writer.charge,0)
+                self.assertEqual(state._build_oos_borrowers,0)
+                self.assertEqual(list((root/'trace-finish').iterdir()),[])
+                frame=failure.__traceback__;found=False
+                while frame is not None:
+                    if frame.tb_frame.f_code.co_name=='finish':
+                        found=True
+                        self.assertIsNone(frame.tb_frame.f_locals['admitted'])
+                        self.assertIsNone(frame.tb_frame.f_locals['root'])
+                    frame=frame.tb_next
+                self.assertTrue(found)
+
 
 
 if __name__=='__main__':unittest.main()

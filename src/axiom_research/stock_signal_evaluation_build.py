@@ -108,69 +108,76 @@ class _BuildOOSWriter:
     def _consume(self,descriptor,lease):
         from .stock_signal_evaluation_compact import _admit_compact
         from .stock_signal_evaluation_projection import _shard,_check_marks
-        self._check()
-        require(lease._batch is self.batch,'build lease owner mismatch')
-        fold=lease.documents['fold.json']; spec=fold['definition']['fold_spec']
-        self._require_inputs(fold['definition']['input_manifest'],spec)
-        days=sorted(spec['inference_cutoff_by_session'])
-        selected=[d for d in days if d in self.scope['sessions']]
-        local={**self.scope,'sessions':selected}
-        # Current lease plus one detached OOS child coexist. No training matrix
-        # is included in this admission or the emitted date shards.
-        self.state.store.reserve(lease._charge*2+len(days)*len(lease.common['universe'])*16384+65536)
-        admitted,records,marks,_=_admit_compact({self.name:[descriptor]},None,local,self.batch,
-            _borrowed_lease=lease,_manifest=self.manifest)
-        raw=admitted['raw']
-        if self.raw is None:
-            self.raw={k:v for k,v in raw.items() if k not in ('sources','label_inputs','label_shard_refs','label_ref')}
-            self.raw.update(sources={},label_inputs=[],label_shard_refs={},label_ref=None)
-        require(all(self.raw[k]==raw[k] for k in ('mode','label_spec','calendar_ref','snapshot','pit_policy')),
-                'build OOS Raw definition conflict')
-        new_records={p:r for p,r in records.items() if p not in self.records}
-        new_sources={r:s for r,s in raw['sources'].items() if r not in self.raw['sources']}
-        new_lineages={digest(v):v for v in raw['label_inputs'] if digest(v) not in self.lineages}
-        delta=[admitted['metadata'],admitted['refs'],admitted['closures'],descriptor,
-               new_records,{p:marks[Path(p)] for p in new_records},new_sources,new_lineages,
-               raw['label_shard_refs']]
-        self._retain(_size(delta,maximum=self.state.store.maximum_matrix_bytes,
-            retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes)+65536)
-        for p,r in records.items():
-            require(p not in self.records or self.records[p]==r,'conflicting build OOS source pin')
-            require(Path(p) not in self.marks or self.marks[Path(p)]==marks[Path(p)],'build OOS source changed')
-        for r,s in raw['sources'].items():
-            require(r not in self.raw['sources'] or self.raw['sources'][r]==s,'conflicting build OOS Raw source')
-        for day in selected:
-            require(day not in self.shards,'duplicate build OOS date')
-            name=day+'.json'; write_json(self.stage/name,_shard(admitted,local,day))
-            self.shards[day]={'file':name,'file_digest':file_digest(self.stage/name)}
-        self.records.update(records); self.marks.update(marks)
-        self.raw['sources'].update(new_sources); self.lineages.update(new_lineages)
-        self.raw['label_shard_refs'].update(raw['label_shard_refs'])
-        self.signal_inputs[self.name].append(deepcopy(descriptor))
-        for key in ('metadata','refs','closures'): getattr(self,key)[self.name].extend(admitted[key][self.name])
-        self.previous=days[-1]
-        self.metrics['folds']+=1; self.metrics['shards']+=len(selected)
-        self.metrics['maximum_fold_rows']=max(self.metrics['maximum_fold_rows'],len(days)*len(lease.common['universe']))
-        self.metrics['build_projection_borrows' if not lease._owns_projection else 'saved_oos_admissions']+=1
-        # Only control metadata is retained. Current grids/masks/rows disappear
-        # before the borrowed lease and the enclosing build projection close.
-        del admitted,delta,raw
-        lease._check_sources(); _check_marks(self.marks)
+        try:
+            self._check()
+            require(lease._batch is self.batch,'build lease owner mismatch')
+            fold=lease.documents['fold.json']; spec=fold['definition']['fold_spec']
+            self._require_inputs(fold['definition']['input_manifest'],spec)
+            days=sorted(spec['inference_cutoff_by_session'])
+            selected=[d for d in days if d in self.scope['sessions']]
+            local={**self.scope,'sessions':selected}
+            # Current lease plus one detached OOS child coexist. No training matrix
+            # is included in this admission or the emitted date shards.
+            self.state.store.reserve(lease._charge*2+len(days)*len(lease.common['universe'])*16384+65536)
+            admitted,records,marks,_=_admit_compact({self.name:[descriptor]},None,local,self.batch,
+                _borrowed_lease=lease,_manifest=self.manifest)
+            raw=admitted['raw']
+            if self.raw is None:
+                self.raw={k:v for k,v in raw.items() if k not in ('sources','label_inputs','label_shard_refs','label_ref')}
+                self.raw.update(sources={},label_inputs=[],label_shard_refs={},label_ref=None)
+            require(all(self.raw[k]==raw[k] for k in ('mode','label_spec','calendar_ref','snapshot','pit_policy')),
+                    'build OOS Raw definition conflict')
+            new_records={p:r for p,r in records.items() if p not in self.records}
+            new_sources={r:s for r,s in raw['sources'].items() if r not in self.raw['sources']}
+            new_lineages={digest(v):v for v in raw['label_inputs'] if digest(v) not in self.lineages}
+            delta=[admitted['metadata'],admitted['refs'],admitted['closures'],descriptor,
+                   new_records,{p:marks[Path(p)] for p in new_records},new_sources,new_lineages,
+                   raw['label_shard_refs']]
+            self._retain(_size(delta,maximum=self.state.store.maximum_matrix_bytes,
+                retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes)+65536)
+            for p,r in records.items():
+                require(p not in self.records or self.records[p]==r,'conflicting build OOS source pin')
+                require(Path(p) not in self.marks or self.marks[Path(p)]==marks[Path(p)],'build OOS source changed')
+            for r,s in raw['sources'].items():
+                require(r not in self.raw['sources'] or self.raw['sources'][r]==s,'conflicting build OOS Raw source')
+            for day in selected:
+                require(day not in self.shards,'duplicate build OOS date')
+                name=day+'.json'; write_json(self.stage/name,_shard(admitted,local,day))
+                self.shards[day]={'file':name,'file_digest':file_digest(self.stage/name)}
+            self.records.update(records); self.marks.update(marks)
+            self.raw['sources'].update(new_sources); self.lineages.update(new_lineages)
+            self.raw['label_shard_refs'].update(raw['label_shard_refs'])
+            self.signal_inputs[self.name].append(deepcopy(descriptor))
+            for key in ('metadata','refs','closures'): getattr(self,key)[self.name].extend(admitted[key][self.name])
+            self.previous=days[-1]
+            self.metrics['folds']+=1; self.metrics['shards']+=len(selected)
+            self.metrics['maximum_fold_rows']=max(self.metrics['maximum_fold_rows'],len(days)*len(lease.common['universe']))
+            self.metrics['build_projection_borrows' if not lease._owns_projection else 'saved_oos_admissions']+=1
+            # Only control metadata is retained. Current grids/masks/rows disappear
+            # before the borrowed lease and the enclosing build projection close.
+            lease._check_sources(); _check_marks(self.marks)
+        finally:
+            # Tracebacks may outlive writer.close() and its charge credit.
+            fold=spec=days=selected=local=admitted=records=marks=raw=_=None
+            new_records=new_sources=new_lineages=delta=p=r=s=day=name=None
 
     def finish(self):
         from .stock_signal_evaluation_matrix import _matrix_input_root,_publish_matrix_inputs,_label_projection_ref
-        self._check(); require(self.state.active==0,'finish requires released build projection')
-        require(set(self.shards)==set(self.scope['sessions']),'complete build OOS date scope required')
-        self.state.store.reserve(self.charge*4+len(self.scope['universe'])*16384+65536)
-        self.raw['sources']={r:self.raw['sources'][r] for r in sorted(self.raw['sources'])}
-        self.raw['label_inputs']=[self.lineages[r] for r in sorted(self.lineages)]
-        self.raw['label_ref']=_label_projection_ref(self.raw)
-        admitted={'metadata':self.metadata,'refs':self.refs,'closures':self.closures,'raw':self.raw}
-        root=_matrix_input_root(self.signal_inputs,None,self.scope,admitted,self.records,self.manifest)
-        root['shards']=self.shards
-        result=_publish_matrix_inputs(root,self.stage,self.destination,self.batch,self.marks)
-        self.finished=True
-        return result
+        try:
+            self._check(); require(self.state.active==0,'finish requires released build projection')
+            require(set(self.shards)==set(self.scope['sessions']),'complete build OOS date scope required')
+            self.state.store.reserve(self.charge*4+len(self.scope['universe'])*16384+65536)
+            self.raw['sources']={r:self.raw['sources'][r] for r in sorted(self.raw['sources'])}
+            self.raw['label_inputs']=[self.lineages[r] for r in sorted(self.lineages)]
+            self.raw['label_ref']=_label_projection_ref(self.raw)
+            admitted={'metadata':self.metadata,'refs':self.refs,'closures':self.closures,'raw':self.raw}
+            root=_matrix_input_root(self.signal_inputs,None,self.scope,admitted,self.records,self.manifest)
+            root['shards']=self.shards
+            result=_publish_matrix_inputs(root,self.stage,self.destination,self.batch,self.marks)
+            self.finished=True
+            return result
+        finally:
+            admitted=root=None
 
     def close(self):
         if self.closed:return
