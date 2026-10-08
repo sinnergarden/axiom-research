@@ -92,7 +92,9 @@ class _FoldLease:
     def source_fingerprints(self): self._check_open(); return self._value['source_fingerprints']
 
     def _check_sources(self):
-        self._check_open(); self._projection._store.check(); self._ingress.check()
+        self._check_open()
+        require(self._projection._store is self._state.store, 'evaluation projection store mismatch')
+        self._ingress.check()
         self._batch._check_sources()
 
     def close(self):

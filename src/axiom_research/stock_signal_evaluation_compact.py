@@ -108,7 +108,8 @@ def _join(targets, inputs, fold_spec, common, scope, records, state, wanted):
         _require(ref not in state['raw'] or state['raw'][ref] == source, 'conflicting compact Raw provenance')
         state['raw'][ref] = source; days.extend(definition['sessions'])
         _require(_instant(definition['cutoff']) == _instant(fold_spec['evaluation_cutoff']), 'compact evaluation vintage mismatch')
-        indexed = _grid(item['rows'], common['universe'], definition['sessions'], 'feature_session', 'compact Raw')
+        # Only the current leased evaluation part becomes a detached list.
+        indexed = _grid(list(item['rows']), common['universe'], definition['sessions'], 'feature_session', 'compact Raw')
         for key, row in indexed.items():
             _target(row, key, common['calendar'], _instant(definition['cutoff']), 5)
             _require(row['source_refs'] == [definition['price_view']['price_view_ref']], 'compact row original source mismatch')

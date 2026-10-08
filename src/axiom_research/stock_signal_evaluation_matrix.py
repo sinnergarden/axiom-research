@@ -501,7 +501,7 @@ def _save_matrix_inputs(signal_inputs, raw_label_input, scope, destination, batc
         'stock_matrix_folds.py', 'stock_fold_artifacts.py', 'stock_artifacts.py', 'stock_label_contracts.py',
         'stock_native_json.py', 'stock_canonical_json.py')
     if compact:
-        names += ('stock_signal_evaluation_compact.py', 'stock_compact_batch.py',
+        names += ('stock_signal_evaluation_compact.py', 'stock_signal_evaluation_lease.py', 'stock_compact_batch.py',
             'stock_compact_store.py', 'stock_compact_controls.py', 'stock_matrix_storage.py')
     receipt = {'contract_version': 'stock_signal_evaluation_admission_v3' if compact else 'stock_signal_evaluation_admission_v2',
         'signal_inputs': deepcopy(signal_inputs), 'raw_label_input': deepcopy(raw_label_input), 'scope': scope,
