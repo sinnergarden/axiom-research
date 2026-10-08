@@ -72,6 +72,9 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,traini
         with _compact_batch_handle(state,state.batch,begin) as owned:
             return build_matrix_fold(inputs,spec=spec,destination=destination,metrics=metrics,
                 batch=owned,training_options=training_options,model_feature_selection=model_feature_selection)
+    from .stock_signal_evaluation_build import _writer_for,_consume_saved_fold,_publish_build_fold
+    writer=_writer_for(batch)
+    if writer is not None: writer._require_inputs(inputs,spec)
     definition=None
     zeros=dict(data_read_calls=0,supplier_calls=0,feature_core_calls=0,label_core_calls=0,
         core_calls=0,account_calls=0,train_calls=0,predict_calls=0)
@@ -89,7 +92,8 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,traini
         if target.exists():
             # Saved validation uses the same OOS projection and full source
             # checks; no training X/y/P is allocated for an exact HIT.
-            saved=load_matrix_fold(target,batch=batch)
+            saved=(load_matrix_fold(target,batch=batch) if writer is None else
+                   _consume_saved_fold(target,batch=batch,writer=writer))
             require(saved.to_dict()['definition']==definition,'cached matrix fold definition mismatch')
             if metrics is not None: metrics.update(zeros,cache_hit=True,total_seconds=time.perf_counter()-begin)
             return _repath_owned_fold(saved,target,reused=True)
@@ -107,6 +111,7 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,traini
         require(len(projection.training_keys)>=40,'insufficient mature finite training rows')
         dataset=_dataset(projection,inputs,spec); features,labels=projection.features,projection.labels
         stats={**zeros,'cache_hit':False,'saved_input_validation_seconds':time.perf_counter()-begin}
+        matrix_bytes=sum(x.nbytes for x in (projection.X,projection.y,projection.P))
         booster,scores=fit_predict_stock_model(projection.X,projection.y,projection.P,
             ordered_features=common['ordered_features'],parameters=parameters,num_boost_round=rounds,metrics=stats)
         require(len(scores)==len(projection.candidate_keys) and all(_finite(float(s)) for s in scores),
@@ -115,6 +120,12 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,traini
         target.parent.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='.matrix-fold-',dir=target.parent) as temporary:
             stage=Path(temporary)/'complete'; stage.mkdir(); booster.save_model(str(stage/'booster.txt'))
+            # The backend has finished and its model bytes are saved. Detach
+            # its arrays before saved admission/OOS freezing; keep row/control
+            # facts alive for the original complete validator.
+            booster=scores=None
+            if inputs.get('contract_version')=='stock_ml_saved_inputs_v4':
+                stats['released_matrix_lease_bytes']=projection._release_matrices()
             model=seal({'contract_version':'stock_model_release_v2','dataset_ref':dataset['dataset_ref'],
                 'feature_ref':features['feature_ref'],'label_ref':labels['label_ref'],'raw_label_refs':projection.raw_refs,
                 'fit_cutoff':spec['fit_cutoff'],'simulated_available_at':spec['simulated_model_available_at'],
@@ -147,16 +158,20 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,traini
             for name,value in values.items(): write_json(stage/name,value)
             write_json(stage/'manifest.json',{'contract_version':'stock_ml_fold_manifest_v2',
                 'fold_ref':fold['fold_ref'],'files':{n:file_digest(stage/n) for n in [*values,'booster.txt']}})
-            admitted = load_matrix_fold(stage,projection=projection,batch=batch)
-            try: stage.rename(target)
-            except OSError as exc:
-                if exc.errno not in (errno.EEXIST,errno.ENOTEMPTY): raise
-                admitted = load_matrix_fold(target,projection=projection,batch=batch)
-                require(admitted.identity==fold['fold_ref'],
-                        'concurrent matrix fold conflict')
+            if writer is not None:
+                admitted=_publish_build_fold(stage,target,projection=projection,batch=batch,
+                    fold_ref=fold['fold_ref'],writer=writer)
+            else:
+                admitted = load_matrix_fold(stage,projection=projection,batch=batch)
+                try: stage.rename(target)
+                except OSError as exc:
+                    if exc.errno not in (errno.EEXIST,errno.ENOTEMPTY): raise
+                    admitted = load_matrix_fold(target,projection=projection,batch=batch)
+                    require(admitted.identity==fold['fold_ref'],
+                            'concurrent matrix fold conflict')
         stats.update(training_rows=len(projection.training_keys),prediction_rows=len(predictions['rows']),
             valid_predictions=len(projection.candidate_keys),
-            matrix_bytes=sum(x.nbytes for x in (projection.X,projection.y,projection.P)),
+            matrix_bytes=matrix_bytes,
             artifact_bytes=sum(p.stat().st_size for p in target.iterdir()),total_seconds=time.perf_counter()-begin)
         if metrics is not None: metrics.update(stats)
         return _repath_owned_fold(admitted,target)

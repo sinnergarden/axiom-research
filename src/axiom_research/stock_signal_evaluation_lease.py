@@ -24,12 +24,13 @@ class _TargetRows(Sequence):
 
 class _FoldLease:
     __slots__=('_state','_batch','_ingress','_projection','_value','_rows','_charge',
-               '_shared_charge','_source_charge','_pid','_closed')
+               '_shared_charge','_source_charge','_pid','_closed','_owns_projection')
 
-    def __init__(self,state,batch,ingress):
+    def __init__(self,state,batch,ingress,*,owns_projection=True):
         self._state=state; self._batch=batch; self._ingress=ingress
         self._projection=None; self._value=None; self._rows=[]; self._charge=0
         self._shared_charge=self._source_charge=0; self._pid=os.getpid(); self._closed=False
+        self._owns_projection=owns_projection
 
     def _check_open(self):
         require(self._pid==os.getpid(),'evaluation lease belongs to another process')
@@ -107,7 +108,7 @@ class _FoldLease:
         state=self._state
         state.store.lease_bytes-=self._charge; self._charge=0
         try:
-            if projection is not None: projection.close()
+            if projection is not None and self._owns_projection: projection.close()
         finally:
             self._ingress.close()
             state._fixed_shared_bytes-=self._shared_charge
@@ -115,6 +116,57 @@ class _FoldLease:
             self._shared_charge=self._source_charge=0
             state._sync_shared()
             self._state=self._batch=self._ingress=None
+
+    def _repath_outputs(self,original,destination):
+        """Transfer already-hashed file pins after the owned directory rename."""
+        from .stock_fold_inputs import file_fingerprint
+        self._check_open(); original=Path(original); destination=Path(destination)
+        ingress=self._ingress
+        pairs=[]
+        for path,mark in ingress.marks.items():
+            require(Path(path).parent==original,'build output pin outside publication directory')
+            target=str(destination/Path(path).name)
+            require(file_fingerprint(target)==mark,'build output changed during publication')
+            pairs.append((path,target))
+        records=dict(self._value['source_records']); marks=self._value['source_fingerprints']
+        for path,target in pairs:
+            records[target]=records.pop(path); marks[target]=marks.pop(path)
+        self._value['source_records']=tuple(sorted(records.items()))
+        for name in ('marks','hashes','json','charges','arrays'):
+            values=getattr(ingress,name)
+            for path,target in pairs:
+                if path in values: values[target]=values.pop(path)
+        self._check_sources()
+
+
+@contextmanager
+def _admit_build_fold(path,*,projection,batch):
+    """Internal borrowed lease from this build's actual saved-byte validator."""
+    from .stock_batch import _data
+    from .stock_matrix_folds import _load_matrix_fold
+    from .stock_fold_artifacts import _owned_fold
+    state=_data(batch)['matrix_state']
+    require(state.compact and (projection is None or
+            projection._store is state.store and not projection._closed),
+            'active build projection required')
+    ingress=OwnedStore(state.store.limits,
+        shared_bytes=state.store.shared_bytes+state.store.resident_bytes+state.store.lease_bytes,
+        shared_source_bytes=state.store.shared_source_bytes+state.store.metrics['source_bytes'])
+    lease=_FoldLease(state,batch,ingress,owns_projection=projection is None)
+    failed=True
+    try:
+        _load_matrix_fold(path,projection=projection,batch=batch,ingress=ingress,_lease=lease)
+        documents={Path(p).name:v for p,v in ingress.json.items() if Path(p).name!='manifest.json'}
+        run=_owned_fold(path,documents)
+        lease._check_sources()
+        yield lease,run
+        lease._check_sources()
+        failed=False
+    finally:
+        try: lease.close()
+        finally:
+            if failed and projection is None: state._release_window()
+        state=ingress=lease=documents=run=None
 
 
 @contextmanager

@@ -343,7 +343,8 @@ def _verify_root(root, ref, scope):
     return by_day
 
 
-def _load_inputs(input_ref, scope, *, marks=None, include_admission=False):
+def _load_inputs(input_ref, scope, *, marks=None, include_admission=False, _validate_only=False):
+    _require(not (_validate_only and include_admission), 'validation-only input has no row projection')
     ref = _input_ref(input_ref); scope = _scope(scope)
     marks = {} if marks is None else marks
     root, _ = _read_checked(ref.uri, ref.content_digest, marks=marks)
@@ -428,14 +429,18 @@ def _load_inputs(input_ref, scope, *, marks=None, include_admission=False):
                              'frozen valid Signal value mismatch')
                 else:
                     _require(prediction['score'] is None and bool(prediction['invalid_reason']), 'frozen invalid Signal null/reason mismatch')
-                if key[0] in wanted:
+                if key[0] in wanted and not _validate_only:
                     projected[name]['rows'][key] = prediction
-            if key[0] in wanted:
+            if key[0] in wanted and not _validate_only:
                 labels[key] = label; shared_members[key] = {'member': row['member']}
         if matrix:
             from .stock_signal_evaluation_matrix import _label_day_ref
             _require(raw['label_shard_refs'][day] == _label_day_ref(shard), 'frozen matrix Label date binding mismatch')
     _check_marks(marks)
+    if _validate_only:
+        # The identical root/date/row/source/clock checks above ran. Freezing
+        # needs no second full OOS row dictionary or derived sample mask.
+        return ref, root, None
     admission = {'projected': projected, 'labels': labels, 'raw': raw,
         'refs': {name: root['signal_refs'][name] for name in names}, 'closures': _expand_closure(root['admission_receipt'])}
     result = (ref, root, _select_inputs(admission, scope))

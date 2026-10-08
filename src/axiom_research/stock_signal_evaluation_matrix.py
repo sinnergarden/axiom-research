@@ -484,11 +484,8 @@ def _admit_matrix(signal_inputs, raw_label_input, scope, batch):
     return admitted, records, marks, manifest
 
 
-def _save_matrix_inputs(signal_inputs, raw_label_input, scope, destination, batch):
-    from .contracts import ArtifactRef
-    from .stock_signal_evaluation_projection import (
-        MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION, _root_id, _shard, _load_inputs, _check_marks)
-    admitted, records, marks, manifest = _admit_matrix(signal_inputs, raw_label_input, scope, batch)
+def _matrix_input_root(signal_inputs, raw_label_input, scope, admitted, records, manifest):
+    from .stock_signal_evaluation_projection import MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION
     compact = manifest['contract_version'] == 'stock_ml_batch_inputs_v4'
     version = COMPACT_INPUT_VERSION if compact else MATRIX_INPUT_VERSION
     table = [{'path': path, 'file_digest': records[path]} for path in sorted(records)]
@@ -502,7 +499,8 @@ def _save_matrix_inputs(signal_inputs, raw_label_input, scope, destination, batc
         'stock_native_json.py', 'stock_canonical_json.py')
     if compact:
         names += ('stock_signal_evaluation_compact.py', 'stock_signal_evaluation_lease.py', 'stock_compact_batch.py',
-            'stock_compact_store.py', 'stock_compact_controls.py', 'stock_matrix_storage.py')
+            'stock_compact_store.py', 'stock_compact_controls.py', 'stock_matrix_storage.py',
+            'stock_signal_evaluation_build.py')
     receipt = {'contract_version': 'stock_signal_evaluation_admission_v3' if compact else 'stock_signal_evaluation_admission_v2',
         'signal_inputs': deepcopy(signal_inputs), 'raw_label_input': deepcopy(raw_label_input), 'scope': scope,
         'batch_manifest': manifest, 'batch_ref': manifest['batch_ref'], 'source_records': table,
@@ -513,34 +511,47 @@ def _save_matrix_inputs(signal_inputs, raw_label_input, scope, destination, batc
         'signal_order': list(signal_inputs), 'signal_refs': admitted['refs'], 'signal_metadata': admitted['metadata'],
         'raw_metadata': admitted['raw'], 'clock_floor': _clock_floor_matrix(admitted['metadata'], admitted['raw']),
         'admission_receipt': receipt, 'shards': {}}
+    return root
+
+
+def _save_matrix_inputs(signal_inputs, raw_label_input, scope, destination, batch):
+    from .stock_signal_evaluation_projection import _shard
+    admitted, records, marks, manifest = _admit_matrix(signal_inputs, raw_label_input, scope, batch)
+    root = _matrix_input_root(signal_inputs, raw_label_input, scope, admitted, records, manifest)
     destination = Path(destination).resolve(); destination.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.signal-inputs-', dir=destination) as temporary:
         stage = Path(temporary)/'complete'; stage.mkdir()
         for day in scope['sessions']:
             name = day+'.json'; write_json(stage/name, _shard(admitted, scope, day))
             root['shards'][day] = {'file': name, 'file_digest': file_digest(stage/name)}
-        root['input_id'] = _root_id(root); write_json(stage/'manifest.json', root)
-        ref = ArtifactRef(artifact_type='StockSignalEvaluationInputs', artifact_id=root['input_id'],
-            artifact_contract_version=version, content_digest=file_digest(stage/'manifest.json'),
-            uri=str(stage/'manifest.json'))
-        # The caller owns the batch backing; release this full OOS projection
-        # before reading the frozen rows again. No training matrix is retained.
         del admitted
-        _load_inputs(ref, scope)
-        batch._check_sources(); _check_marks(marks)
-        target = destination/root['input_id'][7:]
-        final = ArtifactRef(artifact_type=ref.artifact_type, artifact_id=ref.artifact_id,
-            artifact_contract_version=ref.artifact_contract_version, content_digest=ref.content_digest,
-            uri=str(target/'manifest.json'))
-        if target.exists():
-            _load_inputs(final, scope); batch._check_sources(); _check_marks(marks)
-            return final
-        try:
-            os.rename(stage, target)
-        except OSError:
-            if not target.exists(): raise
-            _load_inputs(final, scope)
+        return _publish_matrix_inputs(root, stage, destination, batch, marks)
+
+
+def _publish_matrix_inputs(root, stage, destination, batch, marks):
+    from .contracts import ArtifactRef
+    from .stock_signal_evaluation_projection import _root_id, _load_inputs, _check_marks
+    scope = root['scope']
+    root['input_id'] = _root_id(root); write_json(stage/'manifest.json', root)
+    ref = ArtifactRef(artifact_type='StockSignalEvaluationInputs', artifact_id=root['input_id'],
+        artifact_contract_version=root['contract_version'], content_digest=file_digest(stage/'manifest.json'),
+        uri=str(stage/'manifest.json'))
+    _load_inputs(ref, scope, _validate_only=True)
+    batch._check_sources(); _check_marks(marks)
+    target = destination/root['input_id'][7:]
+    final = ArtifactRef(artifact_type=ref.artifact_type, artifact_id=ref.artifact_id,
+        artifact_contract_version=ref.artifact_contract_version, content_digest=ref.content_digest,
+        uri=str(target/'manifest.json'))
+    if target.exists():
+        _load_inputs(final, scope, _validate_only=True); batch._check_sources(); _check_marks(marks)
         return final
+    try:
+        os.rename(stage, target)
+    except OSError:
+        if not target.exists(): raise
+        _load_inputs(final, scope, _validate_only=True)
+    return final
+
 
 
 def _verify_matrix_root(root, ref, scope):

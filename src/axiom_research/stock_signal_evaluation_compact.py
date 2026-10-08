@@ -124,13 +124,21 @@ def _join(targets, inputs, fold_spec, common, scope, records, state, wanted):
     state['slices'][digest(lineage)] = lineage
 
 
-def _admit_compact(signal_inputs, raw_label_input, scope, batch):
+def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_lease=None, _manifest=None):
     from . import stock_matrix_folds as owner
     from .stock_signal_evaluation_projection import _check_marks
     hook = getattr(owner, 'admit_stock_signal_evaluation_fold', None)
     _require(callable(hook), 'compact owner admit_stock_signal_evaluation_fold interface required')
+    if _borrowed_lease is not None:
+        from contextlib import nullcontext
+        from .stock_signal_evaluation_lease import _FoldLease
+        _require(type(_borrowed_lease) is _FoldLease and _borrowed_lease._batch is batch,
+                 'internal owner build lease required')
+        _borrowed_lease._check_sources()
+        hook = lambda descriptor, *, batch: nullcontext(_borrowed_lease)
     _require(raw_label_input is None, 'compact evaluation requires owner-admitted evaluation Raw targets')
-    manifest = batch.to_dict(); common = None; state = _target_state()
+    manifest = batch.to_dict() if _manifest is None else _manifest
+    common = None; state = _target_state()
     wanted = (set(scope['universe']), set(scope['sessions']))
     folds_by_input = {}
     for item in manifest['folds']:

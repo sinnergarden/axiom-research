@@ -322,6 +322,7 @@ class CompactState:
         self.store.limits={k:min(v,budgets[k]) for k,v in self.store.limits.items()}
 
     def close(self):
+        require(getattr(self,'_build_oos_borrowers',0)==0,'compact batch OOS writer still borrowed')
         require(self.active==0 and self.store.borrowers==0,'compact batch backing still borrowed')
         if self.closed: return
         if self.residency=='sequential': self._release_window(keep_feature=not self.own_feature)
@@ -475,7 +476,14 @@ class CompactState:
             self.store.metrics['fold_projection_calls']+=1
             self.active+=1; _view_data(self.feature,check=False)['store'].borrowers+=1
             guarded=True
+            # Match the original payload measurement plus explicit native
+            # nbytes. Headers/None replacement are conservatively retained.
+            matrix_charge=0
+            if training:
+                import sys
+                matrix_charge=max(0,sum(sys.getsizeof(a)+a.nbytes for a in (X,y,P))-64)
             return MatrixFoldProjection(self.store,**payload,_lease_bytes=lease,
+                _matrix_lease_bytes=matrix_charge,
                 _release_notice=self._projection_finalized,_after_clear=self._projection_cleared,
                 _on_failure=self._release_window)
         except BaseException:

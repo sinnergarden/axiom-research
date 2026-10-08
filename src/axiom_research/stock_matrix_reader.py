@@ -1482,8 +1482,9 @@ class MatrixFoldProjection:
         self._store=store; self._closed=False; self.__dict__.update(values); store.borrowers+=1
         owner=store if values.get('_close_store_on_release',False) else None
         try:
+            self._lease_charge=[getattr(self,'_lease_bytes',0)]
             self._finalizer=weakref.finalize(self,MatrixFoldProjection._release,weakref.ref(store),
-                getattr(self,'_lease_bytes',0),owner,values.get('_release_notice'))
+                self._lease_charge,owner,values.get('_release_notice'))
         except BaseException:
             store.borrowers-=1
             # A failed finalizer installation leaves this constructor in the
@@ -1495,11 +1496,23 @@ class MatrixFoldProjection:
     def _release(reference,lease_bytes,owner=None,notice=None):
         store=reference()
         if store is not None:
+            if type(lease_bytes) is list: lease_bytes=lease_bytes[0]
             store.borrowers-=1; store.lease_bytes-=lease_bytes
         # A GC finalizer marks the window releasable; it does not credit source
         # payloads while the dying object's attribute graph may still exist.
         if notice is not None: notice()
         if owner is not None and not owner.closed: owner.close()
+    def _release_matrices(self):
+        """Detach compact native arrays after the backend has been released."""
+        require(not self._closed,'matrix fold projection is closed')
+        charge=getattr(self,'_matrix_lease_bytes',0)
+        if not charge: return 0
+        self.X=self.y=self.P=None
+        self._matrix_lease_bytes=0
+        self._lease_charge[0]-=charge; self._lease_bytes-=charge
+        self._store.lease_bytes-=charge
+        require(self._lease_charge[0]>=0,'matrix release accounting mismatch')
+        return charge
     def close(self):
         if not self._closed:
             owned_state=getattr(self,'_owned_state',None)
