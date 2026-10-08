@@ -1,5 +1,10 @@
 # Axiom Research R0
 
+[Executable saved-input cells](examples/saved_research_cells.py) support the
+existing [ML engineering notebook](https://github.com/sinnergarden/axiom-docs/blob/main/notebooks/ml_engineering_tutorial.ipynb).
+They require explicit local input selectors and destinations; loading the cell
+definitions performs no I/O or research execution.
+
 Research 0.2.2 adds `build_stock_ml_fold_from_saved_inputs(input_manifest,
 fold_spec=..., destination=..., metrics=...)` and `load_stock_ml_fold(path)`.
 The bounded profile selects 65 actual Feature sessions before each fit, reuses

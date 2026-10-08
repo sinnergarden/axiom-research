@@ -27,7 +27,7 @@ def _projection(inputs,spec,batch):
 
 
 def _dataset(projection,inputs,spec):
-    return seal({'contract_version':'stock_fold_dataset_v3',
+    value={'contract_version':'stock_fold_dataset_v3',
         'prepared_view_ref':inputs['prepared_view']['prepared_view_ref'],
         'feature_ref':projection.features['feature_ref'],'label_ref':projection.labels['label_ref'],
         'raw_label_refs':projection.raw_refs,'fold_spec_ref':digest(spec),'fit_cutoff':spec['fit_cutoff'],
@@ -35,7 +35,8 @@ def _dataset(projection,inputs,spec):
         'training_keys_digest':digest(projection.training_keys),
         'training_rows_ref':projection.training_rows_ref,'training_row_count':len(projection.training_keys),
         'excluded':projection.excluded,'target_semantics':TARGET_SEMANTICS,
-        'normalization':NORMALIZATION_SPEC,'validation':'none_fixed_parameters_no_early_stopping'},'dataset_ref')
+        'normalization':NORMALIZATION_SPEC,'validation':'none_fixed_parameters_no_early_stopping'}
+    return seal(value,'dataset_ref')
 
 
 def _fold_definition(inputs,spec,common,parameters,rounds):
@@ -45,14 +46,16 @@ def _fold_definition(inputs,spec,common,parameters,rounds):
     require(common['catalog_ref']==catalog.identity and common['ordered_features']==[
         f['id'] for f in catalog.select(common['feature_selection'])], 'current catalog selection mismatch')
     implementations=_implementation()
-    return {'version':'axiom.stock_ml_fold/3','input_manifest':inputs,'input_manifest_ref':digest(inputs),
+    value={'version':'axiom.stock_ml_fold/3','input_manifest':inputs,'input_manifest_ref':digest(inputs),
         'fold_spec':spec,'fold_spec_ref':digest(spec),'catalog_ref':common['catalog_ref'],
         'parameters':parameters,'num_boost_round':rounds,'target_semantics':TARGET_SEMANTICS,
         'label_normalization':NORMALIZATION_SPEC,'environment':_environment(),
         'implementation_sources':implementations,'implementation_ref':digest(implementations)}
+    if 'model_feature_selection' in common: value['model_feature_selection']=common['model_feature_selection']
+    return value
 
 
-def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,training_options=None):
+def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,training_options=None,model_feature_selection=None):
     from .stock_fold_artifacts import _repath_owned_fold
     from .stock_ml import _implementation,_environment,_signal_evidence
     from .stock_folds import prediction_rows
@@ -60,13 +63,15 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,traini
     from .feature_catalog import load_feature_catalog
     begin=time.perf_counter(); parameters, rounds = training_profile(training_options)
     inputs,spec=deepcopy(inputs),deepcopy(spec)
+    require(model_feature_selection is None or inputs.get('contract_version')=='stock_ml_saved_inputs_v4',
+            'model_feature_selection requires compact v4 inputs')
     if batch is None and inputs.get('contract_version') in ('stock_ml_saved_inputs_v3','stock_ml_saved_inputs_v4'):
         from .stock_compact_batch import load_compact_state_from_inputs
         from .stock_batch import _compact_batch_handle
         state=load_compact_state_from_inputs(inputs)
         with _compact_batch_handle(state,state.batch,begin) as owned:
             return build_matrix_fold(inputs,spec=spec,destination=destination,metrics=metrics,
-                batch=owned,training_options=training_options)
+                batch=owned,training_options=training_options,model_feature_selection=model_feature_selection)
     definition=None
     zeros=dict(data_read_calls=0,supplier_calls=0,feature_core_calls=0,label_core_calls=0,
         core_calls=0,account_calls=0,train_calls=0,predict_calls=0)
@@ -74,6 +79,11 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,traini
         from .stock_batch import _data
         state=_data(batch)['matrix_state']
         common=state.control_common(inputs,spec)
+        if model_feature_selection is not None:
+            from .stock_compact_store import model_feature_binding
+            requested=model_feature_binding(state.feature,model_feature_selection)
+            require(requested==common.get('model_feature_selection'),
+                    'model selection differs from prepared cohort; prepare with reused Raw first')
         definition=_fold_definition(inputs,spec,common,parameters,rounds)
         target=Path(destination)/digest(definition)[7:]
         if target.exists():
@@ -85,6 +95,8 @@ def build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,traini
             return _repath_owned_fold(saved,target,reused=True)
     with _projection(inputs,spec,batch) as projection:
         common=projection.common
+        require(model_feature_selection is None or common.get('model_feature_selection',{}).get('selection')==model_feature_selection,
+                'model selection differs from prepared cohort')
         if definition is None: definition=_fold_definition(inputs,spec,common,parameters,rounds)
         definition_ref=digest(definition); target=Path(destination)/definition_ref[7:]
         if target.exists():
@@ -234,6 +246,8 @@ def _load_matrix_fold(path, *, projection,batch,ingress,_lease=None):
         require((binding is None or binding['labels']==labels) and dataset==expected_dataset and
                 expected_dataset['training_row_count']>=40,'saved compact training selection mismatch')
         require(model['contract_version']=='stock_model_release_v2','unsupported saved model contract')
+        require(definition.get('model_feature_selection')==common.get('model_feature_selection'),
+                'saved model selection/schema mismatch')
         for actual,expected in ((model['dataset_ref'],dataset['dataset_ref']),(model['feature_ref'],features['feature_ref']),
             (model['label_ref'],labels['label_ref']),(model['raw_label_refs'],expected_raw_refs),
             (model['fit_cutoff'],spec['fit_cutoff']),(model['simulated_available_at'],spec['simulated_model_available_at']),

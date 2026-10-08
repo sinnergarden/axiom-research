@@ -348,8 +348,16 @@ def _selector(publisher, *, view_ref, row_index, schema_ref, role, fold_ref, pay
 
 
 def prepare_stock_ml_batch_inputs(data, *, feature_inputs, fold_specs, destination,
-                                 preparation_options, metrics=None, progress=None):
-    """The compact producer writes v4; explicit v3 layout supports old replay."""
+                                 preparation_options, metrics=None, progress=None,
+                                 model_feature_selection=None,reuse_raw_from_batch=None):
+    """Prepare the selected model cohort over an unchanged saved Feature table.
+
+    model_feature_selection is an ordered list of exact id/version dictionaries.
+    An owner-loaded v4 reuse_raw_from_batch supplies the same fold/cutoff Raw
+    targets without Data reads; changed eligibility uses the original Core norm.
+    Omission retains the existing full-column path and explicit v3 replay.
+    """
     from .stock_compact_labels import prepare_compact_batch
     return prepare_compact_batch(data,feature_inputs=feature_inputs,fold_specs=fold_specs,
-        destination=destination,preparation_options=preparation_options,metrics=metrics,progress=progress)
+        destination=destination,preparation_options=preparation_options,metrics=metrics,progress=progress,
+        model_feature_selection=model_feature_selection,reuse_raw_from_batch=reuse_raw_from_batch)

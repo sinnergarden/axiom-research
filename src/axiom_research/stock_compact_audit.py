@@ -66,7 +66,8 @@ def audit_stock_ml_batch_inputs(manifest, *, data, feature_inputs=None, limits=N
             candidate=prepare_compact_batch(data,feature_inputs=feature,
                 fold_specs=manifest['definition']['fold_specs'],destination=temporary,
                 preparation_options=options,metrics=stats,_caller_bytes=saved.store.resident_bytes,
-                _caller_source_bytes=saved.store.metrics['source_bytes'])
+                _caller_source_bytes=saved.store.metrics['source_bytes'],model_feature_selection=
+                    manifest['definition'].get('model_feature_selection',{}).get('selection'))
             replay=fd['prepared'].pop(candidate['batch_ref'])
             saved_fixed=(saved._fixed_shared_bytes,saved._fixed_shared_source_bytes)
             replay_external=(max(0,replay._fixed_shared_bytes-saved.store.resident_bytes),
