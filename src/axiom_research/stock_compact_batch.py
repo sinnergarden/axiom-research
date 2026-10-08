@@ -452,6 +452,8 @@ class CompactState:
         record=self.store.json[inputs['fold_control']['path']]
         fd=_view_data(self.feature); training,inference=validate_spec(spec,self.view['definition']['calendar'])
         paths=set(self._keep_paths)|{inputs['fold_control']['path']}
+        if self.batch['contract_version']=='stock_ml_batch_inputs_v5':
+            paths.update(d['path'] for d in record['training_binding']['feature_blocks'])
         targets=[]
         for descriptor in [*record['raw_parts'],record['normalized'],*evaluation_parts(record)]:
             header,rows=self.targets[descriptor['target_ref']]

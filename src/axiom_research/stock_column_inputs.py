@@ -27,16 +27,19 @@ class ColumnMathReuse:
     def _remember(self,cache,key,value):
         from .stock_compact_labels import _working,_sync_feature_charge
         from .stock_compact_store import _size
-        old=cache.get(key);amount=_size(value)+sum(a.nbytes for a in value.values() if hasattr(a,'nbytes'))+1024
-        old_amount=0 if old is None else old['_charge']
-        _working(self.metrics,max(0,amount-old_amount))
-        cache[key]={**value,'_charge':amount};self.charge+=amount-old_amount
-        state=self.metrics.get('_owner_state')
-        if state is not None:
-            state._fixed_shared_bytes+=amount-old_amount
-            self.metrics['_owner_shared_baseline']+=amount-old_amount
-        self.metrics['_column_math_bytes']=self.charge;_sync_feature_charge(self.metrics)
-        return cache[key]
+        old=None
+        try:
+            old=cache.get(key);amount=_size(value)+sum(a.nbytes for a in value.values() if hasattr(a,'nbytes'))+1024
+            old_amount=0 if old is None else old['_charge']
+            _working(self.metrics,max(0,amount-old_amount))
+            cache[key]={**value,'_charge':amount};self.charge+=amount-old_amount
+            state=self.metrics.get('_owner_state')
+            if state is not None:
+                state._fixed_shared_bytes+=amount-old_amount
+                self.metrics['_owner_shared_baseline']+=amount-old_amount
+            self.metrics['_column_math_bytes']=self.charge;_sync_feature_charge(self.metrics)
+            return cache[key]
+        finally:old=value=None
 
     def close(self):
         self.raw.clear();self.normalized.clear();self.charge=0
@@ -52,57 +55,64 @@ class ColumnMathReuse:
 
     def forward_block(self,keys,opening,closing,valid,*,anchor,dependency_refs,operator):
         """Reuse daily dependencies, execute all changed rows in one Core batch."""
-        import numpy as np
-        require(opening.shape==closing.shape==valid.shape and opening.ndim==2 and
-            len(keys)==len(dependency_refs)==opening.shape[0], 'Raw block shape mismatch')
-        numerics=[self.vector_ref((opening[i],closing[i],valid[i])) for i in range(len(keys))]
-        output=[]; changed=[]
-        for i,key in enumerate(keys):
-            old=self.raw.get(key)
-            if old is not None and old['numeric_input_ref']==numerics[i] and old['anchor']==anchor and old['dependency_ref']==dependency_refs[i]:
-                self.metrics['raw_numeric_reuses']=self.metrics.get('raw_numeric_reuses',0)+1
-                output.append(old)
-            else:output.append(None);changed.append(i)
-        a=b=mask=result=values=flags=vals=flags_day=old=None
         try:
-            if changed:
-                from .stock_compact_labels import _working
-                _working(self.metrics,len(changed)*opening.shape[1]*80+4096)
-                # Endpoint gathering is orchestration; divide then subtract remains
-                # exclusively in Core. There is one call for the entire Raw block.
-                a=np.ascontiguousarray(opening[changed].reshape(-1));b=np.ascontiguousarray(closing[changed].reshape(-1))
-                mask=np.ascontiguousarray(valid[changed].reshape(-1))
-                a.flags.writeable=b.flags.writeable=mask.flags.writeable=False
-                result=operator(a,b,endpoint_validity=mask)
-                values=np.asarray(result['values']);flags=np.asarray(result['validity'])
-                require(values.shape==flags.shape==a.shape and values.dtype==np.dtype('<f8') and
-                    flags.dtype==np.dtype('?') and not values.flags.writeable and not flags.flags.writeable and
-                    np.isfinite(values).all() and not np.any(flags & ~mask) and np.all(values[~flags]==0.0),
-                    'Core forward output shape, validity or ownership mismatch')
-                self.metrics['forward_core_calls']=self.metrics.get('forward_core_calls',0)+1
-                self.metrics['core_calls']=self.metrics.get('core_calls',0)+1
-                self.metrics['label_core_calls']=self.metrics.get('label_core_calls',0)+1
-                width=opening.shape[1]
-                for slot,i in enumerate(changed):
-                    # Owned bytes per day avoid retaining a large Core block for
-                    # one surviving cache row after a moving-window eviction.
-                    vals=np.frombuffer(values[slot*width:(slot+1)*width].tobytes(),dtype='<f8')
-                    flags_day=np.frombuffer(flags[slot*width:(slot+1)*width].tobytes(),dtype='?')
-                    output[i]=self._remember(self.raw,keys[i],{'numeric_input_ref':numerics[i],
-                        'anchor':anchor,'dependency_ref':dependency_refs[i],'values':vals,'validity':flags_day})
-        except BaseException:
-            output.clear();raise
-        finally:a=b=mask=result=values=flags=vals=flags_day=old=None
+            import numpy as np
+            require(opening.shape==closing.shape==valid.shape and opening.ndim==2 and
+                len(keys)==len(dependency_refs)==opening.shape[0], 'Raw block shape mismatch')
+            numerics=[self.vector_ref((opening[i],closing[i],valid[i])) for i in range(len(keys))]
+            output=[]; changed=[]
+            for i,key in enumerate(keys):
+                old=self.raw.get(key)
+                if old is not None and old['numeric_input_ref']==numerics[i] and old['anchor']==anchor and old['dependency_ref']==dependency_refs[i]:
+                    self.metrics['raw_numeric_reuses']=self.metrics.get('raw_numeric_reuses',0)+1
+                    output.append(old)
+                else:output.append(None);changed.append(i)
+            a=b=mask=result=values=flags=vals=flags_day=old=None
+            try:
+                if changed:
+                    from .stock_compact_labels import _working
+                    _working(self.metrics,len(changed)*opening.shape[1]*80+4096)
+                    # Endpoint gathering is orchestration; divide then subtract remains
+                    # exclusively in Core. There is one call for the entire Raw block.
+                    a=np.ascontiguousarray(opening[changed].reshape(-1));b=np.ascontiguousarray(closing[changed].reshape(-1))
+                    mask=np.ascontiguousarray(valid[changed].reshape(-1))
+                    a.flags.writeable=b.flags.writeable=mask.flags.writeable=False
+                    result=operator(a,b,endpoint_validity=mask)
+                    values=np.asarray(result['values']);flags=np.asarray(result['validity'])
+                    require(values.shape==flags.shape==a.shape and values.dtype==np.dtype('<f8') and
+                        flags.dtype==np.dtype('?') and not values.flags.writeable and not flags.flags.writeable and
+                        np.isfinite(values).all() and not np.any(flags & ~mask) and np.all(values[~flags]==0.0),
+                        'Core forward output shape, validity or ownership mismatch')
+                    self.metrics['forward_core_calls']=self.metrics.get('forward_core_calls',0)+1
+                    self.metrics['core_calls']=self.metrics.get('core_calls',0)+1
+                    self.metrics['label_core_calls']=self.metrics.get('label_core_calls',0)+1
+                    width=opening.shape[1]
+                    for slot,i in enumerate(changed):
+                        # Owned bytes per day avoid retaining a large Core block for
+                        # one surviving cache row after a moving-window eviction.
+                        vals=np.frombuffer(values[slot*width:(slot+1)*width].tobytes(),dtype='<f8')
+                        flags_day=np.frombuffer(flags[slot*width:(slot+1)*width].tobytes(),dtype='?')
+                        output[i]=self._remember(self.raw,keys[i],{'numeric_input_ref':numerics[i],
+                            'anchor':anchor,'dependency_ref':dependency_refs[i],'values':vals,'validity':flags_day})
+            except BaseException:
+                output.clear();raise
+            finally:
+                a=b=mask=result=values=flags=vals=flags_day=old=None
+                opening=closing=valid=None
 
-        return output
+            return output
+
+        finally:opening=closing=valid=None
 
     def normalization(self,day,numeric_ref):
         old=self.normalized.get(day)
         return old if old is not None and old['numeric_input_ref']==numeric_ref else None
 
     def remember_normalization(self,day,numeric_ref,values,validity,core_ref):
-        return self._remember(self.normalized,day,{'numeric_input_ref':numeric_ref,
-            'values':values,'validity':validity,'core_result_ref':core_ref})
+        try:
+            return self._remember(self.normalized,day,{'numeric_input_ref':numeric_ref,
+                'values':values,'validity':validity,'core_result_ref':core_ref})
+        finally:values=validity=None
 
 
 def _public(value, name):

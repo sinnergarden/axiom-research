@@ -4,6 +4,8 @@ from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
+import gc
+import weakref
 
 from axiom_research import (LabelSpec, MaturitySpec, semantic_identity, validate,
     load_stock_experiment_specs, resolve_stock_label_spec, load_stock_feature_view)
@@ -122,6 +124,41 @@ class TargetConfigTests(unittest.TestCase):
 
 
 class TrainingBlockTests(unittest.TestCase):
+    def test_proof_work_uses_combined_owner_budget_and_cleans_failure_aliases(self):
+        from axiom_research.stock_compact_store import OwnedStore
+        from axiom_research.stock_matrix_storage import write_buffer
+        from axiom_research.stock_training_blocks import _proof_blocks
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);f,path=CompactV3Tests().fixture(root)
+            with load_stock_feature_view(path,residency='sequential') as feature,OwnedStore() as main:
+                offsets=list(range(20));set_feature_window(feature,offsets)
+                fd=_view_data(feature);fstore=fd['store']
+                previous=(fstore.limits,fstore.shared_bytes,fstore.shared_source_bytes)
+                main.buffer(write_buffer(root,[1.0]*1024,dtype='float64_le',shape=[1024]))
+                main.shared_bytes=fstore.resident_bytes
+                main.shared_source_bytes=fstore.metrics['source_bytes']
+                main.limits={**main.limits,'maximum_matrix_bytes':main.shared_bytes+main.resident_bytes+2048}
+                references=[weakref.ref(a) for block in fd['blocks'] if block['parts'] is not None
+                    for _,arrays in block['parts'] for a in arrays.values()]
+                failure=None
+                try:
+                    with _proof_blocks(feature,offsets,store=main):self.fail('combined budget must reject before proof copy')
+                except ValueError as error:failure=error
+                self.assertIsNotNone(failure)
+                self.assertEqual(main.lease_bytes,0)
+                self.assertEqual((fstore.limits,fstore.shared_bytes,fstore.shared_source_bytes),previous)
+                self.assertEqual(main.shared_bytes,fstore.resident_bytes)
+                checked=False;traceback=failure.__traceback__
+                while traceback:
+                    if traceback.tb_frame.f_code.co_name=='feature_training_blocks':
+                        checked=True
+                        for name in ('arrays','a','parts','rows','block','cached','payload','handle'):
+                            self.assertIsNone(traceback.tb_frame.f_locals[name])
+                    traceback=traceback.tb_next
+                self.assertTrue(checked)
+                clear_feature_window(feature);gc.collect()
+                self.assertTrue(all(ref() is None for ref in references))
+
     def test_v5_empty_checkpoint_binds_target_without_source_or_numerical_execution(self):
         from axiom_research.stock_compact_labels import _prepare_compact_incrementally
         from axiom_research.stock_artifacts import _read

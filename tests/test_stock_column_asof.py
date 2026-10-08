@@ -7,6 +7,8 @@ from unittest.mock import patch
 import sys
 import tempfile
 import unittest
+import gc
+import weakref
 import numpy as np
 
 from axiom_research import load_stock_ml_batch_inputs,load_stock_ml_fold
@@ -94,6 +96,78 @@ def forward_golden(start,end,*,endpoint_validity):
 
 
 class ColumnAsOfTests(unittest.TestCase):
+    def test_public_second_fold_core_failure_releases_warm_normalization_vectors(self):
+        from axiom_research import open_stock_ml_batch_preparation
+        module=ModuleType('axiom_data');module.QuerySpec=Query
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);f,path=CompactV3Tests().fixture(root);source=ColumnSource(f.spec)
+            references=[];failure=None
+            def fail(carrier,**kwargs):
+                try:raise RuntimeError('synthetic second-fold normalization failure')
+                finally:carrier=None
+            try:
+                with patch.dict(sys.modules,{'axiom_data':module}),open_stock_ml_batch_preparation(object(),feature_inputs=path,
+                    fold_specs=f.folds()[:2],destination=root/'prepared',label_spec=label(3),column_source=source,
+                    preparation_options={'row_block_sessions':10,'column_block':32,'maximum_resident_bytes':64*1024**2,
+                        'normalization_backend':'core_cs_batch_v1'}) as owner:
+                    owner.next_fold()
+                    references=[weakref.ref(entry[name]) for entry in owner.column_targets.normalized.values()
+                        for name in ('values','validity')]
+                    self.assertTrue(references)
+                    with patch('axiom_engine.core.execute_cs_zscore_batch',side_effect=fail):owner.next_fold()
+            except RuntimeError as error:failure=error
+            self.assertIsNotNone(failure)
+            checked=False;traceback=failure.__traceback__
+            while traceback:
+                if traceback.tb_frame.f_code.co_name=='_normalized':
+                    checked=True
+                    for name in ('daily','cached','vals','flags','result','feature','metrics','rows'):
+                        self.assertIsNone(traceback.tb_frame.f_locals[name])
+                traceback=traceback.tb_next
+            self.assertTrue(checked)
+            gc.collect();self.assertTrue(all(ref() is None for ref in references))
+            self.assertTrue(all(selection.closed for selection in source.selections))
+
+    def test_public_v5_excludes_outcome_exactly_at_fit_without_rejecting_fold(self):
+        from axiom_research import open_stock_ml_batch_preparation
+        from axiom_research.stock_compact_store import OwnedStore
+        from axiom_research.stock_compact_batch import read_target
+        from axiom_research.stock_matrix_storage import instant_us
+        module=ModuleType('axiom_data');module.QuerySpec=Query
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);f,path=CompactV3Tests().fixture(root);fold=f.folds()[0]
+            fit_cutoff=fold['fit_cutoff'];equality_day=f.calendar[f.calendar.index(fold['fit_session'])-3]
+            class EqualitySource(ColumnSource):
+                def adjust(self,*args,**kwargs):
+                    selected=super().adjust(*args,**kwargs)
+                    if selected.query_binding['cutoff_by_session'][selected.query.sessions[0]]==query_binding(
+                        replace(selected.query,cutoff_by_session={d:fit_cutoff for d in selected.query.sessions}))['cutoff_by_session'][selected.query.sessions[0]]:
+                        row=selected.query.sessions.index(fold['fit_session'])
+                        for name in ('open','close'):
+                            clocks=selected.columns[name].available_at.a.copy()
+                            clocks[row,0]=np.datetime64(instant_us(fit_cutoff),'us').astype('datetime64[ns]')
+                            selected.columns[name].available_at=Borrow(clocks)
+                    return selected
+            source=EqualitySource(f.spec)
+            with patch.dict(sys.modules,{'axiom_data':module}),open_stock_ml_batch_preparation(object(),feature_inputs=path,
+                fold_specs=[fold],destination=root/'prepared',label_spec=label(3),column_source=source,
+                preparation_options={'row_block_sessions':10,'column_block':32,'maximum_resident_bytes':64*1024**2,
+                    'normalization_backend':'core_cs_batch_v1'}) as owner:
+                item=owner.next_fold();self.assertIsNotNone(item)
+                control=_read(item['input_manifest']['fold_control']['path'])
+                with OwnedStore() as store:
+                    raw=[]
+                    for part in control['raw_parts']:
+                        _,rows=read_target(store,part);raw.extend(rows)
+                    normalized,rows=read_target(store,control['normalized'],raw_rows=raw)
+                    index=next(i for i,row in enumerate(raw) if row['feature_session']==equality_day and
+                        row['security_id']==f.universe[0])
+                    self.assertEqual(instant_us(raw[index]['label_available_at']),instant_us(fit_cutoff))
+                    self.assertEqual(normalized['cohort']['eligibility_reasons'][index],'LABEL_NOT_MATURE')
+                    self.assertFalse(rows[index]['valid'])
+                    self.assertGreater(control['training_binding']['training_row_count'],40)
+                self.assertEqual(owner.finish()['status'],'COMPLETE')
+
     def test_public_sequence_entry_and_actual_raw_evaluation(self):
         import yaml
         from axiom_research import (build_stock_sequential_experiment,evaluate_stock_sequential_signals,
@@ -146,7 +220,7 @@ class ColumnAsOfTests(unittest.TestCase):
                 tb=exc.__traceback__
                 while tb:
                     if tb.tb_frame.f_code.co_name=='forward_block':
-                        for name in ('a','b','mask','result','values','flags','vals','flags_day'):
+                        for name in ('a','b','mask','result','values','flags','vals','flags_day','opening','closing','valid'):
                             self.assertIsNone(tb.tb_frame.f_locals[name])
                     tb=tb.tb_next
             else:self.fail('expected synthetic kernel failure')
@@ -305,9 +379,21 @@ class ColumnAsOfTests(unittest.TestCase):
                     for run in runs:self.assertEqual(load_stock_ml_fold(run.path,batch=batch).identity,run.identity)
                 from axiom_research.stock_signal_evaluation_projection import _load_inputs
                 _load_inputs(report,scope)
+                frozen=_read(report.uri)
+                frozen_paths={row['path'] for row in frozen['admission_receipt']['source_records']}
+                proof_paths={descriptor['path'] for item in manifest['folds'] for descriptor in
+                    _read(item['input_manifest']['fold_control']['path'])['training_binding']['feature_blocks']}
+                self.assertTrue(proof_paths)
+                self.assertTrue(proof_paths<=frozen_paths)
                 from axiom_research import load_stock_derived_signal
                 with patch('axiom_engine.core.execute_signal_plan',side_effect=AssertionError('readonly Derived Core')):
                     for saved in derived:self.assertEqual(load_stock_derived_signal(saved.path).identity,saved.identity)
+                proof=Path(sorted(proof_paths)[0]);original=proof.read_bytes()
+                proof.write_bytes(original[:-1]+bytes([original[-1]^1]))
+                # Normal saved reads use the frozen copies. An explicit owner
+                # audit must also detect changed original training proof bytes.
+                from axiom_research.stock_signal_evaluation_projection import _audit_input
+                with self.assertRaises(ValueError):_audit_input(report)
 
 
 if __name__=='__main__':unittest.main()

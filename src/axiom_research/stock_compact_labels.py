@@ -494,155 +494,160 @@ def _raw(spec,cutoff,days,cache,metrics,price_view):
     return descriptor,rows
 
 
-def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics):
-    from axiom_engine.core import execute_cs_zscore_batch
-    from axiom_engine._implementation import IMPLEMENTATION_REF
-    fd=_view_data(feature); spec=fd['definition']['spec']; width=len(spec['universe'])
-    feature_ref=fd['definition']['feature_view_ref']
-    positions={d:i for i,d in enumerate(spec['feature_sessions'])}
-    offsets=[positions[d]*width+i for d in days for i in range(width)]
-    _working(metrics,len(rows)*4096+len(spec['ordered_features'])*96+3072)
-    reasons=[]; instant=_instant(cutoff); cutoff_us=instant_us(cutoff)
-    selection=metrics.get('_model_feature_selection')
-    from .stock_compact_store import model_feature_binding,model_eligibility_ref
-    binding=model_feature_binding(feature,selection)
-    feature_count=len(spec['ordered_features']) if binding is None else len(binding['ordered_features'])
-    for row,facts in zip(rows,iter_feature_eligibility(feature,offsets,model_feature_selection=selection)):
-        from .stock_target_spec import eligible_target_reason
-        reason=eligible_target_reason(row,facts,feature_count,instant,spec)
-        if reason is None:
-            require(facts.maximum_available_at_utc_us is not None and
-                    facts.maximum_available_at_utc_us<=cutoff_us,
-                    'training Feature native clock exceeds fit')
-        reasons.append(reason)
-    cohort={'contract_version':'stock_compact_cohort_v1','feature_view_ref':feature_ref,'cutoff':cutoff,
-        'sessions':days,'universe':spec['universe'],'raw_refs':[d['target_ref'] for d in raw_parts],
-        'eligibility_reasons':reasons,'eligible_keys':[[r['security_id'],r['feature_session']]
-            for r,reason in zip(rows,reasons) if reason is None]}
-    if binding is not None: cohort['model_feature_eligibility_ref']=model_eligibility_ref(binding)
-    cohort_ref=digest(cohort)
-    definition={'calendar':spec['calendar'],'universe':spec['universe'],'sessions':days,'cutoff':cutoff,
-        'raw_refs':cohort['raw_refs'],'cohort_ref':cohort_ref,'normalization_spec':NORMALIZATION_SPEC,
-        'implementation_ref':_implementation(),'core_implementation_ref':IMPLEMENTATION_REF}
-    if metrics.get('_column_targets') is not None:
-        numerical_implementation=_column_normalization_implementation()
-        definition.update(implementation_ref=numerical_implementation,
-            core_implementation_ref=numerical_implementation)
-    key=digest(definition); target=(Path(cache)/'normalized'/key[7:]).resolve(); artifact=target/'target.json'
-    if artifact.exists():
-        from .stock_compact_batch import read_target
-        store=metrics['_store']; desc={'path':str(artifact.absolute())}
-        value,normalized=read_target(store,desc,expected=None if metrics.get('_column_targets') is not None else definition,raw_rows=rows)
-        if metrics.get('_column_targets') is not None:
-            require({k:v for k,v in value['definition'].items() if k not in
-                ('normalization_proof_version','numerical_origins')}==definition,
-                'normalized column logical request mismatch')
-        metrics['normalized_cache_hits']+=1
-        fd['store'].check()
-        return {**desc,'file_digest':store.hashes[desc['path']],'target_ref':value['target_ref']},list(normalized),value['core_ref'],cohort
-    reuse=metrics.get('_column_targets');daily={};core_days=days
-    if reuse is not None:
-        import numpy as np
-        core_days=[]
-        for i,day in enumerate(days):
-            _working(metrics,width*32+4096)
-            values=np.asarray([rows[i*width+j]['return'] if reasons[i*width+j] is None else 0.0
-                for j in range(width)],dtype='<f8')
-            members=np.asarray([reasons[i*width+j] is None for j in range(width)],dtype='?')
-            values.flags.writeable=members.flags.writeable=False
-            numeric=digest({'vectors':reuse.vector_ref((values,members)),
-                'normalization_spec_ref':digest(NORMALIZATION_SPEC)})
-            cached=reuse.normalization(day,numeric)
-            daily[day]={'input_numeric_ref':numeric,'cached':cached}
-            if cached is None:core_days.append(day)
-            else:metrics['normalized_daily_reuses']=metrics.get('normalized_daily_reuses',0)+1
-        values=members=cached=None
-    day_positions={day:i for i,day in enumerate(days)}
-    arrays={name:array(code) for name,code in {'values':'d','value_validity':'B','value_reason_codes':'i',
-        'fact_available_at_utc_us':'q','reference_member':'B','reference_available_at_utc_us':'q',
-        'selection_cutoff_utc_us':'q','fact_source_codes':'i','reference_source_codes':'i'}.items()}
-    dictionary=[None,*sorted({r for r in reasons if r is not None})]; codes={r:i for i,r in enumerate(dictionary)}
-    sources={}; calendar_ref=digest({'contract_version':'stock_label_calendar_v1','sessions':spec['calendar']})
-    raw_ref=digest(cohort['raw_refs'])
-    _working(metrics,_measured(metrics,cohort)+len(rows)*4096)
-    for day in core_days:
-        i=day_positions[day]
-        eligible=[[security,day] for j,security in enumerate(spec['universe']) if reasons[i*width+j] is None]
-        bindings=_normalization_sources(raw_ref,feature_ref,day,cutoff,eligible)
-        sources[day]={'bindings':sorted(bindings,key=lambda r:r['id']),
-                      'source_sets':[['offline_eligibility'],['raw_labels']]}
-        arrays['selection_cutoff_utc_us'].append(instant_us(core_clock(cutoff)))
-        for j in range(width):
-            n=i*width+j; row=rows[n]; valid=reasons[n] is None
-            arrays['values'].append(row['return'] if valid else 0.0); arrays['value_validity'].append(valid)
-            arrays['value_reason_codes'].append(codes[reasons[n]])
-            arrays['fact_available_at_utc_us'].append(instant_us(core_clock(row['label_available_at'] if valid else cutoff)))
-            arrays['reference_member'].append(valid); arrays['reference_available_at_utc_us'].append(instant_us(core_clock(cutoff)))
-            arrays['fact_source_codes'].append(1 if valid else 0); arrays['reference_source_codes'].append(0)
-    # Core accepts immutable readonly buffer views; its arithmetic remains the
-    # existing operator, not a Research vectorized substitute.
-    carrier={'contract_version':'core_cs_zscore_batch_input_v1','calendar_ref':calendar_ref,
-        'schema':RAW_TARGET_SCHEMA,'output_schema':NORMALIZED_TARGET_SCHEMA,'sessions':core_days,
-        'security_ids':spec['universe'],'reason_dictionary':dictionary,'source_bindings_by_session':sources,
-        **{k:memoryview(v.tobytes()).cast('?' if k in ('value_validity','reference_member') else v.typecode)
-           for k,v in arrays.items()}}
-    # Carrier bytes and per-session bindings are detached from these working
-    # panels. Release them before Core takes its own immutable snapshot and
-    # before normalized rows/cohort publication are allocated.
-    del arrays
+def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics,*,target_spec=None):
     try:
-        result=execute_cs_zscore_batch(carrier,params=NORMALIZATION_SPEC['params']) if core_days else None
-    finally:
-        # A retained exception traceback must not turn the producer frame into
-        # an owner of the detached Core input buffers.
-        del carrier,sources,dictionary
-    if core_days:
-        metrics['core_calls']+=1; metrics['label_core_calls']+=1
-        if reuse is not None:metrics['normalization_core_calls']=metrics.get('normalization_core_calls',0)+1
-    normalized=[]
-    if reuse is not None:
-        import numpy as np
-        for i,day in enumerate(core_days):
-            # Keep only numerical outputs and their real Core origin; current
-            # availability/source bindings remain a separate logical layer.
-            _working(metrics,width*18+4096)
-            vals=np.frombuffer(result['values'][i*width:(i+1)*width].tobytes(),dtype='<f8')
-            flags=np.frombuffer(result['value_validity'][i*width:(i+1)*width].tobytes(),dtype='?')
-            daily[day]['cached']=reuse.remember_normalization(day,daily[day]['input_numeric_ref'],
-                vals,flags,result['metadata']['result_ref'])
-        origins=[{'session':day,'input_numeric_ref':daily[day]['input_numeric_ref'],
-            'output_numeric_ref':reuse.vector_ref((daily[day]['cached']['values'],daily[day]['cached']['validity']))}
-            for day in days]
+        from axiom_engine.core import execute_cs_zscore_batch
+        from axiom_engine._implementation import IMPLEMENTATION_REF
+        fd=_view_data(feature); spec=fd['definition']['spec']; width=len(spec['universe'])
+        feature_ref=fd['definition']['feature_view_ref']
+        positions={d:i for i,d in enumerate(spec['feature_sessions'])}
+        offsets=[positions[d]*width+i for d in days for i in range(width)]
+        _working(metrics,len(rows)*4096+len(spec['ordered_features'])*96+3072)
+        reasons=[]; instant=_instant(cutoff); cutoff_us=instant_us(cutoff)
+        selection=metrics.get('_model_feature_selection')
+        eligibility_common=spec if target_spec is None else {**spec,'target_spec':target_spec}
+        from .stock_compact_store import model_feature_binding,model_eligibility_ref
+        binding=model_feature_binding(feature,selection)
+        feature_count=len(spec['ordered_features']) if binding is None else len(binding['ordered_features'])
+        for row,facts in zip(rows,iter_feature_eligibility(feature,offsets,model_feature_selection=selection)):
+            from .stock_target_spec import eligible_target_reason
+            reason=eligible_target_reason(row,facts,feature_count,instant,eligibility_common)
+            if reason is None:
+                require(facts.maximum_available_at_utc_us is not None and
+                        facts.maximum_available_at_utc_us<=cutoff_us,
+                        'training Feature native clock exceeds fit')
+            reasons.append(reason)
+        cohort={'contract_version':'stock_compact_cohort_v1','feature_view_ref':feature_ref,'cutoff':cutoff,
+            'sessions':days,'universe':spec['universe'],'raw_refs':[d['target_ref'] for d in raw_parts],
+            'eligibility_reasons':reasons,'eligible_keys':[[r['security_id'],r['feature_session']]
+                for r,reason in zip(rows,reasons) if reason is None]}
+        if binding is not None: cohort['model_feature_eligibility_ref']=model_eligibility_ref(binding)
+        cohort_ref=digest(cohort)
+        definition={'calendar':spec['calendar'],'universe':spec['universe'],'sessions':days,'cutoff':cutoff,
+            'raw_refs':cohort['raw_refs'],'cohort_ref':cohort_ref,'normalization_spec':NORMALIZATION_SPEC,
+            'implementation_ref':_implementation(),'core_implementation_ref':IMPLEMENTATION_REF}
+        if metrics.get('_column_targets') is not None:
+            numerical_implementation=_column_normalization_implementation()
+            definition.update(implementation_ref=numerical_implementation,
+                core_implementation_ref=numerical_implementation)
+        key=digest(definition); target=(Path(cache)/'normalized'/key[7:]).resolve(); artifact=target/'target.json'
+        if artifact.exists():
+            from .stock_compact_batch import read_target
+            store=metrics['_store']; desc={'path':str(artifact.absolute())}
+            value,normalized=read_target(store,desc,expected=None if metrics.get('_column_targets') is not None else definition,raw_rows=rows)
+            if metrics.get('_column_targets') is not None:
+                require({k:v for k,v in value['definition'].items() if k not in
+                    ('normalization_proof_version','numerical_origins')}==definition,
+                    'normalized column logical request mismatch')
+            metrics['normalized_cache_hits']+=1
+            fd['store'].check()
+            return {**desc,'file_digest':store.hashes[desc['path']],'target_ref':value['target_ref']},list(normalized),value['core_ref'],cohort
+        reuse=metrics.get('_column_targets');daily={};core_days=days
+        if reuse is not None:
+            import numpy as np
+            core_days=[]
+            for i,day in enumerate(days):
+                _working(metrics,width*32+4096)
+                values=np.asarray([rows[i*width+j]['return'] if reasons[i*width+j] is None else 0.0
+                    for j in range(width)],dtype='<f8')
+                members=np.asarray([reasons[i*width+j] is None for j in range(width)],dtype='?')
+                values.flags.writeable=members.flags.writeable=False
+                numeric=digest({'vectors':reuse.vector_ref((values,members)),
+                    'normalization_spec_ref':digest(NORMALIZATION_SPEC)})
+                cached=reuse.normalization(day,numeric)
+                daily[day]={'input_numeric_ref':numeric,'cached':cached}
+                if cached is None:core_days.append(day)
+                else:metrics['normalized_daily_reuses']=metrics.get('normalized_daily_reuses',0)+1
+            values=members=cached=None
+        day_positions={day:i for i,day in enumerate(days)}
+        arrays={name:array(code) for name,code in {'values':'d','value_validity':'B','value_reason_codes':'i',
+            'fact_available_at_utc_us':'q','reference_member':'B','reference_available_at_utc_us':'q',
+            'selection_cutoff_utc_us':'q','fact_source_codes':'i','reference_source_codes':'i'}.items()}
+        dictionary=[None,*sorted({r for r in reasons if r is not None})]; codes={r:i for i,r in enumerate(dictionary)}
+        sources={}; calendar_ref=digest({'contract_version':'stock_label_calendar_v1','sessions':spec['calendar']})
+        raw_ref=digest(cohort['raw_refs'])
+        _working(metrics,_measured(metrics,cohort)+len(rows)*4096)
+        for day in core_days:
+            i=day_positions[day]
+            eligible=[[security,day] for j,security in enumerate(spec['universe']) if reasons[i*width+j] is None]
+            bindings=_normalization_sources(raw_ref,feature_ref,day,cutoff,eligible)
+            sources[day]={'bindings':sorted(bindings,key=lambda r:r['id']),
+                          'source_sets':[['offline_eligibility'],['raw_labels']]}
+            arrays['selection_cutoff_utc_us'].append(instant_us(core_clock(cutoff)))
+            for j in range(width):
+                n=i*width+j; row=rows[n]; valid=reasons[n] is None
+                arrays['values'].append(row['return'] if valid else 0.0); arrays['value_validity'].append(valid)
+                arrays['value_reason_codes'].append(codes[reasons[n]])
+                arrays['fact_available_at_utc_us'].append(instant_us(core_clock(row['label_available_at'] if valid else cutoff)))
+                arrays['reference_member'].append(valid); arrays['reference_available_at_utc_us'].append(instant_us(core_clock(cutoff)))
+                arrays['fact_source_codes'].append(1 if valid else 0); arrays['reference_source_codes'].append(0)
+        # Core accepts immutable readonly buffer views; its arithmetic remains the
+        # existing operator, not a Research vectorized substitute.
+        carrier={'contract_version':'core_cs_zscore_batch_input_v1','calendar_ref':calendar_ref,
+            'schema':RAW_TARGET_SCHEMA,'output_schema':NORMALIZED_TARGET_SCHEMA,'sessions':core_days,
+            'security_ids':spec['universe'],'reason_dictionary':dictionary,'source_bindings_by_session':sources,
+            **{k:memoryview(v.tobytes()).cast('?' if k in ('value_validity','reference_member') else v.typecode)
+               for k,v in arrays.items()}}
+        # Carrier bytes and per-session bindings are detached from these working
+        # panels. Release them before Core takes its own immutable snapshot and
+        # before normalized rows/cohort publication are allocated.
+        del arrays
+        try:
+            result=execute_cs_zscore_batch(carrier,params=NORMALIZATION_SPEC['params']) if core_days else None
+        finally:
+            # A retained exception traceback must not turn the producer frame into
+            # an owner of the detached Core input buffers.
+            del carrier,sources,dictionary
         if core_days:
-            metrics.setdefault('normalization_core_receipts',[]).append({
-                'core_result_ref':result['metadata']['result_ref'],
-                'sessions':list(core_days),'numerical_bindings':[r for r in origins if r['session'] in core_days]})
-        proof={'contract_version':'stock_normalization_reuse_v1','normalization_spec_ref':digest(NORMALIZATION_SPEC),
-            'numerical_origins':origins}
-        core_ref=digest(proof)
-        definition.update(normalization_proof_version='stock_normalization_reuse_v1',numerical_origins=origins)
-        # The declared logical cutoff and original Core dependency projection
-        # set valid target clocks; cached numerical vectors carry no old clock.
-        normalized_clock=core_clock(cutoff)
-    else:core_ref=result['metadata']['result_ref']
-    for i,row in enumerate(rows):
-        cached=None if reuse is None else daily[days[i//width]]['cached']
-        valid=bool(result['value_validity'][i] if cached is None else cached['validity'][i%width])
-        normalized.append({**row,'raw_return':row['return'],'raw_available_at':row['label_available_at'],
-            'return':float(result['values'][i] if cached is None else cached['values'][i%width]) if valid else None,'valid':valid,
-            'label_available_at':(_clock(result['available_at_utc_us'][i]) if cached is None else normalized_clock) if valid else None,
-            'invalid_reason':None if valid else reasons[i] or 'NORMALIZATION_UNDEFINED'})
-    # Neither the Core carrier nor its immutable result is a next-fold cache.
-    # Keep only the logical normalized rows and small committed references.
-    del result
-    # The directory is keyed by the logical request. New v2's core_ref is an
-    # explicitly versioned deterministic numerical proof, not a legacy Core
-    # execution ref. Actual Core invocation refs are producer receipts and do
-    # not make logical output identity depend on cache warmness/batch packing.
-    desc=_publish(target,definition,normalized,budgets=metrics['_limits'],normalized=True,core_ref=core_ref,cohort=cohort,
-                  store=metrics['_store'])
-    fd['store'].check()
-    return desc,normalized,core_ref,cohort
+            metrics['core_calls']+=1; metrics['label_core_calls']+=1
+            if reuse is not None:metrics['normalization_core_calls']=metrics.get('normalization_core_calls',0)+1
+        normalized=[]
+        if reuse is not None:
+            import numpy as np
+            for i,day in enumerate(core_days):
+                # Keep only numerical outputs and their real Core origin; current
+                # availability/source bindings remain a separate logical layer.
+                _working(metrics,width*18+4096)
+                vals=np.frombuffer(result['values'][i*width:(i+1)*width].tobytes(),dtype='<f8')
+                flags=np.frombuffer(result['value_validity'][i*width:(i+1)*width].tobytes(),dtype='?')
+                daily[day]['cached']=reuse.remember_normalization(day,daily[day]['input_numeric_ref'],
+                    vals,flags,result['metadata']['result_ref'])
+            origins=[{'session':day,'input_numeric_ref':daily[day]['input_numeric_ref'],
+                'output_numeric_ref':reuse.vector_ref((daily[day]['cached']['values'],daily[day]['cached']['validity']))}
+                for day in days]
+            if core_days:
+                metrics.setdefault('normalization_core_receipts',[]).append({
+                    'core_result_ref':result['metadata']['result_ref'],
+                    'sessions':list(core_days),'numerical_bindings':[r for r in origins if r['session'] in core_days]})
+            proof={'contract_version':'stock_normalization_reuse_v1','normalization_spec_ref':digest(NORMALIZATION_SPEC),
+                'numerical_origins':origins}
+            core_ref=digest(proof)
+            definition.update(normalization_proof_version='stock_normalization_reuse_v1',numerical_origins=origins)
+            # The declared logical cutoff and original Core dependency projection
+            # set valid target clocks; cached numerical vectors carry no old clock.
+            normalized_clock=core_clock(cutoff)
+        else:core_ref=result['metadata']['result_ref']
+        for i,row in enumerate(rows):
+            cached=None if reuse is None else daily[days[i//width]]['cached']
+            valid=bool(result['value_validity'][i] if cached is None else cached['validity'][i%width])
+            normalized.append({**row,'raw_return':row['return'],'raw_available_at':row['label_available_at'],
+                'return':float(result['values'][i] if cached is None else cached['values'][i%width]) if valid else None,'valid':valid,
+                'label_available_at':(_clock(result['available_at_utc_us'][i]) if cached is None else normalized_clock) if valid else None,
+                'invalid_reason':None if valid else reasons[i] or 'NORMALIZATION_UNDEFINED'})
+        # Neither the Core carrier nor its immutable result is a next-fold cache.
+        # Keep only the logical normalized rows and small committed references.
+        del result
+        # The directory is keyed by the logical request. New v2's core_ref is an
+        # explicitly versioned deterministic numerical proof, not a legacy Core
+        # execution ref. Actual Core invocation refs are producer receipts and do
+        # not make logical output identity depend on cache warmness/batch packing.
+        desc=_publish(target,definition,normalized,budgets=metrics['_limits'],normalized=True,core_ref=core_ref,cohort=cohort,
+                      store=metrics['_store'])
+        fd['store'].check()
+        return desc,normalized,core_ref,cohort
+
+    finally:
+        daily=values=members=cached=result=vals=flags=arrays=carrier=sources=dictionary=fd=feature=metrics=rows=raw_parts=normalized=cohort=reasons=spec=eligibility_common=None
 
 
 def _prepare_legacy_compact_batch(data, *, feature_inputs,fold_specs,destination,preparation_options,metrics=None,progress=None,
@@ -1271,7 +1276,8 @@ class _IncrementalPreparation:
                 _sync_feature_charge(self.stats);raw_value,raw_rows=read_target(self.store,desc);chunk=list(raw_rows)
                 charge=_measured(self.stats,chunk);_working(self.stats,charge);self.stats['_retained_raw_bytes']+=charge
                 rows.extend(chunk);raw_value=raw_rows=chunk=None;self._release_payloads()
-            norm,nrows,core_ref,cohort=_normalized(parts,rows,self.feature,fold['fit_cutoff'],training,self.cache,self.stats)
+            norm,nrows,core_ref,cohort=_normalized(parts,rows,self.feature,fold['fit_cutoff'],training,self.cache,self.stats,
+                target_spec=self.spec.get('target_spec'))
             charge=_measured(self.stats,[nrows,cohort]);_working(self.stats,charge);self.stats['_retained_raw_bytes']+=charge
             self._release_payloads()
             offsets=[self.positions[r['feature_session']]*self.width+self.spec['universe'].index(r['security_id']) for r in nrows if r['valid']]
@@ -1291,7 +1297,8 @@ class _IncrementalPreparation:
                 record['contract_version']='stock_ml_fold_control_v2'
                 record['training_binding']=training_block_binding(self.feature,offsets,normalized=norm,
                     cohort_ref=digest(cohort),selector=selectors['training'],store=self.store,
-                    destination=self.cache/'feature-proofs',model_feature_selection=self.stats['_model_feature_selection'])
+                    destination=self.cache/'feature-proofs',model_feature_selection=self.stats['_model_feature_selection'],
+                    metrics=self.stats)
             record=seal(record,'fold_control_ref');descriptor=write_part(self.cache/'fold-controls',record,'fold_control_ref')
             inputs={'contract_version':'stock_ml_saved_inputs_v5' if self.columnar else 'stock_ml_saved_inputs_v4',
                 'prepared_view':self.state.batch['prepared_view'],'fold_control':descriptor,

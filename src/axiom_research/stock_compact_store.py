@@ -707,63 +707,67 @@ def feature_training_blocks(handle, offsets, *, model_feature_selection=None):
     The small proofs live in the existing Feature window and are charged to its
     store. No second table, value panel or process-global digest cache exists.
     """
-    from hashlib import sha256
-    value=_view_data(handle); store=value['store']; spec=value['definition']['spec']
-    binding=model_feature_binding(handle,model_feature_selection)
-    columns=spec['ordered_features'] if binding is None else binding['ordered_features']
-    require(all(type(off) is int and 0<=off<value['row_index']['row_count'] for off in offsets),
-            'training proof offsets exceed the Feature grid')
-    width=len(spec['universe']); wanted=sorted({value['day_blocks'][off//width] for off in offsets})
-    result=[]; key=tuple(columns); copies=0
-    for ordinal in wanted:
-        block=value['blocks'][ordinal]
-        cached=block.get('training_block_proofs',{}).get(key)
-        if cached is None:
-            if binding is None:
-                _admit_feature_block(value,block); parts=block['parts']; rows=block['rows']
-            else:
-                parts,rows,_=_admit_model_columns(value,block,binding); parts=parts.values()
-            fields_by_name={}; source_parts=[]
-            for part,arrays in parts:
-                chosen=[(i,name) for i,name in enumerate(part['columns']) if name in key]
-                if not chosen: continue
-                source_parts.append({'partition_ref':part['partition_ref'],
-                    'metadata':deepcopy(part['metadata']),'buffers':deepcopy(part['buffers'])})
-                for i,name in chosen:
-                    refs={}
-                    for buffer_name,a in arrays.items():
-                        # A single strided column copy is bounded before it is
-                        # hashed, never a full fit-window text projection.
-                        store.reserve(block['count']*a.dtype.itemsize+4096)
-                        payload=a[:,i].tobytes(order='C')
-                        refs[buffer_name]={'dtype':part['buffers'][buffer_name]['dtype'],
-                            'shape':[block['count']], 'buffer_digest':'sha256:'+sha256(payload).hexdigest()}
-                        payload=None
-                    fields_by_name[name]=refs
-            store.reserve(block['count']*8+4096)
-            # Knowledge codes are local interning slots. Bind their actual
-            # clocks rather than unrelated dictionary/code assignments.
-            knowledge=digest_array_rows(rows.dictionary[int(code)] for code in rows.knowledge)
-            members='sha256:'+sha256(memoryview(rows.member)).hexdigest()
-            dependency={'contract_version':'stock_feature_training_block_dependency_v1',
-                'row_index_ref':value['row_index']['row_index_ref'],'first_row':block['start'],
-                'row_count':block['count'],'ordered_features':list(columns),
-                'columns':{name:fields_by_name[name] for name in columns},
-                'member_ref':members,'knowledge_ref':knowledge}
-            cached=seal({'contract_version':'stock_feature_training_block_v1',
-                **{k:v for k,v in dependency.items() if k!='contract_version'},
-                'dependency_ref':digest(dependency),'source_parts':source_parts},'feature_block_ref')
-            charge=_size(cached,maximum=store.maximum_matrix_bytes,
-                retained=store.shared_bytes+store.resident_bytes+store.lease_bytes)+1024
-            store.reserve(charge); store.resident_bytes+=charge
-            block.setdefault('training_block_proofs',{})[key]=cached
-            block['training_block_proof_charge']=block.get('training_block_proof_charge',0)+charge
-            store.metrics['training_block_proof_builds']=store.metrics.get('training_block_proof_builds',0)+1
-        sealed(cached,'feature_block_ref')
-        copies+=_size(cached)+1024;store.reserve(copies)
-        result.append(deepcopy(cached))
-    store.check()
-    return result
+    try:
+        from hashlib import sha256
+        value=_view_data(handle); store=value['store']; spec=value['definition']['spec']
+        binding=model_feature_binding(handle,model_feature_selection)
+        columns=spec['ordered_features'] if binding is None else binding['ordered_features']
+        require(all(type(off) is int and 0<=off<value['row_index']['row_count'] for off in offsets),
+                'training proof offsets exceed the Feature grid')
+        width=len(spec['universe']); wanted=sorted({value['day_blocks'][off//width] for off in offsets})
+        result=[]; key=tuple(columns); copies=0
+        for ordinal in wanted:
+            block=value['blocks'][ordinal]
+            cached=block.get('training_block_proofs',{}).get(key)
+            if cached is None:
+                if binding is None:
+                    _admit_feature_block(value,block); parts=block['parts']; rows=block['rows']
+                else:
+                    parts,rows,_=_admit_model_columns(value,block,binding); parts=parts.values()
+                fields_by_name={}; source_parts=[]
+                for part,arrays in parts:
+                    chosen=[(i,name) for i,name in enumerate(part['columns']) if name in key]
+                    if not chosen: continue
+                    source_parts.append({'partition_ref':part['partition_ref'],
+                        'metadata':deepcopy(part['metadata']),'buffers':deepcopy(part['buffers'])})
+                    for i,name in chosen:
+                        refs={}
+                        for buffer_name,a in arrays.items():
+                            # A single strided column copy is bounded before it is
+                            # hashed, never a full fit-window text projection.
+                            store.reserve(block['count']*a.dtype.itemsize+4096)
+                            payload=a[:,i].tobytes(order='C')
+                            refs[buffer_name]={'dtype':part['buffers'][buffer_name]['dtype'],
+                                'shape':[block['count']], 'buffer_digest':'sha256:'+sha256(payload).hexdigest()}
+                            payload=None
+                        fields_by_name[name]=refs
+                store.reserve(block['count']*8+4096)
+                # Knowledge codes are local interning slots. Bind their actual
+                # clocks rather than unrelated dictionary/code assignments.
+                knowledge=digest_array_rows(rows.dictionary[int(code)] for code in rows.knowledge)
+                members='sha256:'+sha256(memoryview(rows.member)).hexdigest()
+                dependency={'contract_version':'stock_feature_training_block_dependency_v1',
+                    'row_index_ref':value['row_index']['row_index_ref'],'first_row':block['start'],
+                    'row_count':block['count'],'ordered_features':list(columns),
+                    'columns':{name:fields_by_name[name] for name in columns},
+                    'member_ref':members,'knowledge_ref':knowledge}
+                cached=seal({'contract_version':'stock_feature_training_block_v1',
+                    **{k:v for k,v in dependency.items() if k!='contract_version'},
+                    'dependency_ref':digest(dependency),'source_parts':source_parts},'feature_block_ref')
+                charge=_size(cached,maximum=store.maximum_matrix_bytes,
+                    retained=store.shared_bytes+store.resident_bytes+store.lease_bytes)+1024
+                store.reserve(charge); store.resident_bytes+=charge
+                block.setdefault('training_block_proofs',{})[key]=cached
+                block['training_block_proof_charge']=block.get('training_block_proof_charge',0)+charge
+                store.metrics['training_block_proof_builds']=store.metrics.get('training_block_proof_builds',0)+1
+            sealed(cached,'feature_block_ref')
+            copies+=_size(cached)+1024;store.reserve(copies)
+            result.append(deepcopy(cached))
+        store.check()
+        return result
+
+    finally:
+        value=store=spec=binding=columns=block=cached=parts=rows=part=arrays=a=payload=result=handle=None
 
 
 def _offset_runs(value, offsets, *, chunk=1024):
