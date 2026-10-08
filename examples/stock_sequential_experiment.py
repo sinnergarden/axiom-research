@@ -3,8 +3,15 @@
 No execution occurs on import. Supply approved frozen inputs and budgets; no
 sample dates, model tuning, paths, credentials or initial capital are invented.
 """
-from axiom_research import (build_stock_sequential_experiment,evaluate_stock_sequential_signals,
+from axiom_research import (build_stock_sequential_experiment,build_configured_stock_sequential_experiment,evaluate_stock_sequential_signals,
     stock_request_with_saved_predictions,run_saved_stock_strategy,evaluate_saved_stock_strategy)
+
+
+def prepare_configured_models(data,*,snapshot,data_limits,configuration_path,saved_feature,output,metrics,progress):
+    """Use the split YAML Dataset/model/Label/Signal values without defaults."""
+    with data.open_column_source(snapshot=snapshot,limits=data_limits) as source:
+        return build_configured_stock_sequential_experiment(data,configuration_path=configuration_path,
+            feature_inputs=saved_feature,column_source=source,destination=output,metrics=metrics,progress=progress)
 
 
 def prepare_models(data, *, snapshot, data_limits, configuration_paths, saved_feature,

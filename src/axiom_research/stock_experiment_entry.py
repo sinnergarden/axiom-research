@@ -11,7 +11,33 @@ from .stock_fold_inputs import require
 from .stock_artifacts import digest
 
 
+def build_configured_stock_sequential_experiment(data,*,configuration_path,feature_inputs,
+    column_source,destination,metrics=None,progress=None):
+    """Notebook/worker entry; all schedule and model values come from YAML."""
+    from .stock_experiment_config import load_stock_sequential_configuration
+    configuration=load_stock_sequential_configuration(configuration_path);dataset=configuration['dataset']
+    result=_build_stock_sequential_experiment(data,configuration=configuration['specification'],
+        feature_inputs=feature_inputs,fold_specs=dataset['fold_specs'],column_source=column_source,
+        preparation_options=dataset['preparation_options'],scope=dataset['scope'],destination=destination,
+        model_feature_selection=dataset['model_feature_selection'],signal_contexts=dataset['signal_contexts'],
+        metrics=metrics,progress=progress)
+    result.update(configuration_ref=configuration['configuration_ref'],dataset_configuration_ref=configuration['dataset_ref'],
+        configuration_files=configuration['configuration_files'])
+    return result
+
+
 def build_stock_sequential_experiment(data, *, configuration_paths, feature_inputs,
+    fold_specs, column_source, preparation_options, scope, destination,
+    model_feature_selection=None, signal_contexts=None, metrics=None, progress=None):
+    """Load typed specs once and run the concrete shared preparation sequence."""
+    from .stock_experiment_config import load_stock_experiment_specs
+    return _build_stock_sequential_experiment(data,configuration=load_stock_experiment_specs(configuration_paths),
+        feature_inputs=feature_inputs,fold_specs=fold_specs,column_source=column_source,
+        preparation_options=preparation_options,scope=scope,destination=destination,
+        model_feature_selection=model_feature_selection,signal_contexts=signal_contexts,metrics=metrics,progress=progress)
+
+
+def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
     fold_specs, column_source, preparation_options, scope, destination,
     model_feature_selection=None, signal_contexts=None, metrics=None, progress=None):
     """Prepare/build/freeze a sequence through one shared Feature/source owner.
@@ -24,12 +50,11 @@ def build_stock_sequential_experiment(data, *, configuration_paths, feature_inpu
     multi-model combinations use build_stock_derived_signal with their original
     independently saved parents. No statistics or account execute in this call.
     """
-    from .stock_experiment_config import load_stock_experiment_specs
     from .stock_sequential_api import open_stock_ml_batch_preparation,open_stock_signal_evaluation_freeze
     from .stock_folds import build_stock_ml_fold_from_saved_inputs
     from .stock_derived_signal import build_stock_derived_signal,_parent
     from .api import semantic_identity
-    config=load_stock_experiment_specs(configuration_paths);specs=config['specs']
+    config=configuration;specs=config['specs']
     require({'label','model'}<=set(specs)<= {'label','model','signal'},
         'this stock entry executes label/model/signal only; Dataset/Feature/strategy drafts require explicit owner contracts')
     require(column_source is not None,'caller-owned public ColumnSource required')
@@ -61,17 +86,22 @@ def build_stock_sequential_experiment(data, *, configuration_paths, feature_inpu
                     'signal_run_ref':prediction['signal_run_ref'],'fold_spec_ref':digest(item['fold_spec'])})
                 run=prediction=binding=None
             batch=owner.finish();frozen=writer.finish()
+    evaluation_input=frozen
+    if derived:
+        from .stock_signal_evaluation_derived import save_stock_derived_signal_evaluation_inputs
+        evaluation_input=save_stock_derived_signal_evaluation_inputs(frozen,
+            derived_inputs={'derived':[item['path'] for item in derived]},scope=scope,
+            destination=root/'joint-oos',maximum_resident_bytes=preparation_options['maximum_resident_bytes'])
     return {'configuration_ref':config['configuration_ref'],'spec_refs':config['spec_refs'],
         'batch_manifest':batch,'folds':folds,'derived_signals':derived,
-        'prediction_bindings':bindings,'signal_evaluation_input':frozen}
+        'prediction_bindings':bindings,'raw_signal_evaluation_input':frozen,'signal_evaluation_input':evaluation_input}
 
 
 def evaluate_stock_sequential_signals(experiment, *, scope, destination):
-    """Saved raw OOS all/by-year statistics through the existing Core owner.
+    """Saved Raw/Derived all/by-year statistics through the existing Core owner.
 
-    Derived signals retain separate refs and stage. They are not substituted
-    into this raw admission; a joint frozen comparison requires its own owner
-    input contract. No preparation, fit, prediction or account is repeated.
+    An optional joint input retains separate stages and original parent refs.
+    No preparation, fit, prediction, normalization or account is repeated.
     """
     from .stock_signal_evaluation_projection import evaluate_stock_signal_input_periods
     return evaluate_stock_signal_input_periods(experiment['signal_evaluation_input'],scope=scope,destination=destination)

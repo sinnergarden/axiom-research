@@ -173,10 +173,11 @@ class StockMLBatchInputs:
 
     def close(self):
         value = _data(self)
+        owner_pid=value['owner_pid']
         if 'matrix_state' in value:
             value['matrix_state'].close()
         value.clear()
-        value['closed'] = True
+        value.update(owner_pid=owner_pid,closed=True)
 
     def __enter__(self):
         _data(self)

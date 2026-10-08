@@ -40,6 +40,37 @@ def label(h=5):
 
 
 class TargetConfigTests(unittest.TestCase):
+    def test_concrete_dataset_yaml_rejects_clock_window_scope_and_budget_changes(self):
+        import yaml
+        from axiom_research import load_stock_sequential_configuration
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);f,path=CompactV3Tests().fixture(root)
+            (root/'specs.yaml').write_text(yaml.safe_dump({'contract_version':'stock_experiment_config_v1',
+                'specs':{'label':to_dict(label(3)),'model':to_dict(training())}}))
+            fold=deepcopy(f.folds()[0]);fold['contract_version']='stock_ml_fold_spec_v3'
+            fold['training_window']['length']=32
+            dataset={'contract_version':'stock_dataset_schedule_v1','fold_specs':[fold],
+                'scope':{'calendar':f.calendar,'universe':f.universe,
+                    'sessions':sorted(fold['inference_cutoff_by_session']),'evaluation_cutoff':fold['evaluation_cutoff']},
+                'preparation_options':{'row_block_sessions':10,'column_block':32,'maximum_resident_bytes':64*1024**2,
+                    'normalization_backend':'core_cs_batch_v1'},'model_feature_selection':None,'signal_contexts':None}
+            (root/'dataset.yaml').write_text(yaml.safe_dump(dataset))
+            config=root/'experiment.yaml';config.write_text(yaml.safe_dump({'contract_version':'stock_sequential_configuration_v1',
+                'specification_files':['specs.yaml'],'dataset_file':'dataset.yaml'}))
+            saved=load_stock_sequential_configuration(config)
+            self.assertEqual(saved['dataset']['fold_specs'][0]['training_window']['length'],32)
+            (root/'dataset.yaml').write_text('# same declared schedule\n'+yaml.safe_dump(dataset,sort_keys=False))
+            self.assertEqual(load_stock_sequential_configuration(config)['configuration_ref'],saved['configuration_ref'])
+            cases=[]
+            bad=deepcopy(dataset);bad['fold_specs'][0]['training_window']['length']=True;cases.append(bad)
+            bad=deepcopy(dataset);bad['fold_specs'][0]['contract_version']='stock_ml_fold_spec_v1';cases.append(bad)
+            bad=deepcopy(dataset);bad['scope']['sessions']=bad['scope']['sessions'][:-1];cases.append(bad)
+            bad=deepcopy(dataset);bad['preparation_options']['maximum_resident_bytes']=True;cases.append(bad)
+            bad=deepcopy(dataset);bad['fold_specs'][0]['simulated_model_available_at']=fold['fit_session']+'T22:00:00+08:00';cases.append(bad)
+            for bad in cases:
+                (root/'dataset.yaml').write_text(yaml.safe_dump(bad))
+                with self.assertRaises(ValueError):load_stock_sequential_configuration(config)
+
     def test_experiment_references_and_explicit_overrides_resolve_effective_specs(self):
         import yaml
         with tempfile.TemporaryDirectory() as temporary:

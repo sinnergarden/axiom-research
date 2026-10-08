@@ -238,7 +238,7 @@ def load_stock_signal_evaluation(path, *, batch=None):
     if path.is_file():
         # Dispatch is only a hint. V3 hashes/parses its consumed buffer again
         # against the group manifest and returns that verified snapshot.
-        if _read(path).get('contract_version') in ('stock_signal_evidence_v3', 'stock_signal_evidence_v4', 'stock_signal_evidence_v5','stock_signal_evidence_v6'):
+        if _read(path).get('contract_version') in ('stock_signal_evidence_v3', 'stock_signal_evidence_v4', 'stock_signal_evidence_v5','stock_signal_evidence_v6','stock_signal_evidence_v7'):
             _require(batch is None, 'frozen evaluation does not accept a training batch')
             from .stock_signal_evaluation_projection import _load_v3_report
             return _load_v3_report(path)

@@ -443,9 +443,11 @@ def _select_inputs(admission, scope):
                        for name in projected], 'label_ref': raw['label_ref'], 'scope': scope,
         'common_keys': [list(key) for key in common],
         'native_keys': {name: [list(key) for key in native[name]] for name in projected}}
-    return {'scope': scope, 'raw': raw, 'refs': refs, 'closures': closures, 'signal_keys': signal_keys,
+    result={'scope': scope, 'raw': raw, 'refs': refs, 'closures': closures, 'signal_keys': signal_keys,
         'mask': mask, 'common_input': table({name: common for name in projected}),
         'native_input': table(native), 'native_coverage': coverage, 'common_keys': common}
+    if 'signal_lineage' in admission:result['signal_lineage']=deepcopy(admission['signal_lineage'])
+    return result
 
 
 def _inputs(signal_inputs, raw_label_input, scope, *, batch=None):

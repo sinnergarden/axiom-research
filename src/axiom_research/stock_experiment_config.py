@@ -26,16 +26,8 @@ def _transport_defaults(value):
     return out
 
 
-def load_stock_experiment_specs(paths):
-    """Merge explicitly split files into typed specs and an effective identity.
-
-    Each file is {contract_version: stock_experiment_config_v1, specs: {role:
-    <existing typed contract transport>}}. Roles cannot repeat across files.
-    One experiment file may instead declare stock_experiment_v1, an explicit
-    files list relative to itself, and role-keyed overrides of existing fields.
-    Referenced files must be typed-spec files; references cannot recurse.
-    Paths, YAML comments and Contract metadata do not enter semantic identity.
-    """
+def _read_configuration_yaml(path):
+    """One bounded safe transport parser for specs and concrete schedules."""
     import yaml
     from yaml.events import AliasEvent
     class SpecLoader(yaml.SafeLoader):
@@ -64,8 +56,21 @@ def load_stock_experiment_specs(paths):
         require(not any(isinstance(event,AliasEvent) for event in yaml.parse(text,Loader=SpecLoader)),
                 'YAML aliases are not supported')
         return yaml.load(text,Loader=SpecLoader)
+    return read(path)
+
+
+def load_stock_experiment_specs(paths):
+    """Merge explicitly split files into typed specs and an effective identity.
+
+    Each file is {contract_version: stock_experiment_config_v1, specs: {role:
+    <existing typed contract transport>}}. Roles cannot repeat across files.
+    One experiment file may instead declare stock_experiment_v1, an explicit
+    files list relative to itself, and role-keyed overrides of existing fields.
+    Referenced files must be typed-spec files; references cannot recurse.
+    Paths, YAML comments and Contract metadata do not enter semantic identity.
+    """
     require(type(paths) in (list,tuple) and bool(paths),'explicit configuration paths required')
-    paths=[Path(p).resolve() for p in paths];values=[read(p) for p in paths];overrides={}
+    paths=[Path(p).resolve() for p in paths];values=[_read_configuration_yaml(p) for p in paths];overrides={}
     if len(values)==1 and type(values[0]) is dict and values[0].get('contract_version')=='stock_experiment_v1':
         experiment=values[0]
         require(set(experiment)=={'contract_version','files','overrides'} and
@@ -74,7 +79,7 @@ def load_stock_experiment_specs(paths):
             type(experiment['overrides']) is dict,'exact split experiment references/overrides required')
         base=paths[0].parent;paths=[(base/p).resolve() for p in experiment['files']]
         require(len(set(paths))==len(paths),'repeated experiment configuration file')
-        values=[read(p) for p in paths];overrides=deepcopy(experiment['overrides'])
+        values=[_read_configuration_yaml(p) for p in paths];overrides=deepcopy(experiment['overrides'])
     def merge(wire,change):
         require(type(wire) is dict and type(change) is dict and set(change)<=set(wire) and
             not set(change)&{'contract_type','contract_version'},'unknown or protected override field')
@@ -110,3 +115,54 @@ def load_stock_experiment_specs(paths):
     return {'specs':specs,'spec_refs':refs,'configuration_ref':digest({
         'contract_version':'stock_effective_configuration_v1','spec_refs':refs}),
         'configuration_files':[str(p) for p in paths],'explicit_overrides':overrides}
+
+
+def load_stock_sequential_configuration(path):
+    """Resolve split typed specs and the existing concrete fold-v3 schedule.
+
+    The Dataset transport contains explicit folds, scope and owner budgets. It
+    does not reinterpret the R0 DatasetSpec's session-count field as calendar
+    years, expand a scheduling language, or invent feature/fit/model clocks.
+    """
+    from .stock_fold_inputs import validate_spec
+    from .stock_signal_evaluation_inputs import _scope
+    path=Path(path).resolve();wire=_read_configuration_yaml(path)
+    require(type(wire) is dict and set(wire)=={'contract_version','specification_files','dataset_file'} and
+        wire['contract_version']=='stock_sequential_configuration_v1' and
+        type(wire['specification_files']) is list and bool(wire['specification_files']) and
+        all(type(p) is str and bool(p) for p in wire['specification_files']) and
+        type(wire['dataset_file']) is str and bool(wire['dataset_file']),
+        'exact sequential specification and Dataset file references required')
+    spec_paths=[(path.parent/p).resolve() for p in wire['specification_files']]
+    configuration=load_stock_experiment_specs(spec_paths)
+    dataset_path=(path.parent/wire['dataset_file']).resolve();dataset=_read_configuration_yaml(dataset_path)
+    require(type(dataset) is dict and set(dataset)=={'contract_version','fold_specs','scope',
+        'preparation_options','model_feature_selection','signal_contexts'} and
+        dataset['contract_version']=='stock_dataset_schedule_v1' and
+        type(dataset['fold_specs']) is list and bool(dataset['fold_specs']),
+        'exact explicit stock Dataset schedule required')
+    scope=_scope(dataset['scope']);previous=None;prediction_sessions=[]
+    for fold in dataset['fold_specs']:
+        require(type(fold) is dict and fold.get('contract_version')=='stock_ml_fold_spec_v3',
+            'configured Dataset requires explicit fold-v3 windows and clocks')
+        _,sessions=validate_spec(fold,scope['calendar'])
+        require(previous is None or fold['oos_trade_sessions'][0]>previous,'configured folds overlap or are unordered')
+        previous=fold['oos_trade_sessions'][-1];prediction_sessions.extend(sessions)
+    require(prediction_sessions==scope['sessions'],'configured Dataset must cover the exact OOS scope')
+    options=dataset['preparation_options'];required={'row_block_sessions','column_block',
+        'maximum_resident_bytes','normalization_backend'}
+    require(type(options) is dict and required<=set(options)<=required|{
+        'maximum_source_bytes','maximum_parent_bytes','control_layout'} and
+        options['normalization_backend']=='core_cs_batch_v1' and
+        options.get('control_layout','fold_controls_v2')=='fold_controls_v2' and
+        all(type(v) is int and v>0 for k,v in options.items() if k not in
+            ('normalization_backend','control_layout')),'configured Dataset owner budget/profile mismatch')
+    selection=dataset['model_feature_selection']
+    require(selection is None or type(selection) is list and bool(selection),'explicit model Feature selection required')
+    require(dataset['signal_contexts'] is None or type(dataset['signal_contexts']) is dict,
+        'explicit Signal contexts or null required')
+    return {'specification_paths':[str(p) for p in spec_paths],'specification':configuration,
+        'dataset':dataset,'dataset_ref':digest(dataset),'configuration_ref':digest({
+            'contract_version':'stock_sequential_effective_configuration_v1',
+            'specification_ref':configuration['configuration_ref'],'dataset_ref':digest(dataset)}),
+        'configuration_files':[str(path),str(dataset_path),*configuration['configuration_files']]}

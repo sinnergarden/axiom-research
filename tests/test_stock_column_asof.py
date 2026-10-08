@@ -170,34 +170,60 @@ class ColumnAsOfTests(unittest.TestCase):
 
     def test_public_sequence_entry_and_actual_raw_evaluation(self):
         import yaml
-        from axiom_research import (build_stock_sequential_experiment,evaluate_stock_sequential_signals,
-            SessionRange,to_dict,load_stock_signal_evaluation)
+        from axiom_research import (build_configured_stock_sequential_experiment,evaluate_stock_sequential_signals,
+            SessionRange,to_dict,load_stock_signal_evaluation,SignalPlanSpec,SignalInput,SignalNode)
+        from axiom_research.stock_label_contracts import NORMALIZATION_SPEC
         from test_stock_sequential_windows import backend
         module=ModuleType('axiom_data');module.QuerySpec=Query
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);f,path=CompactV3Tests().fixture(root);source=ColumnSource(f.spec)
             model=replace(training(),fit_range=SessionRange(start=f.calendar[0],end=f.calendar[-1]))
+            plan=SignalPlanSpec(name='configured-original-raw-zscore',key=('security_id','session'),
+                inputs=(SignalInput(alias='raw',label=label(3),source_stage='raw_prediction',
+                    score_semantics='forward_3_session_cs_zscore_prediction'),),
+                nodes=(SignalNode(name='z',op='daily_zscore',inputs=('raw',),input_stages=('raw_prediction',),
+                    output_stage='daily_zscore',weights=(),reference_universe='saved-fixture-members',
+                    missing_policy='skip',parameters=NORMALIZATION_SPEC['params']),),output='z',
+                join_policy='inner_on_security_session',score_semantics='fixture-zscore',
+                available_time_semantics='max_original_dependencies')
             config=root/'model.yaml';config.write_text(yaml.safe_dump({'contract_version':'stock_experiment_config_v1',
-                'specs':{'label':to_dict(label(3)),'model':to_dict(model)}}))
+                'specs':{'label':to_dict(label(3)),'model':to_dict(model),'signal':to_dict(plan)}}))
             f.environment={'synthetic':'fixed environment','packages':{'lightgbm':'4.6.0'}}
-            folds=f.folds()[:1]
+            folds=deepcopy(f.folds()[:1]);fold=folds[0];fold['contract_version']='stock_ml_fold_spec_v3'
+            fold['training_window']['length']=32
+            fold['fit_cutoff']=fold['fit_session']+'T20:50:00+08:00'
+            fold['simulated_model_available_at']=fold['fit_session']+'T21:00:00+08:00'
+            fold['inference_cutoff_by_session']={day:day+'T21:15:00+08:00' for day in fold['inference_cutoff_by_session']}
             scope={'calendar':f.calendar,'universe':f.universe,
                 'sessions':sorted(folds[0]['inference_cutoff_by_session']),'evaluation_cutoff':folds[0]['evaluation_cutoff']}
+            context={'calendar_ref':digest({'contract_version':'stock_label_calendar_v1','sessions':f.calendar}),
+                'reference_universe':'saved-fixture-members','reference_universe_ref':digest('frozen-fixture-members'),
+                'reference_members':{day:[{'security_id':row['security_id'],'member':row['member'],
+                    'available_at':row['knowledge_cutoff'],'source_refs':row['source_refs']}
+                    for row in f.day(day)[0]] for day in scope['sessions']},
+                'cutoff_by_session':deepcopy(fold['inference_cutoff_by_session']),'clock_basis':'declared_simulation'}
+            dataset=root/'dataset.yaml';dataset.write_text(yaml.safe_dump({'contract_version':'stock_dataset_schedule_v1',
+                'fold_specs':folds,'scope':scope,'preparation_options':{'row_block_sessions':10,'column_block':32,
+                    'maximum_resident_bytes':64*1024**2,'normalization_backend':'core_cs_batch_v1'},
+                'model_feature_selection':None,'signal_contexts':{digest(fold):context}}))
+            configured=root/'experiment.yaml';configured.write_text(yaml.safe_dump({
+                'contract_version':'stock_sequential_configuration_v1','specification_files':['model.yaml'],
+                'dataset_file':'dataset.yaml'}))
             with patch.dict(sys.modules,{'axiom_data':module}), \
                 patch('axiom_research.feature_catalog.load_feature_catalog',return_value=f.catalog), \
                 patch('axiom_research.stock_ml._environment',return_value=f.environment), \
                 patch('axiom_research.stock_training.fit_predict_stock_model',side_effect=backend):
-                experiment=build_stock_sequential_experiment(object(),configuration_paths=[config],feature_inputs=path,
-                    fold_specs=folds,column_source=source,preparation_options={'row_block_sessions':10,'column_block':32,
-                        'maximum_resident_bytes':64*1024**2,'normalization_backend':'core_cs_batch_v1'},
-                    scope=scope,destination=root/'experiment')
+                experiment=build_configured_stock_sequential_experiment(object(),configuration_path=configured,
+                    feature_inputs=path,column_source=source,destination=root/'experiment')
             self.assertEqual(experiment['batch_manifest']['status'],'COMPLETE')
-            self.assertEqual(experiment['prediction_bindings'][0]['kind'],'raw')
-            self.assertEqual(experiment['prediction_bindings'][0]['signal_run_ref'],experiment['folds'][0]['signal_run_ref'])
+            self.assertEqual(experiment['prediction_bindings'][0]['kind'],'derived')
+            self.assertEqual(experiment['prediction_bindings'][0]['parent_inputs']['raw']['signal_run_ref'],
+                experiment['folds'][0]['signal_run_ref'])
             self.assertTrue(all(v.closed for v in source.selections))
             reports=evaluate_stock_sequential_signals(experiment,scope=scope,destination=root/'evaluation')
             self.assertEqual(set(reports),{'all','by_year'})
-            self.assertEqual(reports['all']['model'].to_dict()['contract_version'],'stock_signal_evidence_v6')
+            self.assertEqual(set(reports['all']),{'model','derived'})
+            self.assertEqual(reports['all']['model'].to_dict()['contract_version'],'stock_signal_evidence_v7')
             with patch('axiom_engine.core.evaluate_signal_statistics',side_effect=AssertionError('readonly statistics')):
                 self.assertEqual(load_stock_signal_evaluation(reports['all']['model'].path).identity,
                     reports['all']['model'].identity)
@@ -379,6 +405,35 @@ class ColumnAsOfTests(unittest.TestCase):
                     for run in runs:self.assertEqual(load_stock_ml_fold(run.path,batch=batch).identity,run.identity)
                 from axiom_research.stock_signal_evaluation_projection import _load_inputs
                 _load_inputs(report,scope)
+                from axiom_research import (save_stock_derived_signal_evaluation_inputs,
+                    evaluate_stock_signal_input_periods,load_stock_signal_evaluation)
+                joint=save_stock_derived_signal_evaluation_inputs(report,
+                    derived_inputs={'combined':[str(saved.path) for saved in derived]},scope=scope,
+                    destination=root/'joint',maximum_resident_bytes=64*1024**2)
+                with self.assertRaises(ValueError):save_stock_derived_signal_evaluation_inputs(report,
+                    derived_inputs={'combined':[str(saved.path) for saved in derived]},scope=scope,
+                    destination=root/'too-small-joint',maximum_resident_bytes=1)
+                self.assertFalse(list((root/'too-small-joint').glob('*/manifest.json')))
+                reports=evaluate_stock_signal_input_periods(joint,scope=scope,destination=root/'joint-evaluations')
+                self.assertEqual(set(reports['all']),{'model','combined'})
+                for name,saved in reports['all'].items():
+                    body=saved.to_dict();self.assertEqual(body['contract_version'],'stock_signal_evidence_v7')
+                    self.assertEqual(body['label_ref'],reports['all']['model'].to_dict()['label_ref'])
+                    self.assertEqual(body['input_signal_refs'],[item.identity for item in derived] if name=='combined' else
+                        [_read(run.path/'predictions.json')['signal_run_ref'] for run in runs])
+                    self.assertEqual(body['signal_lineage'][0]['signal_stage'],'final' if name=='combined' else 'raw_prediction')
+                with patch('axiom_engine.core.evaluate_signal_statistics',side_effect=AssertionError('joint HIT statistics')), \
+                    patch('axiom_engine.core.execute_signal_plan',side_effect=AssertionError('joint readonly signal math')):
+                    for saved in reports['all'].values():self.assertEqual(load_stock_signal_evaluation(saved.path).identity,saved.identity)
+                    self.assertTrue(evaluate_stock_signal_input_periods(joint,scope=scope,destination=root/'joint-evaluations')
+                        ['all']['combined'].reused)
+                    original_signal=derived[0].path/'signal.json';original_bytes=original_signal.read_bytes()
+                    original_signal.write_bytes(original_bytes[:-1]+bytes([original_bytes[-1]^1]))
+                    self.assertEqual(load_stock_signal_evaluation(reports['all']['combined'].path).identity,
+                        reports['all']['combined'].identity)
+                    from axiom_research.stock_signal_evaluation_projection import _audit_input
+                    with self.assertRaises(ValueError):_audit_input(joint)
+                    original_signal.write_bytes(original_bytes)
                 frozen=_read(report.uri)
                 frozen_paths={row['path'] for row in frozen['admission_receipt']['source_records']}
                 proof_paths={descriptor['path'] for item in manifest['folds'] for descriptor in

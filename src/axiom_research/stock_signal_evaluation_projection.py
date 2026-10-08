@@ -20,6 +20,7 @@ INPUT_VERSION = 'stock_signal_evaluation_inputs_v1'
 MATRIX_INPUT_VERSION = 'stock_signal_evaluation_inputs_v2'
 COMPACT_INPUT_VERSION = 'stock_signal_evaluation_inputs_v3'
 COLUMN_INPUT_VERSION = 'stock_signal_evaluation_inputs_v4'
+DERIVED_INPUT_VERSION = 'stock_signal_evaluation_inputs_v5'
 
 
 def _compact_input(version):
@@ -31,6 +32,7 @@ def _matrix_input(version):
 
 
 def _report_version(version):
+    if version==DERIVED_INPUT_VERSION:return 'stock_signal_evidence_v7'
     if version==COLUMN_INPUT_VERSION:return 'stock_signal_evidence_v6'
     if _compact_input(version):
         return 'stock_signal_evidence_v5'
@@ -81,7 +83,7 @@ def _input_ref(value):
     _require(type(value) is ArtifactRef, 'frozen evaluation ArtifactRef required')
     validate(value)
     _require(value.artifact_type == 'StockSignalEvaluationInputs' and
-        value.artifact_contract_version in (INPUT_VERSION, MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION,COLUMN_INPUT_VERSION),
+        value.artifact_contract_version in (INPUT_VERSION, MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION,COLUMN_INPUT_VERSION,DERIVED_INPUT_VERSION),
         'frozen evaluation input ref type/version mismatch')
     _require(Path(value.uri).is_absolute(), 'fixed absolute frozen input locator required')
     return value
@@ -353,6 +355,9 @@ def _verify_root(root, ref, scope):
 def _load_inputs(input_ref, scope, *, marks=None, include_admission=False, _validate_only=False):
     _require(not (_validate_only and include_admission), 'validation-only input has no row projection')
     ref = _input_ref(input_ref); scope = _scope(scope)
+    if ref.artifact_contract_version==DERIVED_INPUT_VERSION:
+        from .stock_signal_evaluation_derived import _load_joint_inputs
+        return _load_joint_inputs(ref,scope,marks=marks,include_admission=include_admission,_validate_only=_validate_only)
     marks = {} if marks is None else marks
     root, _ = _read_checked(ref.uri, ref.content_digest, marks=marks)
     metadata_by_day = _verify_root(root, ref, scope)
@@ -457,6 +462,9 @@ def _load_inputs(input_ref, scope, *, marks=None, include_admission=False, _vali
 
 def _audit_input(input_ref):
     ref = _input_ref(input_ref)
+    if ref.artifact_contract_version==DERIVED_INPUT_VERSION:
+        from .stock_signal_evaluation_derived import _audit_joint_input
+        return _audit_joint_input(ref)
     if _matrix_input(ref.artifact_contract_version):
         from .stock_signal_evaluation_matrix import _audit_matrix_input
         return _audit_matrix_input(ref)
@@ -483,7 +491,7 @@ def _audit_input(input_ref):
     return ref
 
 
-def _implementation_v3(matrix=False, compact=False):
+def _implementation_v3(matrix=False, compact=False,derived=False):
     module = import_module('axiom_engine.core.signal_statistics')
     core = Path(module.__file__).parent
     names = ('stock_signal_evaluation.py', 'stock_signal_evaluation_inputs.py',
@@ -492,6 +500,7 @@ def _implementation_v3(matrix=False, compact=False):
         names += ('stock_signal_evaluation_matrix.py',)
     if compact:
         names += ('stock_signal_evaluation_compact.py', 'stock_compact_controls.py', 'stock_matrix_storage.py')
+    if derived:names += ('stock_signal_evaluation_derived.py',)
     return {'research': {name: file_digest(Path(__file__).parent/name) for name in names},
         'core': {name: file_digest(core/name) for name in ('signal_statistics.py', 'contracts.py')},
         'operator': 'axiom_engine.core.evaluate_signal_statistics'}
@@ -553,6 +562,12 @@ def _reports_v3(group, admitted, common, native):
                 'Source closure was checked during freezing; this load verifies the frozen projection. Full audit is explicit.',
                 'Label spec is copied from the saved Raw Label build; absent unit fields remain absent.'],
             'implementation_ref': group['implementation_ref']}
+        if version==DERIVED_INPUT_VERSION:
+            report['signal_lineage']=deepcopy(admitted['signal_lineage'][name])
+            report['validation_basis']='frozen_raw_derived_projection_v1'
+            report['limitations'][-2:]=[
+                'Original Raw and Derived stages, parents and generation cohorts are frozen without renormalization.',
+                'Statistics pair every signal with the same frozen OOS label version; account returns remain separate.']
         report['evidence_ref'] = digest({'evaluation_key': group['evaluation_key'], 'signal_name': name})
         if matrix:
             report['limitations'][-1] = 'Evaluation targets are independent of training targets; exact original Label specs and slice lineage remain in the frozen input.'
@@ -628,7 +643,8 @@ def _evaluate_prepared(prepared, destination, marks):
     from .stock_signal_evaluation import SPEC, _verified_evaluation
     ref, root, admitted = prepared
     group = _group_definition(ref, root, admitted, _implementation_v3(
-        _matrix_input(ref.artifact_contract_version), _compact_input(ref.artifact_contract_version)))
+        _matrix_input(ref.artifact_contract_version), _compact_input(ref.artifact_contract_version),
+        ref.artifact_contract_version==DERIVED_INPUT_VERSION))
     destination = Path(destination).resolve(); target = destination/group['evaluation_key'][7:]
     if target.exists():
         return _load_group(target, prepared=prepared, marks=marks, expected_key=group['evaluation_key'], reused=True)
