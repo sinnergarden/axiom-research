@@ -41,6 +41,7 @@ _RUNTIME_EXPORTS = {
     "build_forward_labels": ".labels", "mature_training_rows": ".labels",
     "load_stock_experiment_specs": ".stock_experiment_config",
     "load_stock_sequential_configuration": ".stock_experiment_config",
+    "compile_stock_weekly_folds": ".stock_weekly_config",
     "resolve_stock_training_spec": ".stock_training",
     "open_stock_ml_batch_preparation": ".stock_sequential_api",
     "open_stock_signal_evaluation_freeze": ".stock_sequential_api",

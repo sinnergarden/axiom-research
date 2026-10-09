@@ -252,11 +252,26 @@ class ModelFeatureSelectionTests(unittest.TestCase):
                             self.assertEqual(actual['return'],row['values'][0])
                             if actual['valid']: self.assertEqual(actual['label_available_at'],row['availability'][0])
                 before=self.counts(view)
+                # The eager oracle above can retain complete physical blocks in
+                # this shared owner. Only parts absent from both owned caches
+                # require a new column admission; the cold-window test covers
+                # the separate one-new-part case.
+                selected_b={item['id'] for item in b}
+                expected_new_parts=0
+                retained_before=0
+                for block in _view_data(view)['blocks']:
+                    if 'model_rows' not in block: continue
+                    retained_before+=1
+                    available=set(block.get('model_parts',{}))
+                    available.update(part['partition_ref'] for part,_ in (block['parts'] or []))
+                    expected_new_parts+=sum(bool(selected_b.intersection(part['columns'])) and
+                        part['partition_ref'] not in available for part in block['descriptors'])
                 chosen_b=prepare_stock_ml_batch_inputs(None,feature_inputs=view,fold_specs=f.folds()[:1],
                     destination=root/'subsets',preparation_options=self.options,model_feature_selection=b,reuse_raw_from_batch=source)
                 after=self.counts(view)
                 retained=sum('model_rows' in block for block in _view_data(view)['blocks'])
-                self.assertEqual(after[0]-before[0],retained)  # One new column part per retained row block.
+                self.assertEqual(retained,retained_before)
+                self.assertEqual(after[0]-before[0],expected_new_parts)
                 reversed_b=list(reversed(b)); reverse_metrics={}
                 reordered=prepare_stock_ml_batch_inputs(None,feature_inputs=view,fold_specs=f.folds()[:1],
                     destination=root/'subsets',preparation_options=self.options,metrics=reverse_metrics,
@@ -347,10 +362,10 @@ class ModelFeatureSelectionTests(unittest.TestCase):
                 # Reuse binds the original fold vintage and its query plan.
                 changed=deepcopy(f.folds()[:1]); changed[0]['evaluation_cutoff']=f.calendar[-1]+'T20:31:00+08:00'
                 with patch.object(OwnedStore,'buffer',side_effect=AssertionError('column/target IO reached')):
-                    with self.assertRaisesRegex(ValueError,'fold/cutoff'):
+                    with self.assertRaisesRegex(ValueError,'Raw reuse (fold/cutoff|source/fold/query plan)'):
                         prepare_stock_ml_batch_inputs(None,feature_inputs=view,fold_specs=changed,destination=root/'bad-vintage',
                             preparation_options=self.options,model_feature_selection=a,reuse_raw_from_batch=source)
-                    with self.assertRaisesRegex(ValueError,'row-block query plan'):
+                    with self.assertRaisesRegex(ValueError,'Raw reuse (row-block query plan|source/fold/query plan)'):
                         prepare_stock_ml_batch_inputs(None,feature_inputs=view,fold_specs=f.folds()[:1],destination=root/'bad-plan',
                             preparation_options={**self.options,'row_block_sessions':32},model_feature_selection=a,
                             reuse_raw_from_batch=source)

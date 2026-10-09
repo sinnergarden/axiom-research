@@ -609,8 +609,18 @@ class CompactState:
         for day in set(training+inference): ordinals.update(fd['day_admissions'][self.positions[day]])
         for ordinal in ordinals:
             block=fd['blocks'][ordinal]
-            require(block['parts'] is not None,'evaluation Feature block not admitted')
-            for part in block['descriptors']:
+            if self.model_binding is None:
+                require(block['parts'] is not None,'evaluation Feature block not admitted')
+                descriptors=block['descriptors']
+            else:
+                selected={item['id'] for item in self.model_binding['selection']}
+                descriptors=[part for part in block['descriptors'] if selected & set(part['columns'])]
+                cache=block.get('model_parts',{})
+                require(bool(descriptors) and block.get('model_rows') is not None and all(
+                    part['partition_ref'] in cache and cache[part['partition_ref']][0]==part for part in descriptors),
+                    'evaluation selected Feature columns not admitted')
+                feature_paths.add(block['descriptors'][0]['metadata']['path'])
+            for part in descriptors:
                 feature_paths.add(part['metadata']['path'])
                 feature_paths.update(d['path'] for d in part['buffers'].values())
         records={}; marks={}

@@ -25,15 +25,24 @@ import test_stock_compact_v3 as fixture_sources
 from test_stock_matrix_prepare import Query
 from test_stock_sequential_windows import backend
 from test_stock_target_config_blocks import label
-from test_stock_signal_evaluation_owner_vertical import readonly_execution
+from test_stock_signal_evaluation_owner_vertical import readonly_execution, CrossYearFeature
 
 
 class MultiOwnerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(); cls.root = Path(cls.temporary.name).resolve()
-        cls.feature, table = fixture_sources.CompactV3Tests().fixture(cls.root)
+        def missing_last_column(day, rows):
+            for row in rows:
+                if row['security_id'] == 'S003':
+                    row['values'][-1] = None; row['validity'][-1] = False
+                    row['availability'][-1] = None; row['reasons'][-1] = ['SYNTHETIC_LAST_COLUMN_MISSING']
+        cls.feature, table = fixture_sources.CompactV3Tests().fixture(cls.root,
+            feature_class=CrossYearFeature, transform=missing_last_column)
         f = cls.feature; f.environment = {'synthetic': 'fixed fake backend', 'packages': {'lightgbm': '4.6.0'}}
+        entries={item['id']:item for item in f.catalog.select(f.selection)}
+        f.catalog=type('SyntheticSelectedCatalog',(),{'identity':f.catalog.identity,
+            'select':lambda _,selection:[deepcopy(entries[item['id']]) for item in selection]})()
         module = ModuleType('axiom_data'); module.QuerySpec = Query
         cls.manifests, cls.signals, cls.bindings, cls.paths = {}, {}, {}, {}
         with patch.dict(sys.modules, {'axiom_data': module}):
@@ -41,6 +50,7 @@ class MultiOwnerTests(unittest.TestCase):
                 name = 'h'+str(horizon)
                 manifest = prepare_stock_ml_batch_inputs(object(), feature_inputs=table,
                     fold_specs=f.folds()[:1], label_spec=label(horizon), column_source=ColumnSource(f.spec),
+                    model_feature_selection=f.selection[:3] if horizon == 3 else None,
                     destination=cls.root/('prepared-'+name), preparation_options={'row_block_sessions':10,
                         'column_block':32, 'maximum_resident_bytes':64*1024**2, 'normalization_backend':'core_cs_batch_v1'})
                 with load_stock_ml_batch_inputs(manifest, residency='sequential') as batch, \
@@ -97,11 +107,16 @@ class MultiOwnerTests(unittest.TestCase):
             again = evaluate_stock_signal_input_periods(saved, scope=self.scope, destination=self.root/'reports')
             for name, report in reports['all'].items():
                 self.assertEqual(report.to_dict()['contract_version'], 'stock_signal_evidence_v8')
+                self.assertEqual(report.to_dict()['status'], 'COMPLETE')
                 self.assertEqual(report.to_dict()['label_ref'], self.labels[5]['label_ref'])
                 self.assertEqual(report.to_dict()['input_signal_refs'], [self.signals[name]['signal_run_ref']])
                 self.assertTrue(again['all'][name].reused)
                 with patch('axiom_engine.core.evaluate_signal_statistics', side_effect=AssertionError('cold loader recomputed')):
                     self.assertEqual(load_stock_signal_evaluation(report.path).to_dict(), report.to_dict())
+            self.assertGreater(reports['all']['h3'].to_dict()['coverage']['native']['valid_pair_count'],
+                reports['all']['h5'].to_dict()['coverage']['native']['valid_pair_count'])
+            self.assertEqual(reports['all']['h3'].to_dict()['sample_mask_ref'],
+                reports['all']['h5'].to_dict()['sample_mask_ref'])
             audit_stock_signal_evaluation(next(iter(reports['all'].values())).path)
             # Shards use keyed lookup, independent of dictionary insertion order.
             day = self.scope['sessions'][0]; original = _shard(admission_for_shard(admission, root), self.scope, day)

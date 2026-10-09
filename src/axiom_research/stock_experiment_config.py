@@ -26,7 +26,7 @@ def _transport_defaults(value):
     return out
 
 
-def _read_configuration_yaml(path):
+def _read_configuration_yaml(path, *, expected_digest=None):
     """One bounded safe transport parser for specs and concrete schedules."""
     import yaml
     from yaml.events import AliasEvent
@@ -52,6 +52,9 @@ def _read_configuration_yaml(path):
                 'configuration file exceeds the fixed ingress byte limit')
         with path.open('rb') as stream: payload=stream.read(_MAXIMUM_CONFIG_BYTES+1)
         require(len(payload)<=_MAXIMUM_CONFIG_BYTES,'configuration file grew past its byte limit')
+        if expected_digest is not None:
+            from hashlib import sha256
+            require(expected_digest=='sha256:'+sha256(payload).hexdigest(), 'configuration source byte digest mismatch')
         text=payload.decode('utf-8')
         require(not any(isinstance(event,AliasEvent) for event in yaml.parse(text,Loader=SpecLoader)),
                 'YAML aliases are not supported')
@@ -136,6 +139,10 @@ def load_stock_sequential_configuration(path):
     spec_paths=[(path.parent/p).resolve() for p in wire['specification_files']]
     configuration=load_stock_experiment_specs(spec_paths)
     dataset_path=(path.parent/wire['dataset_file']).resolve();dataset=_read_configuration_yaml(dataset_path)
+    compilation=None
+    if type(dataset) is dict and dataset.get('contract_version')=='stock_dataset_schedule_v2':
+        from .stock_weekly_config import _expand_weekly_dataset
+        dataset,compilation=_expand_weekly_dataset(dataset,dataset_path)
     require(type(dataset) is dict and set(dataset)=={'contract_version','fold_specs','scope',
         'preparation_options','model_feature_selection','signal_contexts'} and
         dataset['contract_version']=='stock_dataset_schedule_v1' and
@@ -161,8 +168,14 @@ def load_stock_sequential_configuration(path):
     require(selection is None or type(selection) is list and bool(selection),'explicit model Feature selection required')
     require(dataset['signal_contexts'] is None or type(dataset['signal_contexts']) is dict,
         'explicit Signal contexts or null required')
-    return {'specification_paths':[str(p) for p in spec_paths],'specification':configuration,
-        'dataset':dataset,'dataset_ref':digest(dataset),'configuration_ref':digest({
-            'contract_version':'stock_sequential_effective_configuration_v1',
-            'specification_ref':configuration['configuration_ref'],'dataset_ref':digest(dataset)}),
+    dataset_ref=digest(dataset) if compilation is None else digest({'dataset':dataset,'compiler_ref':compilation['compiler_ref']})
+    result={'specification_paths':[str(p) for p in spec_paths],'specification':configuration,
+        'dataset':dataset,'dataset_ref':dataset_ref,'configuration_ref':digest({
+            'contract_version':'stock_sequential_effective_configuration_v1' if compilation is None else
+                'stock_sequential_effective_configuration_v2',
+            'specification_ref':configuration['configuration_ref'],'dataset_ref':dataset_ref}),
         'configuration_files':[str(path),str(dataset_path),*configuration['configuration_files']]}
+    if compilation is not None:
+        result['weekly_compilation']=compilation
+        result['configuration_files'].append(compilation['axes_input']['path'])
+    return result
