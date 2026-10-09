@@ -103,6 +103,29 @@ class EvaluationLabelTests(unittest.TestCase):
             bad = {**descriptor, 'file_digest': file_digest(path)}
             with self.assertRaises(ValueError): load_stock_evaluation_label_inputs(bad)
 
+    def test_publication_validates_raw_parts_once_and_keeps_epoch_guard(self):
+        from axiom_research import stock_evaluation_labels as owner
+        from axiom_research.stock_artifacts import _read
+        import os
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); spec, scope, source = self.inputs(root)
+            with patch.object(owner,'_parts',wraps=owner._parts) as parts:
+                descriptor = self.build(root,spec,scope,source)
+            self.assertEqual(parts.call_count,1)
+            self.assertEqual(load_stock_evaluation_label_inputs(descriptor)['label_ref'],descriptor['label_ref'])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); spec, scope, source = self.inputs(root); real_link = os.link
+            def changed_after_link(stage,destination):
+                real_link(stage,destination)
+                if Path(stage).name!='manifest.json': return
+                manifest = _read(stage)
+                header = _read(manifest['raw_parts'][0]['path'])
+                buffer = Path(header['buffers']['values']['path'])
+                buffer.write_bytes(b'X'*buffer.stat().st_size)
+            with patch('os.link',side_effect=changed_after_link):
+                with self.assertRaisesRegex(ValueError,'changed'):
+                    self.build(root,spec,scope,source)
+
 
 if __name__ == '__main__':
     unittest.main()

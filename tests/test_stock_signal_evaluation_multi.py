@@ -3,8 +3,9 @@
 Fixture setup saves two fake-backend folds once. Every evaluation reuse below
 forbids Feature, normalization, Data selection, fit/predict and accounts.
 """
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 import sys
@@ -19,7 +20,7 @@ from axiom_research import (prepare_stock_ml_batch_inputs, load_stock_ml_batch_i
 from axiom_research.stock_artifacts import _read, file_digest, digest
 from axiom_research.stock_signal_evaluation_projection import _load_inputs, _shard
 from axiom_research.stock_batch import _data
-from axiom_research.stock_compact_store import _size
+from axiom_research.stock_compact_store import _size, OwnedStore
 from test_stock_column_asof import ColumnSource
 import test_stock_compact_v3 as fixture_sources
 from test_stock_matrix_prepare import Query
@@ -189,7 +190,7 @@ class MultiOwnerTests(unittest.TestCase):
             for state in states.values(): self.assertLess(state.store.shared_bytes+state.store.resident_bytes,total)
             with patch('axiom_research.stock_matrix_folds.admit_stock_signal_evaluation_fold',
                 side_effect=AssertionError('joint budget admitted a fold')):
-                with self.assertRaisesRegex(ValueError,'byte budget'):
+                with self.assertRaisesRegex(ValueError,'(?:byte|accounting workspace) budget'):
                     self.save(owners, limits={'maximum_matrix_bytes':max(1,total-1)})
             for ref,state in states.items():
                 self.assertEqual((state._fixed_shared_bytes,state._fixed_shared_source_bytes,state.store.limits),baselines[ref])
@@ -205,6 +206,110 @@ class MultiOwnerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 save_stock_signal_evaluation_inputs(self.signals, raw_label_input=self.labels[5], scope=scope,
                     destination=self.root/'wrong-calendar',owner_batches=owners,prediction_owner_refs=self.bindings)
+
+    def test_audit_first_root_respects_each_budget_before_decode(self):
+        from axiom_research.stock_signal_evaluation_multi import _audit_multi_input
+        with ExitStack() as stack:
+            saved = self.save(self.owners(stack))
+        for field in ('maximum_matrix_bytes','maximum_source_bytes','maximum_parent_bytes'):
+            tiny = replace(saved, metadata={'limits':{**saved.metadata['limits'],field:1}})
+            with self.subTest(field=field), patch('axiom_research.stock_compact_store.json.loads',
+                side_effect=AssertionError('root decoded before budget rejection')) as decode:
+                with self.assertRaisesRegex(ValueError,'byte budget'):
+                    _audit_multi_input(tiny)
+                decode.assert_not_called()
+
+    def test_audit_next_owner_uses_remaining_live_source_allowance(self):
+        from axiom_research.stock_signal_evaluation_multi import _audit_multi_input, _live
+        from axiom_research.stock_signal_evaluation_projection import _root_id
+        from axiom_research.stock_artifacts import write_json
+        import json
+        with ExitStack() as stack:
+            saved = self.save(self.owners(stack))
+        with ExitStack() as stack:
+            fresh = self.owners(stack)
+            sources = [_live({r:_data(o)['matrix_state']})[1] for r,o in fresh.items()]
+        root = _read(saved.uri); budget = {**saved.metadata['limits'],
+            'maximum_source_bytes':Path(saved.uri).stat().st_size+max(sources)+1024}
+        root['admission_receipt']['limits'] = budget
+        root['admission_receipt']['receipt_ref'] = digest({k:v for k,v in
+            root['admission_receipt'].items() if k!='receipt_ref'})
+        root['input_id'] = _root_id(root)
+        path = self.root/'joint-audit-limited.json'; write_json(path,root)
+        limited = replace(saved, uri=str(path),artifact_id=root['input_id'],content_digest=file_digest(path),
+            metadata={'limits':budget})
+        actual_loader = load_stock_ml_batch_inputs; actual_decode = json.loads; calls = []
+        def load(manifest, **kwargs):
+            calls.append(kwargs['limits'])
+            return actual_loader(manifest,**kwargs)
+        def decode(*args,**kwargs):
+            if len(calls)>=2: raise AssertionError('second owner decoded after joint source allowance exhausted')
+            return actual_decode(*args,**kwargs)
+        with patch('axiom_research.stock_batch.load_stock_ml_batch_inputs',side_effect=load), \
+            patch('axiom_research.stock_compact_store.json.loads',side_effect=decode):
+            with self.assertRaisesRegex(ValueError,'source byte budget'):
+                _audit_multi_input(limited)
+        self.assertEqual(len(calls),2)
+        self.assertLess(calls[0]['maximum_matrix_bytes'],budget['maximum_matrix_bytes'])
+        self.assertLess(calls[1]['maximum_matrix_bytes'],calls[0]['maximum_matrix_bytes'])
+        self.assertLess(calls[1]['maximum_source_bytes'],calls[0]['maximum_source_bytes'])
+
+    def test_piece_charges_are_incremental_and_owner_operation_is_shared(self):
+        from axiom_research import stock_signal_evaluation_multi as multi
+        from axiom_research import stock_signal_evaluation_compact as compact
+        # Repeated aliases stress accounting only, not model diversity. The
+        # unchanged two model identities must still reject at final selection.
+        signals = {name+'-'+str(i):descriptor for i in range(8) for name,descriptor in self.signals.items()}
+        operations = {}; indexes = {}; fixed_graph_visits = 0; piece_count = 0
+        original_size = multi._size; original_operation = OwnedStore.operation
+        original_admit = compact._admit_compact
+        with ExitStack() as stack:
+            owners = self.owners(stack); ids = {id(_data(o)['matrix_state'].store) for o in owners.values()}
+            @contextmanager
+            def operation(store):
+                if id(store) in ids and store._operation_depth==0:
+                    operations[id(store)] = operations.get(id(store),0)+1
+                with original_operation(store): yield store
+            def measure(value,**kwargs):
+                nonlocal fixed_graph_visits
+                if type(value) is list and any(type(v) is dict and
+                    {'projected','label_leaf_bindings','scope'}<=set(v) for v in value):
+                    fixed_graph_visits+=1
+                return original_size(value,**kwargs)
+            def admit(*args,**kwargs):
+                nonlocal piece_count
+                piece_count+=1
+                batch=args[3]; key=batch.identity
+                indexes.setdefault(key,set()).add(id(kwargs['_fold_index']))
+                self.assertTrue(kwargs['_defer_source_checks'])
+                return original_admit(*args,**kwargs)
+            with patch.object(OwnedStore,'operation',new=operation),patch.object(multi,'_size',side_effect=measure), \
+                patch.object(compact,'_admit_compact',side_effect=admit), readonly_execution(allow_statistics=True):
+                from axiom_research.stock_signal_evaluation_inputs import _scope
+                with self.assertRaisesRegex(ValueError,'duplicate comparison Signal identity'):
+                    multi._admit_multi(signals,self.labels[5],_scope(self.scope),owners,self.bindings,
+                        multi.owner_limits(None))
+            self.assertEqual(piece_count,len(signals))
+            self.assertEqual(fixed_graph_visits,1)
+            self.assertEqual(operations,{i:1 for i in ids})
+            self.assertTrue(all(len(values)==1 for values in indexes.values()))
+
+    def test_source_mutation_after_deferred_piece_cannot_publish(self):
+        from axiom_research import stock_signal_evaluation_compact as compact
+        path = self.paths['h3']/'booster.txt'; original = path.read_bytes()
+        original_admit = compact._admit_compact; changed = False
+        def admit(*args,**kwargs):
+            nonlocal changed
+            result = original_admit(*args,**kwargs)
+            if not changed: path.write_bytes(original+b'changed'); changed=True
+            return result
+        try:
+            with ExitStack() as stack, patch.object(compact,'_admit_compact',side_effect=admit):
+                owners = self.owners(stack)
+                with self.assertRaisesRegex(ValueError,'changed'):
+                    self.save(owners,destination=self.root/'changed-after-piece')
+            self.assertFalse((self.root/'changed-after-piece').exists())
+        finally: path.write_bytes(original)
 
     def test_frozen_shard_and_original_label_tamper_reject(self):
         with ExitStack() as stack:

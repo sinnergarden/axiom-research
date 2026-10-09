@@ -140,7 +140,7 @@ def _join(targets, inputs, fold_spec, common, scope, records, state, wanted):
 
 
 def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_lease=None, _manifest=None,
-    _signals_only=False, _budget_check=None):
+    _signals_only=False, _budget_check=None, _fold_index=None, _defer_source_checks=False):
     from . import stock_matrix_folds as owner
     from .stock_signal_evaluation_projection import _check_marks
     hook = getattr(owner, 'admit_stock_signal_evaluation_fold', None)
@@ -156,11 +156,20 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
     manifest = batch.to_dict() if _manifest is None else _manifest
     common = None; state = _target_state()
     wanted = (set(scope['universe']), set(scope['sessions']))
-    folds_by_input = {}
-    for item in manifest['folds']:
-        ref = item['input_manifest']['input_ref']
-        _require(ref not in folds_by_input, 'duplicate compact batch fold input')
-        folds_by_input[ref] = item
+    if _defer_source_checks:
+        from .stock_batch import _data
+        from .stock_compact_store import _view_data
+        actual = _data(batch)['matrix_state']
+        _require(actual.store._operation_depth > 0 and
+            _view_data(actual.feature, check=False)['store']._operation_depth > 0,
+            'source deferral requires the active original owner operation')
+    folds_by_input = _fold_index
+    if folds_by_input is None:
+        folds_by_input = {}
+        for item in manifest['folds']:
+            ref = item['input_manifest']['input_ref']
+            _require(ref not in folds_by_input, 'duplicate compact batch fold input')
+            folds_by_input[ref] = item
     projected, metadata, refs, closures, records, marks = {}, {}, {}, {}, {}, {}
     for name, descriptors in signal_inputs.items():
         descriptors = descriptors if type(descriptors) is list else [descriptors]
@@ -177,7 +186,7 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
                     mark = tuple(lease.source_fingerprints[path]); p = Path(path)
                     _require(p not in marks or marks[p] == mark, 'compact source changed between leases')
                     records[path] = ref; marks[p] = mark; lease_marks[p] = mark
-                _check_marks(lease_marks)
+                if not _defer_source_checks: _check_marks(lease_marks)
                 documents = lease.documents; fold = documents['fold.json']; model = documents['model.json']
                 features, signal = documents['feature-slice.json'], documents['predictions.json']
                 _require(set(documents) == {'manifest.json', 'fold.json', 'model.json', 'feature-slice.json', 'predictions.json'},
@@ -244,11 +253,11 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
                 refs[name].append(signal['signal_run_ref'])
                 closures[name].append({'signal_input': deepcopy(descriptor), 'model_ref': model['model_ref'],
                     'feature_ref': features['feature_ref'], 'source_paths': sorted(pins)})
-                _check_marks(lease_marks)
+                if not _defer_source_checks: _check_marks(lease_marks)
             del lease, documents, fold, model, features, signal, indexed, feature_index, own_members, own_features, row
         projected[name] = {'rows': rows, 'members': members, 'prediction_features': prediction_features}
     if _signals_only:
-        batch._check_sources(); _check_marks(marks)
+        if not _defer_source_checks: batch._check_sources(); _check_marks(marks)
         return {'projected': projected, 'metadata': metadata, 'refs': refs, 'closures': closures,
             'common': common}, records, marks, manifest
     targets = _finish_targets(state, scope)

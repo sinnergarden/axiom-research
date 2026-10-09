@@ -63,30 +63,32 @@ def _parts(manifest, store):
     """Admit original typed targets and all source controls, one part at a time."""
     from .stock_compact_batch import read_target
     from .stock_signal_evaluation_compact import _header
-    from .stock_column_inputs import validate_column_raw_binding
     definition = manifest['definition']; scope = definition['scope']
     common = {k: deepcopy(definition[k]) for k in ('snapshot', 'pit_policy')}
     common.update(calendar=scope['calendar'], universe=scope['universe'])
     common['target_spec'] = resolve_stock_label_spec(definition['label_spec'])
     seen = []
-    for descriptor in manifest['raw_parts']:
-        header, rows = read_target(store, descriptor)
-        source = {'descriptor': descriptor, 'header': header}
-        spec = _header(source, scope, common, store.hashes)
-        raw = header['definition']
-        require(header['contract_version'] == 'stock_compact_raw_v2' and
-            raw['label_definition_ref'] == definition['label_spec_ref'] and
-            raw['horizon_sessions'] == common['target_spec']['horizon_sessions'] and
-            raw['cutoff'] == scope['evaluation_cutoff'], 'independent Label target definition mismatch')
-        validate_column_raw_binding(raw, common, scope['evaluation_cutoff'])
-        days = raw['sessions']
-        require(not seen or seen[-1] < days[0], 'independent Label parts overlap or are unordered')
-        seen.extend(days)
-        yield descriptor, header, rows, spec
-        rows = header = source = None
-        store.release_payloads()
-    require(seen == scope['sessions'], 'independent Label grid coverage mismatch')
-    store.check()
+    with store.operation():
+        # Retain the already-read manifest's original epoch across this scope.
+        for path, value in store.json.items():
+            if value is manifest: store.check_path(path)
+        for descriptor in manifest['raw_parts']:
+            header, rows = read_target(store, descriptor)
+            source = {'descriptor': descriptor, 'header': header}
+            spec = _header(source, scope, common, store.hashes)
+            raw = header['definition']
+            require(header['contract_version'] == 'stock_compact_raw_v2' and
+                raw['label_definition_ref'] == definition['label_spec_ref'] and
+                raw['horizon_sessions'] == common['target_spec']['horizon_sessions'] and
+                raw['cutoff'] == scope['evaluation_cutoff'], 'independent Label target definition mismatch')
+            days = raw['sessions']
+            require(not seen or seen[-1] < days[0], 'independent Label parts overlap or are unordered')
+            seen.extend(days)
+            yield descriptor, header, rows, spec
+            rows = header = source = None
+            store.release_payloads()
+        require(seen == scope['sessions'], 'independent Label grid coverage mismatch')
+        store.check()
 
 
 def load_stock_evaluation_label_inputs(descriptor, *, limits=None):
@@ -172,13 +174,27 @@ def build_stock_evaluation_label_inputs(data, *, snapshot, pit_policy, label_spe
         with TemporaryDirectory(prefix='.evaluation-label-', dir=root) as temporary:
             stage = Path(temporary)/'manifest.json'; write_json(stage, manifest)
             descriptor = {'path': str(stage), 'file_digest': file_digest(stage), 'label_ref': manifest['label_ref']}
-            load_stock_evaluation_label_inputs(descriptor, limits=budget)
-            try:
-                os.link(stage, path)
-            except FileExistsError:
-                require(file_digest(path) == descriptor['file_digest'], 'conflicting evaluation Label publication')
-        final = {'path': str(path), 'file_digest': descriptor['file_digest'], 'label_ref': manifest['label_ref']}
-        # Retain the verified byte digest across publication; a changed writer
-        # output must reject rather than become the descriptor's new baseline.
-        load_stock_evaluation_label_inputs(final, limits=budget)
-        return final
+            # Validate every Raw part once. Keep its original file epochs
+            # through linking; publication needs no second hash/decode pass.
+            with OwnedStore(budget, shared_bytes=_size([spec, definition, raw_parts, manifest])) as verified, verified.operation():
+                checked = _read_manifest(descriptor, verified)
+                for _ in _parts(checked, verified): pass
+                linked = False
+                try:
+                    os.link(stage, path)
+                    linked = True
+                except FileExistsError:
+                    pass
+                # A collision or mutation must match the bytes actually
+                # validated above, never establish a replacement baseline.
+                verified.read({'path':str(path), 'file_digest':descriptor['file_digest']}, parent=True)
+                if linked:
+                    from .stock_fold_inputs import file_fingerprint
+                    before = verified.marks[str(stage)]; after = file_fingerprint(stage)
+                    require(after[:4] == before[:4] and after == verified.marks[str(path)],
+                        'evaluation Label publication changed the validated file')
+                    # Our hard link changes ctime on the same inode. Only this
+                    # proven manifest transition advances its epoch; all Raw
+                    # ancestors retain their original immutable fingerprints.
+                    verified.marks[str(stage)] = after
+        return {'path':str(path), 'file_digest':descriptor['file_digest'], 'label_ref':manifest['label_ref']}

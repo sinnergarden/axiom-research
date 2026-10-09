@@ -19,7 +19,7 @@ RECEIPT_FIELDS = {'contract_version', 'signal_inputs', 'raw_label_input', 'scope
     'owner_manifests', 'prediction_owner_refs', 'label_manifest', 'limits'}
 
 
-def _owners(signals, owners, bindings, budget):
+def _owners(signals, owners, bindings, budget, retained=0, source_retained=0):
     from .stock_batch import _data
     require(type(owners) is dict and bool(owners) and type(bindings) is dict,
         'explicit owner_batches and prediction_owner_refs required')
@@ -33,9 +33,10 @@ def _owners(signals, owners, bindings, budget):
         require(id(state) not in {id(s) for s in states.values()}, 'duplicate owner instance')
         states[ref] = state
     resident, source = _live(states)
-    with OwnedStore(budget, shared_bytes=resident, shared_source_bytes=source) as store:
-        store.reserve(_size([s.batch for s in states.values()])*2+65536)
-        require(source <= budget['maximum_source_bytes'], 'joint source byte budget exceeded')
+    with OwnedStore(budget, shared_bytes=resident+retained, shared_source_bytes=source+source_retained) as store:
+        store.reserve(_size([s.batch for s in states.values()], maximum=store.maximum_matrix_bytes,
+            retained=store.shared_bytes)*2+65536)
+        require(source+source_retained <= budget['maximum_source_bytes'], 'joint source byte budget exceeded')
         manifests = {ref: batch.to_dict() for ref, batch in owners.items()}
     consumed = {}
     for name, items in signals.items():
@@ -67,13 +68,13 @@ def _live(states):
 
 
 @contextmanager
-def _joint_owner(state, states, retained, budget):
+def _joint_owner(state, states, retained, budget, source_retained=0):
     resident, source = _live(states)
     own_resident = state.store.shared_bytes+state.store.resident_bytes+state.store.lease_bytes
     own_source = state.store.shared_source_bytes+state.store.metrics['source_bytes']
-    retained_charge = _size(retained)
-    extra = max(0, resident-own_resident)+retained_charge
-    source_extra = max(0, source-own_source)
+    require(type(retained) is int and retained >= 0, 'incremental retained byte charge required')
+    extra = max(0, resident-own_resident)+retained
+    source_extra = max(0, source-own_source)+source_retained
     old_limits = state.store.limits
     state.store.limits = {k: min(old_limits[k], budget[k]) for k in budget}
     state._fixed_shared_bytes += extra; state._fixed_shared_source_bytes += source_extra
@@ -84,10 +85,12 @@ def _joint_owner(state, states, retained, budget):
             state.store.limits['maximum_source_bytes'], 'joint source byte budget exceeded')
         def check(graph, workspace):
             nonlocal local_charge
-            charge = max(0, _size([retained,graph], maximum=budget['maximum_matrix_bytes'])-retained_charge)
+            charge = _size(graph, maximum=budget['maximum_matrix_bytes'],
+                retained=state.store.shared_bytes+state.store.resident_bytes+state.store.lease_bytes)
             state._fixed_shared_bytes += charge-local_charge; local_charge = charge
             state._sync_shared()
-            state.store.reserve(_size(workspace, maximum=budget['maximum_matrix_bytes'])*3+65536)
+            state.store.reserve(_size(workspace, maximum=budget['maximum_matrix_bytes'],
+                retained=state.store.shared_bytes+state.store.resident_bytes+state.store.lease_bytes)*3+65536)
         yield check
     finally:
         state._fixed_shared_bytes -= extra+local_charge
@@ -98,55 +101,89 @@ def _joint_owner(state, states, retained, budget):
 def _merge_pins(records, marks, new_records, new_marks):
     for path, ref in new_records.items():
         require(path not in records or records[path] == ref, 'conflicting original source pin')
-        records[path] = ref
+        if path not in records: records[path] = ref
     for path, mark in new_marks.items():
         path = Path(path)
         require(path not in marks or marks[path] == tuple(mark), 'original source changed between owners')
-        marks[path] = tuple(mark)
+        if path not in marks: marks[path] = tuple(mark)
 
 
-def _admit_multi(signals, raw_input, scope, owners, bindings, budget):
+def _admit_multi(signals, raw_input, scope, owners, bindings, budget, *,
+    _retained_bytes=0, _retained_source_bytes=0, _usage=None):
     from .stock_signal_evaluation_compact import _admit_compact, _binding
     from .stock_evaluation_labels import _read_manifest, _parts
     from .stock_signal_evaluation_projection import _check_marks, _shard
-    manifests, states = _owners(signals, owners, bindings, budget)
+    manifests, states = _owners(signals, owners, bindings, budget, _retained_bytes, _retained_source_bytes)
     admitted = {'projected': {}, 'metadata': {}, 'refs': {}, 'closures': {},
         'labels': {}, 'label_leaf_bindings': {}, 'scope': scope}
     records, marks = {}, {}; common = None
-    for name, items in signals.items():
-        items = items if type(items) is list else [items]
-        projected = {'rows': {}, 'members': {}, 'prediction_features': {}}
-        admitted['projected'][name] = projected
-        for key in ('metadata', 'refs', 'closures'): admitted[key][name] = []
-        previous = None
-        for item in items:
-            owner_ref = bindings[item['signal_run_ref']]; state = states[owner_ref]
-            with _joint_owner(state, states, [admitted, records, marks, manifests], budget) as check:
-                part, pins, epochs, _ = _admit_compact({name: item}, None, scope,
-                    owners[owner_ref], _signals_only=True, _manifest=manifests[owner_ref], _budget_check=check)
-                identity = part['common']
-                require(common is None or (common['calendar'] == identity['calendar'] and
-                    set(common['universe']) == set(identity['universe']) and
-                    all(common[k] == identity[k] for k in ('snapshot', 'pit_policy'))),
-                    'comparison original owner calendar/universe/Snapshot/PIT mismatch')
-                common = identity
-                require(common['calendar'] == scope['calendar'] and set(common['universe']) == set(scope['universe']),
-                    'multi-owner requires the complete frozen universe/calendar')
-                days = part['metadata'][name][0]['prediction_sessions']
-                require(previous is None or previous < days[0], 'weekly predictions must be ordered and disjoint')
-                previous = days[-1]
-                own = part['projected'][name]
-                require(not projected['rows'].keys() & own['rows'].keys(), 'duplicate multi-owner prediction key')
-                check([part, projected], [own])
-                for key in projected: projected[key].update(own[key])
-                for key in ('metadata', 'refs', 'closures'): admitted[key][name].extend(part[key][name])
-                _merge_pins(records, marks, pins, epochs)
-            part = own = None
-        wanted = {(s, d) for d in scope['sessions'] for s in scope['universe']}
-        require(set(projected['rows']) == wanted, 'each signal must cover the complete declared grid')
+    # Measure the fixed manifest/axis graph once. Fold lookup wrappers and each
+    # appended piece are charged separately; never revisit the accumulated rows.
+    retained = _retained_bytes+_size([admitted, records, marks, manifests],
+        maximum=budget['maximum_matrix_bytes'], retained=_retained_bytes+_live(states)[0])
+    indexes = {}
+    with ExitStack() as operation:
+        for ref, state in states.items():
+            operation.enter_context(state.operation())
+            with _joint_owner(state, states, retained, budget, _retained_source_bytes):
+                state.store.reserve(len(manifests[ref]['folds'])*512+4096)
+                index = {}
+                for fold in manifests[ref]['folds']:
+                    key = fold['input_manifest']['input_ref']
+                    require(key not in index, 'duplicate compact batch fold input')
+                    index[key] = fold
+                # Values and keys are already owned by the shared manifest.
+                import sys
+                retained += sys.getsizeof(index)+4096
+                indexes[ref] = index
+        # One shared expected grid, reserved before tuple/set construction.
+        with _joint_owner(state, states, retained, budget, _retained_source_bytes):
+            grid_charge = len(scope['sessions'])*len(scope['universe'])*256+65536
+            state.store.reserve(grid_charge)
+            wanted = {(s, d) for d in scope['sessions'] for s in scope['universe']}
+            retained += grid_charge
+        for name, items in signals.items():
+            items = items if type(items) is list else [items]
+            projected = {'rows': {}, 'members': {}, 'prediction_features': {}}
+            admitted['projected'][name] = projected
+            for key in ('metadata', 'refs', 'closures'): admitted[key][name] = []
+            previous = None
+            for item in items:
+                owner_ref = bindings[item['signal_run_ref']]; state = states[owner_ref]
+                with _joint_owner(state, states, retained, budget, _retained_source_bytes) as check:
+                    part, pins, epochs, _ = _admit_compact({name: item}, None, scope,
+                        owners[owner_ref], _signals_only=True, _manifest=manifests[owner_ref], _budget_check=check,
+                        _fold_index=indexes[owner_ref], _defer_source_checks=True)
+                    identity = part['common']
+                    require(common is None or (common['calendar'] == identity['calendar'] and
+                        set(common['universe']) == set(identity['universe']) and
+                        all(common[k] == identity[k] for k in ('snapshot', 'pit_policy'))),
+                        'comparison original owner calendar/universe/Snapshot/PIT mismatch')
+                    common = identity
+                    require(common['calendar'] == scope['calendar'] and set(common['universe']) == set(scope['universe']),
+                        'multi-owner requires the complete frozen universe/calendar')
+                    days = part['metadata'][name][0]['prediction_sessions']
+                    require(previous is None or previous < days[0], 'weekly predictions must be ordered and disjoint')
+                    previous = days[-1]
+                    own = part['projected'][name]
+                    require(not projected['rows'].keys() & own['rows'].keys(), 'duplicate multi-owner prediction key')
+                    new_records = {p:r for p,r in pins.items() if p not in records}
+                    new_marks = {p:m for p,m in epochs.items() if p not in marks}
+                    increment = _size([own, part['metadata'][name], part['refs'][name],
+                        part['closures'][name], new_records, new_marks], maximum=budget['maximum_matrix_bytes'],
+                        retained=state.store.shared_bytes+state.store.resident_bytes+state.store.lease_bytes)
+                    # Existing dictionaries can resize while appending. A bounded
+                    # two-copy allowance protects that temporary transition.
+                    state._sync_shared(); state.store.reserve(increment*2+65536)
+                    retained += increment*2+65536
+                    for key in projected: projected[key].update(own[key])
+                    for key in ('metadata', 'refs', 'closures'): admitted[key][name].extend(part[key][name])
+                    _merge_pins(records, marks, pins, epochs)
+                part = own = None
+            require(projected['rows'].keys() == wanted, 'each signal must cover the complete declared grid')
     resident, source_bytes = _live(states)
-    with OwnedStore(budget, shared_bytes=resident+_size([admitted, records, marks, manifests]),
-        shared_source_bytes=source_bytes) as store:
+    with OwnedStore(budget, shared_bytes=resident+retained,
+        shared_source_bytes=source_bytes+_retained_source_bytes) as store:
         store.reserve(0)
         label_manifest = _read_manifest(raw_input, store); definition = label_manifest['definition']
         require(definition['scope'] == scope and
@@ -161,7 +198,8 @@ def _admit_multi(signals, raw_input, scope, owners, bindings, budget):
             require(raw['label_spec'] is None or raw['label_spec'] == spec, 'independent Label definitions conflict')
             raw['label_spec'] = spec
             # Reserve detached row/source graphs before materializing them.
-            charge = len(rows)*2048+_size(header)*2+4096
+            charge = len(rows)*2048+_size(header, maximum=store.maximum_matrix_bytes,
+                retained=store.shared_bytes+store.resident_bytes+store.lease_bytes)*2+4096
             store.reserve(charge); store.shared_bytes += charge
             raw['sources'][header['target_ref']] = {'descriptor': deepcopy(descriptor), 'header': deepcopy(header)}
             for row in rows:
@@ -172,7 +210,13 @@ def _admit_multi(signals, raw_input, scope, owners, bindings, budget):
                     'independent Label original source mismatch')
                 admitted['labels'][key] = row
                 admitted['label_leaf_bindings'][key] = _binding(spec, common['snapshot'], row)
-        _merge_pins(records, marks, store.hashes, store.marks)
+        new_records = {p:r for p,r in store.hashes.items() if p not in records}
+        new_marks = {Path(p):m for p,m in store.marks.items() if Path(p) not in marks}
+        store.reserve(_size([new_records, new_marks], maximum=store.maximum_matrix_bytes,
+            retained=store.shared_bytes+store.resident_bytes+store.lease_bytes)*2+65536)
+        _merge_pins(records, marks, new_records, new_marks)
+        if _usage is not None:
+            _usage['label_source_bytes'] = store.metrics['source_bytes']
         store.reserve(len(wanted)*(1024+1024*len(signals))+65536)
         raw['label_shard_refs'] = {d: _label_day_ref(_shard(admitted, scope, d)) for d in scope['sessions']}
         # Shared selector builds precisely the natural and common masks.
@@ -357,25 +401,69 @@ def _verify_multi_root(root, ref, scope):
 
 
 def _audit_multi_input(ref):
-    from .stock_batch import load_stock_ml_batch_inputs
-    from .stock_signal_evaluation_projection import _read_checked, _load_inputs, _shard, _check_marks
-    marks = {}; root, _ = _read_checked(ref.uri, ref.content_digest)
-    _load_inputs(ref, root['scope'], marks=marks, _validate_only=True)
-    receipt = root['admission_receipt']
-    with ExitStack() as stack:
-        owners = {r: stack.enter_context(load_stock_ml_batch_inputs(m, residency='sequential', limits=receipt['limits']))
-            for r, m in receipt['owner_manifests'].items()}
+    from .stock_batch import load_stock_ml_batch_inputs, _data
+    from .stock_signal_evaluation_projection import _read_checked, _shard, _check_marks
+    require(type(ref.metadata.get('limits')) is dict,
+        'multi-owner frozen budget required before decoding')
+    budget = owner_limits(ref.metadata['limits']); marks = {}
+    with OwnedStore(budget) as ingress, ExitStack() as stack:
+        # The first bytes and JSON workspace use the transport budget. Keep
+        # this one root in the ordinary store cache throughout the audit.
+        root = ingress.read_json({'path':str(Path(ref.uri).resolve()), 'file_digest':ref.content_digest})
+        ingress.reserve(_size(root, maximum=budget['maximum_matrix_bytes'],
+            retained=ingress.resident_bytes)*4+65536)
+        _verify_multi_root(root, ref, root['scope'])
+        receipt = root['admission_receipt']; owners, states = {}, {}
+        for owner_ref, manifest in receipt['owner_manifests'].items():
+            resident, source = _live(states)
+            ingress.shared_bytes = resident; ingress.shared_source_bytes = source
+            # The public loader copies the supplied control graph before it
+            # opens its store; reserve that copy before calling it.
+            ingress.reserve(_size(manifest, maximum=budget['maximum_matrix_bytes'],
+                retained=ingress.resident_bytes+resident)*2+65536)
+            remaining = {**budget,
+                'maximum_matrix_bytes':budget['maximum_matrix_bytes']-ingress.resident_bytes-resident,
+                'maximum_source_bytes':budget['maximum_source_bytes']-ingress.metrics['source_bytes']-source}
+            require(all(v > 0 for v in remaining.values()), 'joint audit byte budget exceeded')
+            owner = stack.enter_context(load_stock_ml_batch_inputs(manifest, residency='sequential', limits=remaining))
+            state = _data(owner)['matrix_state']; states[owner_ref] = state; owners[owner_ref] = owner
+            # Remaining is an ingress allowance. Subsequent leases enforce the
+            # full joint budget with the other live owners/root as shared bytes.
+            state.store.limits = dict(budget)
+            _view_data(state.feature, check=False)['store'].limits = dict(budget)
+            resident, source = _live(states)
+            ingress.shared_bytes = resident; ingress.shared_source_bytes = source
+            ingress.reserve(0)
+            require(source+ingress.metrics['source_bytes'] <= budget['maximum_source_bytes'],
+                'joint audit source byte budget exceeded')
+        usage = {}
         admitted, records, epochs, manifests, labels = _admit_multi(
-            {n: receipt['signal_inputs'][n] for n in root['signal_order']}, receipt['raw_label_input'],
-            root['scope'], owners, receipt['prediction_owner_refs'], receipt['limits'])
+            {n:receipt['signal_inputs'][n] for n in root['signal_order']}, receipt['raw_label_input'],
+            root['scope'], owners, receipt['prediction_owner_refs'], budget,
+            _retained_bytes=ingress.resident_bytes, _retained_source_bytes=ingress.metrics['source_bytes'], _usage=usage)
+        # A single completed-admission measurement bounds comparison workspace;
+        # no historical graph is measured once per prediction item.
+        graph = _size([admitted, records, epochs, manifests, labels], maximum=budget['maximum_matrix_bytes'],
+            retained=ingress.resident_bytes+_live(states)[0])
+        ingress.shared_bytes = _live(states)[0]+graph
+        ingress.shared_source_bytes = _live(states)[1]+usage['label_source_bytes']
+        ingress.reserve(graph+65536)
         expected = _root(receipt['signal_inputs'], receipt['raw_label_input'], root['scope'], admitted, records,
-            manifests, receipt['prediction_owner_refs'], labels, receipt['limits'])
+            manifests, receipt['prediction_owner_refs'], labels, budget)
+        ingress.shared_bytes += _size(expected, maximum=ingress.maximum_matrix_bytes,
+            retained=ingress.shared_bytes+ingress.resident_bytes+ingress.lease_bytes)
+        ingress.reserve(0)
         for key in ('signal_refs', 'signal_metadata', 'raw_metadata', 'clock_floor'):
             require(expected[key] == root[key], 'audit original multi-owner projection mismatch')
         for key in ('source_records', 'source_closure', 'owner_manifests', 'label_manifest'):
             require(expected['admission_receipt'][key] == receipt[key], 'audit original owner closure mismatch')
         for day, descriptor in root['shards'].items():
-            saved, _ = _read_checked(Path(ref.uri).parent/descriptor['file'], descriptor['file_digest'], marks=marks)
+            retained = ingress.shared_bytes
+            saved, _ = _read_checked(Path(ref.uri).parent/descriptor['file'], descriptor['file_digest'],
+                marks=marks, _budget=ingress)
+            ingress.reserve(len(root['scope']['universe'])*(4096+4096*len(root['signal_order']))+65536)
             require(saved == _shard(admitted, root['scope'], day), 'audit original multi-owner date mismatch')
+            saved = None; ingress.shared_bytes = retained
         _check_marks(epochs)
-    _check_marks(marks); return ref
+        ingress.validate_boundary()
+    return ref
