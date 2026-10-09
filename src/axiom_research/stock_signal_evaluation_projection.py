@@ -21,17 +21,19 @@ MATRIX_INPUT_VERSION = 'stock_signal_evaluation_inputs_v2'
 COMPACT_INPUT_VERSION = 'stock_signal_evaluation_inputs_v3'
 COLUMN_INPUT_VERSION = 'stock_signal_evaluation_inputs_v4'
 DERIVED_INPUT_VERSION = 'stock_signal_evaluation_inputs_v5'
+MULTI_INPUT_VERSION = 'stock_signal_evaluation_inputs_v6'
 
 
 def _compact_input(version):
-    return version in (COMPACT_INPUT_VERSION,COLUMN_INPUT_VERSION)
+    return version in (COMPACT_INPUT_VERSION,COLUMN_INPUT_VERSION,MULTI_INPUT_VERSION)
 
 
 def _matrix_input(version):
-    return version in (MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION,COLUMN_INPUT_VERSION)
+    return version in (MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION,COLUMN_INPUT_VERSION,MULTI_INPUT_VERSION)
 
 
 def _report_version(version):
+    if version==MULTI_INPUT_VERSION:return 'stock_signal_evidence_v8'
     if version==DERIVED_INPUT_VERSION:return 'stock_signal_evidence_v7'
     if version==COLUMN_INPUT_VERSION:return 'stock_signal_evidence_v6'
     if _compact_input(version):
@@ -100,7 +102,7 @@ def _input_ref(value):
     _require(type(value) is ArtifactRef, 'frozen evaluation ArtifactRef required')
     validate(value)
     _require(value.artifact_type == 'StockSignalEvaluationInputs' and
-        value.artifact_contract_version in (INPUT_VERSION, MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION,COLUMN_INPUT_VERSION,DERIVED_INPUT_VERSION),
+        value.artifact_contract_version in (INPUT_VERSION, MATRIX_INPUT_VERSION, COMPACT_INPUT_VERSION,COLUMN_INPUT_VERSION,DERIVED_INPUT_VERSION,MULTI_INPUT_VERSION),
         'frozen evaluation input ref type/version mismatch')
     _require(Path(value.uri).is_absolute(), 'fixed absolute frozen input locator required')
     return value
@@ -239,10 +241,18 @@ def _shard(admission, scope, day):
     return {'contract_version': version, 'session': day, 'rows': rows}
 
 
-def save_stock_signal_evaluation_inputs(signal_inputs, *, raw_label_input=None, scope, destination, batch=None):
+def save_stock_signal_evaluation_inputs(signal_inputs, *, raw_label_input=None, scope, destination, batch=None,
+    owner_batches=None, prediction_owner_refs=None, limits=None):
     """Fully admit original sources, then atomically freeze the small projection."""
     scope = _scope(scope)
     _require(type(signal_inputs) is dict and bool(signal_inputs), 'ordered Signal mapping required')
+    if owner_batches is not None or prediction_owner_refs is not None:
+        _require(batch is None and owner_batches is not None and prediction_owner_refs is not None and
+            raw_label_input is not None, 'multi-owner requires both mappings and an independent Label, without batch')
+        from .stock_signal_evaluation_multi import _save_multi_inputs
+        return _save_multi_inputs(signal_inputs, raw_label_input, scope, destination,
+            owner_batches, prediction_owner_refs, limits)
+    _require(limits is None, 'limits require explicit multi-owner mode')
     if batch is not None:
         from .stock_signal_evaluation_matrix import _save_matrix_inputs
         return _save_matrix_inputs(signal_inputs, raw_label_input, scope, destination, batch)
@@ -302,6 +312,9 @@ def save_stock_signal_evaluation_inputs(signal_inputs, *, raw_label_input=None, 
 
 
 def _verify_root(root, ref, scope):
+    if ref.artifact_contract_version==MULTI_INPUT_VERSION:
+        from .stock_signal_evaluation_multi import _verify_multi_root
+        return _verify_multi_root(root, ref, scope)
     if _matrix_input(ref.artifact_contract_version):
         from .stock_signal_evaluation_matrix import _verify_matrix_root
         return _verify_matrix_root(root, ref, scope)
@@ -373,6 +386,12 @@ def _load_inputs(input_ref, scope, *, marks=None, include_admission=False, _vali
     _admission_only=False,_budget=None):
     _require(not (_validate_only and include_admission), 'validation-only input has no row projection')
     ref = _input_ref(input_ref); scope = _scope(scope)
+    if ref.artifact_contract_version==MULTI_INPUT_VERSION and _budget is None:
+        from .stock_compact_store import OwnedStore, limits as owner_limits
+        _require(type(ref.metadata.get('limits')) is dict, 'multi-owner frozen budget required before decoding')
+        with OwnedStore(owner_limits(ref.metadata['limits'])) as budget:
+            return _load_inputs(ref,scope,marks=marks,include_admission=include_admission,
+                _validate_only=_validate_only,_admission_only=_admission_only,_budget=budget)
     if ref.artifact_contract_version==DERIVED_INPUT_VERSION:
         from .stock_signal_evaluation_derived import _load_joint_inputs
         return _load_joint_inputs(ref,scope,marks=marks,include_admission=include_admission,_validate_only=_validate_only)
@@ -411,7 +430,7 @@ def _load_inputs(input_ref, scope, *, marks=None, include_admission=False, _vali
             workspace=_size(shard,maximum=_budget.maximum_matrix_bytes,retained=_budget.shared_bytes)*2
             _budget.reserve(charge+workspace);_budget.shared_bytes+=charge
         _require(set(shard) == {'contract_version', 'session', 'rows'} and
-            shard['contract_version'] == ('stock_signal_evaluation_date_v4' if ref.artifact_contract_version==COLUMN_INPUT_VERSION else
+            shard['contract_version'] == ('stock_signal_evaluation_date_v4' if ref.artifact_contract_version in (COLUMN_INPUT_VERSION,MULTI_INPUT_VERSION) else
                 'stock_signal_evaluation_date_v3' if _compact_input(ref.artifact_contract_version) else
                 'stock_signal_evaluation_date_v2' if matrix else 'stock_signal_evaluation_date_v1') and
             shard['session'] == day and
@@ -442,6 +461,7 @@ def _load_inputs(input_ref, scope, *, marks=None, include_admission=False, _vali
                 _require(label['return'] is None and bool(label['invalid_reason']), 'frozen invalid Label null/reason mismatch')
             for name, prediction in row['predictions'].items():
                 if prediction is None:
+                    _require(ref.artifact_contract_version!=MULTI_INPUT_VERSION, 'multi-owner frozen prediction grid is incomplete')
                     continue
                 _require((prediction['security_id'], prediction['session']) == key and
                     type(prediction['valid']) is bool and type(prediction['member']) is bool and
@@ -498,12 +518,19 @@ def _load_inputs(input_ref, scope, *, marks=None, include_admission=False, _vali
     if _admission_only:
         _require(include_admission,'admission-only read requires the original projection')
         return ref,root,None,admission
-    result = (ref, root, _select_inputs(admission, scope))
+    if ref.artifact_contract_version==MULTI_INPUT_VERSION:
+        from .stock_signal_evaluation_derived import _select_joint_inputs
+        selected=_select_joint_inputs(admission,scope,_budget)
+    else:selected=_select_inputs(admission,scope)
+    result = (ref, root, selected)
     return (*result, admission) if include_admission else result
 
 
 def _audit_input(input_ref):
     ref = _input_ref(input_ref)
+    if ref.artifact_contract_version==MULTI_INPUT_VERSION:
+        from .stock_signal_evaluation_multi import _audit_multi_input
+        return _audit_multi_input(ref)
     if ref.artifact_contract_version==DERIVED_INPUT_VERSION:
         from .stock_signal_evaluation_derived import _audit_joint_input
         return _audit_joint_input(ref)
@@ -533,7 +560,7 @@ def _audit_input(input_ref):
     return ref
 
 
-def _implementation_v3(matrix=False, compact=False,derived=False):
+def _implementation_v3(matrix=False, compact=False,derived=False,multi=False):
     module = import_module('axiom_engine.core.signal_statistics')
     core = Path(module.__file__).parent
     names = ('stock_signal_evaluation.py', 'stock_signal_evaluation_inputs.py',
@@ -543,6 +570,7 @@ def _implementation_v3(matrix=False, compact=False,derived=False):
     if compact:
         names += ('stock_signal_evaluation_compact.py', 'stock_compact_controls.py', 'stock_matrix_storage.py')
     if derived:names += ('stock_signal_evaluation_derived.py',)
+    if multi:names += ('stock_signal_evaluation_multi.py','stock_evaluation_labels.py','stock_signal_evaluation_derived.py')
     return {'research': {name: file_digest(Path(__file__).parent/name) for name in names},
         'core': {name: file_digest(core/name) for name in ('signal_statistics.py', 'contracts.py')},
         'operator': 'axiom_engine.core.evaluate_signal_statistics'}
@@ -617,6 +645,11 @@ def _reports_v3(group, admitted, common, native):
             report['limitations'][-2:] = [
                 'Owner admitted compact saved bytes and query bindings; full Data replay uses the explicit compact owner audit.',
                 'Compact row bindings retain the price-view version and do not claim legacy endpoint proof.']
+        if version==MULTI_INPUT_VERSION:
+            report['validation_basis']='frozen_multi_owner_projection_v1'
+            report['limitations'][-2:]=[
+                'Each original owner admitted its saved model, Feature and training closure without execution.',
+                'All models pair with one independent frozen Label; original training targets remain in their owner manifests.']
         report['content_digest'] = digest(report)
         reports[name] = report
     return reports
@@ -686,7 +719,7 @@ def _evaluate_prepared(prepared, destination, marks):
     ref, root, admitted = prepared
     group = _group_definition(ref, root, admitted, _implementation_v3(
         _matrix_input(ref.artifact_contract_version), _compact_input(ref.artifact_contract_version),
-        ref.artifact_contract_version==DERIVED_INPUT_VERSION))
+        ref.artifact_contract_version==DERIVED_INPUT_VERSION, ref.artifact_contract_version==MULTI_INPUT_VERSION))
     destination = Path(destination).resolve(); target = destination/group['evaluation_key'][7:]
     if target.exists():
         return _load_group(target, prepared=prepared, marks=marks, expected_key=group['evaluation_key'], reused=True)
@@ -730,10 +763,10 @@ def evaluate_stock_signal_input_periods(input_ref, *, scope, destination):
     result = {'all': _evaluate_prepared((ref, root, admitted), destination, marks), 'by_year': {}}
     for year in sorted({day[:4] for day in admitted['scope']['sessions']}):
         selected_scope = {**admitted['scope'], 'sessions': [day for day in admitted['scope']['sessions'] if day[:4] == year]}
-        if ref.artifact_contract_version==DERIVED_INPUT_VERSION:
+        if ref.artifact_contract_version in (DERIVED_INPUT_VERSION,MULTI_INPUT_VERSION):
             from .stock_signal_evaluation_derived import _select_joint_period
             selected=None
-            selected=_select_joint_period(admission,selected_scope,maximum=root['maximum_resident_bytes'],
+            selected=_select_joint_period(admission,selected_scope,maximum=(root['maximum_resident_bytes'] if ref.artifact_contract_version==DERIVED_INPUT_VERSION else root['admission_receipt']['limits']['maximum_matrix_bytes']),
                 retained_graph=[root,admission,admitted],saved_results=result)
         else:selected = _select_inputs(admission, selected_scope)
         result['by_year'][year] = _evaluate_prepared((ref, root, selected), destination, marks)

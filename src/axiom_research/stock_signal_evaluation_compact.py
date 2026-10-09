@@ -139,7 +139,8 @@ def _join(targets, inputs, fold_spec, common, scope, records, state, wanted):
     state['slices'][digest(lineage)] = lineage
 
 
-def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_lease=None, _manifest=None):
+def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_lease=None, _manifest=None,
+    _signals_only=False, _budget_check=None):
     from . import stock_matrix_folds as owner
     from .stock_signal_evaluation_projection import _check_marks
     hook = getattr(owner, 'admit_stock_signal_evaluation_fold', None)
@@ -211,7 +212,7 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
                     signal['fold_spec_ref'] == digest(spec),
                     'compact saved Signal/fold/model binding mismatch')
                 identity = {k: deepcopy(lease.common[k]) for k in ('snapshot', 'pit_policy', 'calendar', 'universe')}
-                if columnar:identity['target_spec']=deepcopy(lease.common['target_spec'])
+                if columnar and not _signals_only:identity['target_spec']=deepcopy(lease.common['target_spec'])
                 _require(common is None or common == identity, 'comparison compact common scope mismatch')
                 common = identity
                 _require(common['calendar'] == scope['calendar'] and wanted[0] <= set(common['universe']),
@@ -227,8 +228,12 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
                         'compact Signal source clock conflict')
                     _require(key not in members or members[key] == own_members[key], 'weekly historical membership conflict')
                     clocks.extend([row['knowledge_cutoff'], feature_index[key]['knowledge_cutoff']])
+                if _budget_check is not None:
+                    _budget_check([projected, metadata, refs, closures, records, marks,
+                        rows, members, prediction_features], [indexed, feature_index, documents])
                 rows.update(deepcopy(indexed)); members.update(own_members); prediction_features.update(own_features)
-                _join(lease.evaluation_targets, inputs, spec, common, scope, pins, state, wanted)
+                if not _signals_only:
+                    _join(lease.evaluation_targets, inputs, spec, common, scope, pins, state, wanted)
                 metadata[name].append({'signal_contract_version': signal['contract_version'],
                     'signal_run_ref': signal['signal_run_ref'], 'prediction_sessions': list(days),
                     'input_ref': inputs['input_ref'], 'fold_spec_ref': digest(spec), 'fold_ref': fold['fold_ref'],
@@ -242,6 +247,10 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
                 _check_marks(lease_marks)
             del lease, documents, fold, model, features, signal, indexed, feature_index, own_members, own_features, row
         projected[name] = {'rows': rows, 'members': members, 'prediction_features': prediction_features}
+    if _signals_only:
+        batch._check_sources(); _check_marks(marks)
+        return {'projected': projected, 'metadata': metadata, 'refs': refs, 'closures': closures,
+            'common': common}, records, marks, manifest
     targets = _finish_targets(state, scope)
     raw = {'mode': 'compact_targets', 'label_ref': None, 'label_spec': targets['label_spec'],
         'calendar_ref': digest({'contract_version': 'stock_label_calendar_v1', 'sessions': scope['calendar']}),

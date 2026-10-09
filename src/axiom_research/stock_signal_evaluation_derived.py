@@ -89,7 +89,7 @@ def _shape(root,ref,scope):
         set(scope['sessions'])<=set(base['sessions']) and set(scope['universe'])<=set(base['universe']),
         'joint evaluation outside the frozen scope')
     source=_input_ref(root['source_input_ref'])
-    require(source.artifact_contract_version=='stock_signal_evaluation_inputs_v4',
+    require(source.artifact_contract_version in ('stock_signal_evaluation_inputs_v4','stock_signal_evaluation_inputs_v6'),
         'joint input requires the original column OOS label projection')
     require(type(root['maximum_resident_bytes']) is int and root['maximum_resident_bytes']>0,
         'joint input requires a positive owner byte budget')
@@ -229,7 +229,8 @@ def save_stock_derived_signal_evaluation_inputs(raw_input_ref,*,derived_inputs,s
         from axiom_engine.core.stock_signal import validate_derived_signal
         from axiom_engine.core import SignalFrame
         scope=_scope(scope);ref=_input_ref(raw_input_ref);marks={}
-        require(ref.artifact_contract_version=='stock_signal_evaluation_inputs_v4','original frozen column OOS input required')
+        require(ref.artifact_contract_version in ('stock_signal_evaluation_inputs_v4','stock_signal_evaluation_inputs_v6'),
+            'original frozen column or multi-owner OOS input required')
         limits=_limits(maximum_resident_bytes)
         with OwnedStore(limits) as store:
             base,_=_read_checked(ref.uri,ref.content_digest,marks=marks,_budget=store)

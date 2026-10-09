@@ -230,7 +230,7 @@ def _label_projection_ref(raw):
 def _clock_floor_matrix(metadata, raw):
     clocks = [item['evaluation_clock_floor'] for items in metadata.values() for item in items]
     for header in raw['sources'].values():
-        if raw['mode'] == 'compact_targets':
+        if raw['mode'] in ('compact_targets','independent_targets'):
             from .stock_signal_evaluation_compact import _context
             context = _context(header)
         else:
@@ -685,7 +685,7 @@ def _verify_legacy_raw(root, scope, records):
 
 
 def _matrix_label_context(root):
-    if root['raw_metadata']['mode'] == 'compact_targets':
+    if root['raw_metadata']['mode'] in ('compact_targets','independent_targets'):
         from .stock_signal_evaluation_compact import _label_context
         return _label_context(root)
     sources = {day: {} for day in root['scope']['sessions']}
@@ -705,7 +705,7 @@ def _validate_matrix_label(root, row, key, context):
         type(label['source_refs']) is list and bool(label['source_refs']) and
         label['source_refs'] == sorted(set(label['source_refs'])) and
         set(label['source_refs']) <= set(available_sources), 'frozen matrix Label original source binding mismatch')
-    if raw['mode'] == 'compact_targets':
+    if raw['mode'] in ('compact_targets','independent_targets'):
         from .stock_signal_evaluation_compact import _binding
         _require(row['label_leaf_ref'] == _binding(raw['label_spec'], raw['snapshot'], label),
             'frozen compact original row/source binding mismatch')
