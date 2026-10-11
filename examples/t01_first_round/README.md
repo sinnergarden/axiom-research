@@ -39,9 +39,12 @@ Features need 2016-10-13 through 2025-12-30; physical lookback starts
 2015-09-28. The final prediction Feature date's H40 endpoint is 2026-03-06,
 and evaluation uses a 2026-03-09 cutoff.
 
-This is a calendar plan. Formal Data scope, historical member qualification,
-source expansion, Feature production and the seven-year experiment remain
-pending. It does not establish actual complete data or accepted results.
+The formal Data scope and one full saved-source preparation have completed.
+The saved source preserves missing values and does not establish supplier
+completeness. Physical axes, source identities and production costs are in the
+private receipt.
+Feature production and the seven-year experiment remain pending. Private
+source references and receipts stay outside this public configuration.
 Historical members and visibility use `best_effort_vendor_v1` and
 `declared_vendor_assumption`; actual historical receipt times are unverified.
 
@@ -57,9 +60,14 @@ sell stamp tax 0.001 before 2023-08-28 and 0.0005 thereafter; two-sided transfer
 fees are 0.00002 before 2022-04-29 and 0.00001 thereafter. Those are saved model
 assumptions and source-backed schedule values. The inspected profile's rules
 cover the old short calendar and its verified fee window is only 2019-06-28
-through 2024-06-28. A genuine seven-year profile and verified fee window must
-be prepared by Engine; do not pass the old profile as complete seven-year
-coverage. Report the actually admitted profile identity and fee values beside
+through 2024-06-28. `fee-schedule.json` was generated with the existing Engine
+fee factory for 2018-12-28 through 2025-12-31. It binds the original 2015/2022
+transfer-fee and 2008/2023 stamp-tax documents, with ChinaClear's year-end
+tables as boundary checks. Commission and minimum remain declared assumptions.
+A complete seven-year equity profile still needs the actual execution union,
+original identity/listing-event evidence and source-backed quantity rules;
+do not pass the old profile as complete seven-year coverage. Report the
+actually admitted profile identity and fee values beside
 both local account results. Gross dividends exclude personal dividend taxes.
 
 After replacing the placeholders, use the unchanged formal Research CLI:
