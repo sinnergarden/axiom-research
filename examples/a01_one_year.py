@@ -18,14 +18,44 @@ def main():
     parser.add_argument('--options', required=True, help='Local path/budget JSON')
     parser.add_argument('--stage', required=True, choices=('validate','features','train','evaluate'))
     args = parser.parse_args(); options = read(args.options)
+    from axiom_research import load_stock_sequential_configuration
+    configured = load_stock_sequential_configuration(options['experiment_file'])
+    output = Path(options['output_root']); output.mkdir(parents=True,exist_ok=True)
+    registration = None
+    if args.stage != 'validate':
+        from axiom_research import begin_stock_result_registration, publish_stock_result
+        discovery = options.get('result_discovery', {})
+        roots = {'research': discovery.get('research_root', str(output.parent.resolve()))}
+        if discovery.get('engine_root'):
+            roots['engine'] = discovery['engine_root']
+        request_path = output/'.result-request.json'
+        registration = dict(request_path=request_path,
+            index_path=Path(roots['research'])/'index.json', roots=roots)
+        begin_stock_result_registration(configured, **registration,
+            question=discovery.get('question'), version=discovery.get('version'),
+            required_stages=discovery.get('required_stages', ['training','signal_evaluation']),
+            strategy_refs=discovery.get('strategy_refs', []),
+            imported=args.stage == 'evaluate' and not request_path.exists())
+        publish_stock_result(**registration)
+    try:
+        execute(args, options, configured, output, registration)
+    except Exception as exc:
+        if registration is not None:
+            try:
+                publish_stock_result(**registration, failure=type(exc).__name__+': '+str(exc))
+            except Exception as registration_error:
+                import sys
+                print('Result registration failed: '+str(registration_error), file=sys.stderr)
+        raise
+
+
+def execute(args, options, configured, output, registration):
     from axiom_research import (load_stock_sequential_configuration, to_dict,
         build_stock_feature_inputs, load_stock_feature_view,
         load_stock_ml_batch_inputs,
         build_configured_stock_sequential_experiment,
         stock_evaluation_sessions, evaluate_stock_signal_input_analysis)
     from axiom_research.stock_artifacts import write_json
-    configured = load_stock_sequential_configuration(options['experiment_file'])
-    output = Path(options['output_root']); output.mkdir(parents=True,exist_ok=True)
     if args.stage == 'validate':
         print(json.dumps({'configuration_ref':configured['configuration_ref'],
             'folds':len(configured['dataset']['fold_specs']),
@@ -41,6 +71,10 @@ def main():
         result['statistics'] = {name:{'path':str(report.path),'evidence_ref':report.identity}
             for name,report in result['statistics'].items()}
         write_json(output/'evaluation-result.json',result)
+        if registration is not None:
+            from axiom_research import publish_stock_result
+            publish_stock_result(**registration, experiment_result=options['experiment_result'],
+                signal_evaluation=output/'evaluation-result.json')
         return
     from axiom_data import Data
     data = Data(options['data_root'])
@@ -67,13 +101,17 @@ def main():
             result = build_configured_stock_sequential_experiment(data,
                 configuration_path=options['experiment_file'],feature_inputs=feature,
                 column_source=source,destination=output/'training',reuse_raw_from_batch=reuse,
-                metrics=metrics,progress=lambda event:print(json.dumps(event),flush=True))
+                metrics=metrics,progress=lambda event:print(json.dumps(event),flush=True),
+                registration=registration)
     for name in ('raw_signal_evaluation_input','signal_evaluation_input'):
         result[name] = to_dict(result[name])
     result['metrics'] = metrics
     write_json(output/'experiment-result.json',result)
     write_json(output/'batch.json',result['batch_manifest'])
     write_json(output/'prediction-bindings.json',result['prediction_bindings'])
+    if registration is not None:
+        from axiom_research import publish_stock_result
+        publish_stock_result(**registration, experiment_result=output/'experiment-result.json')
 
 
 if __name__ == '__main__': main()

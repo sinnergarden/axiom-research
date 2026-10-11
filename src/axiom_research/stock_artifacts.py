@@ -5,6 +5,7 @@ from datetime import datetime
 from hashlib import sha256
 import json
 from pathlib import Path
+from .saved_read_root import checked_saved_path
 
 
 def digest(value):
@@ -33,6 +34,7 @@ def digest_stream(value, *, default=None):
 
 
 def file_digest(path):
+    path = checked_saved_path(path)
     h = sha256()
     with Path(path).open('rb') as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b''): h.update(chunk)
@@ -41,7 +43,7 @@ def file_digest(path):
 
 def _canonical_file_ref(path):
     """Hash canonical writer bytes without its final LF, using bounded memory."""
-    path=Path(path)
+    path=checked_saved_path(path)
     with path.open('rb') as f:
         f.seek(-1,2)
         if f.read(1)!=b'\n': raise ValueError('saved canonical JSON requires final LF')
@@ -57,6 +59,7 @@ def write_json(path, value):
 
 
 def _read(path, *, _stream=None, _expected_bytes=None, _expected_digest=None):
+    path = checked_saved_path(path)
     def unique(pairs):
         out = {}
         for k, v in pairs:

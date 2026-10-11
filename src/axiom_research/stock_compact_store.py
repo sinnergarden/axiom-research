@@ -113,7 +113,8 @@ class OwnedStore:
         path=descriptor['path']; expected=descriptor.get('file_digest')
         require(type(path) is str and Path(path).is_absolute() and (expected is None or reference(expected)),
                 'fixed compact file descriptor required')
-        physical=self.resolve(path)
+        from .saved_read_root import checked_saved_path
+        physical=checked_saved_path(self.resolve(path))
         require(not physical.is_symlink() and physical.is_file(),'compact source must be a regular file')
         if path in self.hashes:
             self.check_path(path)

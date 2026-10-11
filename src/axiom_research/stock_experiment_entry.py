@@ -12,18 +12,45 @@ from .stock_artifacts import digest
 
 
 def build_configured_stock_sequential_experiment(data,*,configuration_path,feature_inputs,
-    column_source,destination,reuse_raw_from_batch=None,metrics=None,progress=None):
+    column_source,destination,reuse_raw_from_batch=None,metrics=None,progress=None,registration=None):
     """Notebook/worker entry; all schedule and model values come from YAML."""
     from .stock_experiment_config import load_stock_sequential_configuration
     configuration=load_stock_sequential_configuration(configuration_path);dataset=configuration['dataset']
-    result=_build_stock_sequential_experiment(data,configuration=configuration['specification'],
-        feature_inputs=feature_inputs,fold_specs=dataset['fold_specs'],column_source=column_source,
-        preparation_options=dataset['preparation_options'],scope=dataset['scope'],destination=destination,
-        model_feature_selection=dataset['model_feature_selection'],signal_contexts=dataset['signal_contexts'],
-        reuse_raw_from_batch=reuse_raw_from_batch,metrics=metrics,progress=progress)
-    result.update(configuration_ref=configuration['configuration_ref'],dataset_configuration_ref=configuration['dataset_ref'],
-        configuration_files=configuration['configuration_files'])
-    return result
+    from .result_registration import begin_stock_result_registration, publish_stock_result
+    from .stock_artifacts import write_json
+    from .api import to_dict
+    root=Path(destination).resolve().parent
+    context=registration or dict(request_path=root/'.result-request.json',
+        roots={'research':str(Path(configuration_path).resolve().parent)},
+        index_path=Path(configuration_path).resolve().parent/'index.json')
+    if not Path(context['request_path']).exists():
+        begin_stock_result_registration(configuration,**context)
+    else:
+        from .stock_result_projection import load_stock_result_configuration
+        require(load_stock_result_configuration(context['request_path']).wire['configuration']['configuration_ref']
+            == configuration['configuration_ref'],'retry configuration changed')
+    publish_stock_result(**context)
+    try:
+        result=_build_stock_sequential_experiment(data,configuration=configuration['specification'],
+            feature_inputs=feature_inputs,fold_specs=dataset['fold_specs'],column_source=column_source,
+            preparation_options=dataset['preparation_options'],scope=dataset['scope'],destination=destination,
+            model_feature_selection=dataset['model_feature_selection'],signal_contexts=dataset['signal_contexts'],
+            reuse_raw_from_batch=reuse_raw_from_batch,metrics=metrics,progress=progress)
+        result.update(configuration_ref=configuration['configuration_ref'],dataset_configuration_ref=configuration['dataset_ref'],
+            configuration_files=configuration['configuration_files'])
+        saved=deepcopy(result)
+        for name in ('raw_signal_evaluation_input','signal_evaluation_input'):
+            saved[name]=to_dict(saved[name])
+        if metrics is not None:saved['metrics']=deepcopy(metrics)
+        root.mkdir(parents=True,exist_ok=True)
+        write_json(root/'experiment-result.json',saved)
+        write_json(root/'batch.json',saved['batch_manifest'])
+        write_json(root/'prediction-bindings.json',saved['prediction_bindings'])
+        publish_stock_result(**context,experiment_result=root/'experiment-result.json')
+        return result
+    except Exception as exc:
+        publish_stock_result(**context,failure=type(exc).__name__+': '+str(exc))
+        raise
 
 
 def build_stock_sequential_experiment(data, *, configuration_paths, feature_inputs,
@@ -101,14 +128,25 @@ def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
         'prediction_bindings':bindings,'raw_signal_evaluation_input':frozen,'signal_evaluation_input':evaluation_input}
 
 
-def evaluate_stock_sequential_signals(experiment, *, scope, destination):
+def evaluate_stock_sequential_signals(experiment, *, scope, destination,registration=None):
     """Saved Raw/Derived all/by-year statistics through the existing Core owner.
 
     An optional joint input retains separate stages and original parent refs.
     No preparation, fit, prediction, normalization or account is repeated.
     """
     from .stock_signal_evaluation_projection import evaluate_stock_signal_input_periods
-    return evaluate_stock_signal_input_periods(experiment['signal_evaluation_input'],scope=scope,destination=destination)
+    result=evaluate_stock_signal_input_periods(experiment['signal_evaluation_input'],scope=scope,destination=destination)
+    if registration is not None:
+        from .stock_artifacts import write_json
+        from .result_registration import publish_stock_result
+        path=Path(destination)/'evaluation-result.json'
+        descriptors=lambda group:{name:{'path':str(report.path),'evidence_ref':report.identity}
+                                  for name,report in group.items()}
+        wire={'statistics':descriptors(result['all']),
+              'by_year':{year:descriptors(group) for year,group in result['by_year'].items()}}
+        write_json(path,wire)
+        publish_stock_result(**registration,signal_evaluation=path)
+    return result
 
 
 def stock_request_with_saved_predictions(request, *, prediction_bindings):
@@ -125,7 +163,7 @@ def stock_request_with_saved_predictions(request, *, prediction_bindings):
 
 
 def run_saved_stock_strategy(request, *, market, source, destination, block_sessions,
-    limits, max_signal_bytes):
+    limits, max_signal_bytes, registration=None):
     """Consume frozen inputs using the sole admitted-market/Runtime account path.
 
     The market and source remain caller-owned. A new strategy request must use
@@ -139,14 +177,20 @@ def run_saved_stock_strategy(request, *, market, source, destination, block_sess
         sink=StockResultSink(root/'parts',run_id=stock_run_id(request.to_dict()))
         run=run_stock_backtest(request,source=inputs,sink=sink,block_sessions=block_sessions,limits=limits)
         save_backtest_run(run,root/'run.json')
+    if registration is not None:
+        from .result_registration import attach_stock_account
+        attach_stock_account(run_path=root/'run.json', **registration)
     return root/'run.json'
 
 
 def evaluate_saved_stock_strategy(run_path, *, limits, benchmark, spec, dividend_scope,
-    destination, artifact_reader):
+    destination, artifact_reader, registration=None):
     """Load saved committed results and call the original account evaluator."""
     from axiom_engine.runtime import load_stock_backtest_projection,evaluate_backtest,save_backtest_evaluation
     run=load_stock_backtest_projection(run_path,artifact_reader=artifact_reader,limits=limits)
     report=evaluate_backtest(run,benchmark=benchmark,spec=spec,dividend_scope=dividend_scope)
     path=Path(destination).resolve();save_backtest_evaluation(report,path)
+    if registration is not None:
+        from .result_registration import attach_stock_account
+        attach_stock_account(run_path=run_path, evaluation_paths=[path], **registration)
     return path

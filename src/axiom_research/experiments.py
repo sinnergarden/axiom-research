@@ -257,9 +257,12 @@ def _new_record(value, kind):
 
 def _validate(state):
     expected = set(_empty()) | {"content_digest"}
+    if type(state) is dict and state.get("contract_version") == "experiment_index_v2":
+        expected.add("result_heads")
     _require(type(state) is dict and set(state) in
              (expected, expected - {"run_organizations"}), "experiment index: wrong fields")
-    _require(state["contract_version"] == "experiment_index_v1", "Unknown index contract")
+    _require(state["contract_version"] in ("experiment_index_v1", "experiment_index_v2"),
+             "Unknown index contract")
     _integer(state["store_revision"], "store_revision")
     _hash(state["content_digest"], "index.content_digest")
     _require(state["content_digest"] == _digest({k: v for k, v in state.items()
@@ -304,6 +307,16 @@ def _validate(state):
         _require(run["version_ref"] in state["versions"] and
                  state["versions"][run["version_ref"]]["question_id"] == run["question_id"],
                  "Run version must belong to the same question")
+    if state["contract_version"] == "experiment_index_v2":
+        from .result_discovery import validate_head
+        _require(type(state["result_heads"]) is dict, "result_heads must be an object")
+        for result_id, head in state["result_heads"].items():
+            validate_head(head)
+            _require(result_id == head["result_id"] and
+                     head["question_id"] in state["questions"] and
+                     head["version_ref"] in state["versions"] and
+                     state["versions"][head["version_ref"]]["question_id"] == head["question_id"],
+                     "result head question/version mismatch")
     return state
 
 
@@ -330,6 +343,10 @@ class ExperimentStore:
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
+
+    def publish_result(self, manifest, *, roots):
+        from .result_discovery import publish
+        return publish(self, manifest, roots)
 
     def _mutate(self, operation):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -483,6 +500,10 @@ class ExperimentReader:
     def __init__(self, path: str | Path):
         self.path = Path(path)
 
+    def result(self, result_id, *, roots):
+        from .result_discovery import result
+        return result(self, result_id, roots)
+
     def index(self, *, group=None, tags=(), status=None, favorite=None, shelved=None,
               question_id=None, version_ref=None, run_favorite=None, run_shelved=None):
         for name, value in (("group", group), ("question_id", question_id)):
@@ -490,7 +511,7 @@ class ExperimentReader:
                 _text(value, name)
         if version_ref is not None:
             _hash(version_ref, "version_ref")
-        _require(status is None or status in ("COMPLETE", "FAILED", "BLOCKED"),
+        _require(status is None or status in ("COMPLETE", "FAILED", "BLOCKED", "RUNNING", "PARTIAL"),
                  "Invalid status filter")
         for name, value in (("favorite", favorite), ("shelved", shelved),
                             ("run_favorite", run_favorite), ("run_shelved", run_shelved)):
@@ -535,7 +556,12 @@ class ExperimentReader:
                     "run_kind": "SAVED_BACKTEST" if latest["backtest_ref"] else "REGISTRATION_ONLY",
                     "registration_history": sorted(history, key=_record_order),
                     "organization": deepcopy(run_org)})
-            if (status is not None or run_favorite is not None or run_shelved is not None) and not runs:
+            result_matches = any(h["question_id"] == qid and
+                (version_ref is None or h["version_ref"] == version_ref) and
+                (status is None or h["status"] == status)
+                for h in state.get("result_heads", {}).values())
+            if ((status is not None and not result_matches or run_favorite is not None or
+                 run_shelved is not None) and not runs):
                 continue
             entries.append(dict(question=question, organization=organization,
                 last_activity_at=last_activity,
@@ -545,9 +571,17 @@ class ExperimentReader:
                 runs=sorted(runs, key=lambda r: (_timestamp(r["created_at"]), r["run_record_ref"]))))
         entries.sort(key=lambda e: (_timestamp(e["last_activity_at"]), e["question"]["question_id"]),
                      reverse=True)
-        return {"contract_version": "experiment_projection_v1",
+        projection = {"contract_version": "experiment_projection_v1",
                 "store_revision": state["store_revision"],
                 "content_digest": state["content_digest"], "questions": entries}
+        if state["contract_version"] == "experiment_index_v2":
+            visible = {entry["question"]["question_id"] for entry in entries}
+            projection.update(contract_version="experiment_projection_v2", result_heads=sorted(
+                [h for h in state["result_heads"].values() if h["question_id"] in visible and
+                 (version_ref is None or h["version_ref"] == version_ref) and
+                 (status is None or h["status"] == status)],
+                key=lambda h: (h["updated_at"], h["result_id"]), reverse=True))
+        return projection
 
     def detail(self, question_id):
         result = self.index(question_id=question_id)

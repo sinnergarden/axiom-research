@@ -226,7 +226,13 @@ def _verified_evaluation(path, reused, report):
     return saved
 
 
-def load_stock_signal_evaluation(path, *, batch=None):
+def load_stock_signal_evaluation(path, *, batch=None, research_root=None):
+    from .saved_read_root import saved_read_root
+    with saved_read_root(research_root):
+        return _load_stock_signal_evaluation(path, batch=batch)
+
+
+def _load_stock_signal_evaluation(path, *, batch=None):
     """Read saved values and verify their immutable sources; no runtime imports.
 
     Direct legacy v1 JSON preserves its original ref-only read behavior. V2
