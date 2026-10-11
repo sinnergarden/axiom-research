@@ -96,7 +96,7 @@ def _saved_json(desc, ref_key, store):
     return value
 
 
-def verify_feature_column_source(descriptor, *, store=None):
+def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts=None):
     """Verify JSON and every physical leaf without loading any source arrays.
 
     A supplied matrix Store owns hash reuse and change detection. Provenance
@@ -152,6 +152,8 @@ def verify_feature_column_source(descriptor, *, store=None):
                         'exact column source provenance required')
                 require(child['contract_version']=='reader_column_evidence_v1' and child['sessions']==chunk_days and
                         child['evidence_ref']==desc['evidence_ref'], 'column source provenance closure mismatch')
+                if _dependency_receipts is not None:
+                    _dependency_receipts(child)
                 if store is not None:
                     store.drop_json(desc,'evidence_ref')
                     # The existing Store charges this small receipt; it still
