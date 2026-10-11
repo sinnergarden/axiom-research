@@ -2,6 +2,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+from datetime import date, timedelta
 import numpy as np
 
 from axiom_engine.core import compile_feature_columns, execute_feature_columns
@@ -13,11 +14,12 @@ from axiom_research.stock_feature_columns import REASONS, feature_column_plan
 from axiom_research.stock_matrix_storage import write_buffer, write_part, instant_us
 
 
-def saved_source(root):
+def saved_source(root, *, day_count=6, generation=0):
     """Synthetic selected vendor-shaped cells; never used as real data evidence."""
-    days=[f'2020-01-0{i}' for i in range(1,7)]; securities=['A','B','C']; shape=(6,3,6)
+    days=[(date(2020,1,1)+timedelta(days=i)).isoformat() for i in range(day_count)]
+    securities=['A','B','C']; shape=(day_count,3,6)
     values=np.empty(shape,dtype='<f8')
-    for t in range(6):
+    for t in range(day_count):
         for j in range(3):
             opening=10*(j+1)+t
             values[t,j]=[opening,opening+3+j+t,opening-2,opening+1+j+t,1000*(j+1)+t,2**t]
@@ -56,12 +58,58 @@ def saved_source(root):
     manifest=seal({'contract_version':'research_feature_column_source_v1','spec':spec,'qlib_view':{'universe_name':'csi300'},
         'buffers':buffers,'chunks':[{'sessions':days,'evidence':evidence}],'reason_codes':list(REASONS),
         'source_profiles':profiles,'selection_invariance':'declared_vendor_release_visible_at_each_historical_row_cutoff',
-        'implementation_sources':impl,'implementation_ref':digest(impl),'environment':{'synthetic':True}},'source_ref')
+        'implementation_sources':impl,'implementation_ref':digest(impl),
+        'environment':{'synthetic':True,'generation':generation}},'source_ref')
     path=Path(root)/'source.json'; write_json(path,manifest)
     return {'path':str(path),'file_digest':file_digest(path),'source_ref':manifest['source_ref']}
 
 
 class StockFeatureLibraryTests(unittest.TestCase):
+    def test_ten_source_generations_only_bind_actual_single_day_cs_gap(self):
+        from axiom_engine.core import FeaturePlan
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); library=FeatureLibrary(root/'features',maximum_working_bytes=8*1024**2)
+            catalog=load_a01_feature_catalog(); selection=[{'id':n,'semantic_version':'1.0.0'} for n in ('ALP001','ALP003')]
+            descriptors=[]; days=[]
+            for generation in range(10):
+                descriptor=saved_source(root/f'source-{generation}',day_count=12,generation=generation)
+                descriptors.append(descriptor)
+                with SavedColumnFeatureSource(descriptor,maximum_working_bytes=8*1024**2) as source:
+                    day=source.source.manifest['spec']['feature_sessions'][generation]; days.append(day)
+                    _,stats=CatalogFeatureLibrary(library,source,catalog).ensure(selection=selection,output_sessions=[day])
+                    self.assertEqual(stats['raw']['core_calls'],1)
+            with SavedColumnFeatureSource(descriptors[-1],maximum_working_bytes=8*1024**2) as current:
+                facade=CatalogFeatureLibrary(library,current,catalog)
+                facade.ensure(selection=selection,output_sessions=days[:-1],normalized=True)
+                descriptor,stats=facade.ensure(selection=selection,output_sessions=days,normalized=True)
+                self.assertEqual((stats['raw']['core_calls'],stats['cross_sectional']['core_calls']),(0,1))
+                self.assertLessEqual(stats['cross_sectional']['maximum_execution_source_ids'],7)
+                hashes=current.metrics['physical_field_day_hashes']
+                facade.ensure(selection=selection,output_sessions=days,normalized=True)
+                self.assertEqual(current.metrics['physical_field_day_hashes'],hashes)
+                with library.open_feature_view(descriptor) as view:
+                    for day,original_descriptor in zip(days,descriptors):
+                        with SavedColumnFeatureSource(original_descriptor,maximum_working_bytes=8*1024**2) as original:
+                            plan=original.plan(catalog,selection,normalized=True); p=plan.to_dict()
+                            inputs=original.prepare(plan,day,['A','B','C'],{s['id']:digest(['direct']) for s in selection})
+                            old_ref=original.source.source_bindings()[-1]['id']
+                            reference=current.source.source_bindings()[-1]
+                            p['sources']=[b for b in p['sources'] if b['id']!=old_ref]+[reference]
+                            inputs['source_bindings']=p['sources']
+                            inputs['source_sets']=[sorted(reference['id'] if s==old_ref else s for s in group)
+                                                   for group in inputs['source_sets']]
+                            expected=execute_feature_columns(compile_feature_columns(FeaturePlan.from_dict(p)),
+                                inputs=inputs,output_sessions=[day],max_working_bytes=8*1024**2)
+                        actual=view.project([(s,day) for s in ('A','B','C')])
+                        for key in ('values','validity','available_at_utc_us'):
+                            np.testing.assert_array_equal(actual[key],expected[key][0])
+                        for i in range(3):
+                            for j in range(2):
+                                self.assertEqual(actual['reason_dictionary'][int(actual['reason_codes'][i,j])],
+                                    expected['reason_dictionary'][int(expected['reason_codes'][0,i,j])])
+                                self.assertEqual(actual['source_sets'][int(actual['source_codes'][i,j])],
+                                    expected['source_sets'][int(expected['source_codes'][0,i,j])])
+
     def test_layers_match_original_dag_and_reference_change_reuses_raw(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); descriptor=saved_source(root); catalog=load_a01_feature_catalog()
@@ -74,6 +122,16 @@ class StockFeatureLibraryTests(unittest.TestCase):
                 original=feature_column_plan(source.source,catalog,selection=selection,normalized=True)
                 definitions=feature_definitions(original,input_semantics=source.input_semantics())
                 with library.open_feature_view(ref) as view:
+                    from axiom_research.stock_feature_library_adapter import (
+                        build_feature_library_training_view,load_feature_library_training_view)
+                    from axiom_research.stock_compact_store import iter_feature_rows
+                    projection=build_feature_library_training_view(view,source,selection=selection,
+                        destination=root/'training-view',maximum_working_bytes=8*1024**2)
+                    with load_feature_library_training_view(projection,limits={'maximum_matrix_bytes':8*1024**2}) as training:
+                        rows=list(iter_feature_rows(training,list(range(len(days)))))
+                        direct=view.project()
+                        np.testing.assert_array_equal([r['values'] for r in rows],direct['values'])
+                        self.assertEqual(training.to_dict()['historical_feature_inputs_ref'],view.identity)
                     # Virtual cached-raw input retains the same full-DAG semantic identity.
                     self.assertEqual({n:d['semantic_ref'] for n,d in view.describe()['definitions'].items()},
                                      {n:d['semantic_ref'] for n,d in definitions.items()})
