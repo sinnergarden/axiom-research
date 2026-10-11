@@ -14,14 +14,14 @@ from axiom_research.stock_feature_columns import REASONS, feature_column_plan
 from axiom_research.stock_matrix_storage import write_buffer, write_part, instant_us
 
 
-def saved_source(root, *, day_count=6, generation=0):
+def saved_source(root, *, day_count=6, generation=0, value_shift=0, snapshot='synthetic_only'):
     """Synthetic selected vendor-shaped cells; never used as real data evidence."""
     days=[(date(2020,1,1)+timedelta(days=i)).isoformat() for i in range(day_count)]
     securities=['A','B','C']; shape=(day_count,3,6)
     values=np.empty(shape,dtype='<f8')
     for t in range(day_count):
         for j in range(3):
-            opening=10*(j+1)+t
+            opening=10*(j+1)+t+value_shift
             values[t,j]=[opening,opening+3+j+t,opening-2,opening+1+j+t,1000*(j+1)+t,2**t]
     available=np.array([[instant_us(day+'T12:00:00Z')]*3 for day in days],dtype='<i8')
     arrays={'values':values,'original_values':values.copy(),'validity':np.ones(shape,dtype=bool),
@@ -52,7 +52,7 @@ def saved_source(root, *, day_count=6, generation=0):
             'source_profile':{'id':'synthetic_'+domain}}
     catalog=load_a01_feature_catalog(); selection=[{'id':'ALP001','semantic_version':'1.0.0'}]
     spec={'read_sessions':days,'feature_sessions':days[2:],'universe':securities,'calendar':days,
-        'cutoff_by_session':{day:day+'T13:00:00Z' for day in days},'snapshot':'synthetic_only',
+        'cutoff_by_session':{day:day+'T13:00:00Z' for day in days},'snapshot':snapshot,
         'pit_policy':'best_effort_vendor_v1','catalog_ref':catalog.identity,'feature_selection':selection}
     impl={'fixture':digest(['explicit synthetic source'])}
     manifest=seal({'contract_version':'research_feature_column_source_v1','spec':spec,'qlib_view':{'universe_name':'csi300'},
@@ -65,6 +65,55 @@ def saved_source(root, *, day_count=6, generation=0):
 
 
 class StockFeatureLibraryTests(unittest.TestCase):
+    def test_second_experiment_adds_other_source_column_and_rejects_wrong_training_source(self):
+        import json
+        from axiom_research.stock_feature_library_adapter import (
+            build_feature_library_training_view,load_feature_library_training_view)
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); library=FeatureLibrary(root/'features',maximum_working_bytes=8*1024**2)
+            catalog=load_a01_feature_catalog(); selection=[{'id':n,'semantic_version':'1.0.0'} for n in ('ALP001','ALP003')]
+            original=saved_source(root/'source-0',generation=0)
+            current=saved_source(root/'source-1',generation=1)
+            wrong=saved_source(root/'source-wrong',generation=2,value_shift=10,snapshot='different_snapshot')
+            with SavedColumnFeatureSource(original,maximum_working_bytes=8*1024**2) as source:
+                day=source.source.manifest['spec']['feature_sessions'][0]
+                old,_=CatalogFeatureLibrary(library,source,catalog).ensure(selection=selection[:1],
+                    output_sessions=[day],normalized=True)
+                with library.open_feature_view(old) as view: old_part=view._view['tiles'][0]['partition']['partition_ref']
+            with SavedColumnFeatureSource(current,maximum_working_bytes=8*1024**2) as source:
+                descriptor,stats=CatalogFeatureLibrary(library,source,catalog).ensure(selection=selection,
+                    output_sessions=[day],normalized=True)
+                self.assertEqual((stats['raw']['core_calls'],stats['cross_sectional']['core_calls']),(1,1))
+                self.assertEqual((stats['raw']['computed_output_cells'],stats['cross_sectional']['computed_output_cells']),(3,3))
+                with library.open_feature_view(descriptor) as view:
+                    self.assertEqual(view._view['tiles'][0]['partition']['partition_ref'],old_part)
+                    actual=view.project(); expected_plan=source.plan(catalog,selection,normalized=True)
+                    inputs=source.prepare(expected_plan,day,['A','B','C'],{s['id']:digest(['direct']) for s in selection})
+                    expected=execute_feature_columns(compile_feature_columns(expected_plan),inputs=inputs,
+                        output_sessions=[day],max_working_bytes=8*1024**2)
+                    for key in ('values','validity','available_at_utc_us'):
+                        np.testing.assert_array_equal(actual[key],expected[key][0])
+                    new_tile=view._view['tiles'][1]['partition']
+                    part=view._store.read_json({k:new_tile[k] for k in ('path','file_digest','partition_ref')},'partition_ref')
+                    self.assertEqual([s['view_ref'] for s in part['column_source_bindings']['ALP003']],
+                                     [current['source_ref']]*len(part['column_source_bindings']['ALP003']))
+                    projection=build_feature_library_training_view(view,source,selection=selection,
+                        destination=root/'training',maximum_working_bytes=8*1024**2)
+                    with load_feature_library_training_view(projection,source=source,
+                            limits={'maximum_matrix_bytes':8*1024**2}) as training:
+                        self.assertEqual(training.to_dict()['historical_feature_inputs_ref'],view.identity)
+                    with SavedColumnFeatureSource(wrong,maximum_working_bytes=8*1024**2) as mismatch:
+                        with self.assertRaisesRegex(ValueError,'local dependency or reference mismatch'):
+                            build_feature_library_training_view(view,mismatch,selection=selection,
+                                destination=root/'wrong-training',maximum_working_bytes=8*1024**2)
+                # A resealed transport cannot relabel the saved view to a new source.
+                forged=json.loads(Path(projection['path']).read_text()); forged.pop('training_adapter_ref')
+                forged['definition']['source']=wrong
+                forged['definition']['spec']['snapshot']='different_snapshot'
+                forged=write_part(root/'forged',seal(forged,'training_adapter_ref'),'training_adapter_ref')
+                with self.assertRaisesRegex(ValueError,'local dependency or reference mismatch'):
+                    load_feature_library_training_view(forged,limits={'maximum_matrix_bytes':8*1024**2})
+
     def test_ten_source_generations_only_bind_actual_single_day_cs_gap(self):
         from axiom_engine.core import FeaturePlan
         with tempfile.TemporaryDirectory() as temp:

@@ -24,6 +24,13 @@ def _array_ref(array):
             'sha256':sha256(array.tobytes(order='C')).hexdigest()}
 
 
+def normalized_feature_dependency_ref(source, day, raw_semantic_ref, raw_dependency_ref):
+    physical=source.source
+    return digest({'raw_semantic_ref':raw_semantic_ref,'raw_dependency_ref':raw_dependency_ref,
+        'reference':source._reference_days([physical.positions[day]]),
+        'cutoff':physical.manifest['spec']['cutoff_by_session'][day],'anchor':day})
+
+
 class SavedColumnFeatureSource:
     """Admit an immutable source through the original owner, then borrow mmap."""
     def __init__(self, descriptor, *, reference_security_ids=None, maximum_source_bytes=8*1024**3,
@@ -178,11 +185,36 @@ class SavedColumnFeatureSource:
         p=plan.to_dict(); history=max(required_history(plan).values())+1
         inputs,_=self.source.core_inputs(day,calendar_ref=p['calendar_ref'],reference_ref=p['reference_ref'],
             schema=p['input_schema'],history_sessions=history)
+        names=[c['name'] for c in p['input_schema']]
+        for field in ('values','validity','reason_codes','available_at_utc_us','source_codes'):
+            inputs[field]={name:inputs[field][name] for name in names}
+        chosen=sorted(set().union(*(set(int(code) for code in np.unique(inputs['source_codes'][name]))
+                                    for name in names),
+                                 set(int(code) for code in np.unique(inputs['reference_source_codes']))))
+        sets=inputs['source_sets']; remap=np.zeros(len(sets),dtype='int32')
+        for code,old in enumerate(chosen): remap[old]=code
+        inputs['source_sets']=[sets[i] for i in chosen]
+        inputs['source_codes']={name:remap[value] for name,value in inputs['source_codes'].items()}
+        inputs['reference_source_codes']=remap[inputs['reference_source_codes']]
+        bindings={b['id']:b for b in inputs['source_bindings']}
+        used={source for group in inputs['source_sets'] for source in group}
+        require(all(any(b==bindings[source] for b in p['sources']) for source in used),
+                'prepared fact/reference sources differ from frozen gap plan')
+        inputs['source_bindings']=p['sources']
         inputs['reference_member']=inputs['reference_member'] & np.asarray(
             [s in self._reference_set for s in securities],dtype=bool)[None,:]
         inputs['input_refs'].update(feature_dependency_ref=digest(dependencies),
             reference_selection_ref=digest(self.reference_security_ids))
         self.store.check(); return inputs
+
+    def execution_plan(self, plan, day, securities, dependencies):
+        p=plan.to_dict(); names={c['name'] for c in p['input_schema']}
+        fields=('open','high','low','close','amount_cny','factor','is_member')
+        require(names<=set(fields[:5]), 'saved vendor source profile has fixed price/amount fact fields')
+        selected=names|{'is_member'}|({'factor'} if names-{'amount_cny'} else set())
+        p['sources']=sorted((binding for field,binding in zip(fields,self.source.source_bindings())
+                             if field in selected),key=lambda b:b['id'])
+        return FeaturePlan.from_dict(p)
 
     def close(self): self.source.arrays.clear(); self.store.close()
     def __enter__(self): return self
@@ -242,24 +274,24 @@ class _RawCrossSectionSource:
         return sorted(bindings.values(),key=lambda b:b['id'])
 
     def execution_plan(self, plan, day, securities, dependencies):
-        p=plan.to_dict(); p['sources']=self.source_bindings(day,set(dependencies))
+        p=plan.to_dict(); names={c['name'] for c in p['input_schema']}
+        require(names==set(dependencies), 'CS gap fact closure differs from output dependencies')
+        p['sources']=self.source_bindings(day,names)
         return FeaturePlan.from_dict(p)
 
     def dependency_refs(self, definitions, days, securities):
-        import numpy as np
         refs=self._tiles
-        physical=self.source.source; result={}
+        result={}
         for day in days:
-            i=physical.positions[day]
-            reference=self.source._reference_days([i])
-            result[day]={name:digest({'raw_semantic_ref':refs[day,name]['semantic_refs'][name],
-                'raw_dependency_ref':refs[day,name]['dependency_refs'][name], 'reference':reference,
-                'cutoff':physical.manifest['spec']['cutoff_by_session'][day],'anchor':day}) for name in definitions}
+            result[day]={name:normalized_feature_dependency_ref(self.source,day,
+                refs[day,name]['semantic_refs'][name],refs[day,name]['dependency_refs'][name])
+                for name in definitions}
         return result
 
     def prepare(self, plan, day, securities, dependencies):
         import numpy as np
         p=plan.to_dict(); names=[c['name'] for c in p['input_schema']]
+        require(set(names)==set(dependencies), 'CS raw projection differs from gap fact closure')
         raw=self.raw_view.project([(s,day) for s in securities],names)
         original=self.source.source
         base,_=original.core_inputs(day,calendar_ref=p['calendar_ref'],reference_ref=p['reference_ref'],
@@ -287,7 +319,7 @@ class _RawCrossSectionSource:
             source_codes={name:remap[codes[:,j]][None,:] for j,name in enumerate(names)},
             source_sets=admitted,reason_dictionary=raw['reason_dictionary'])
         expected={b['id']:b for b in p['sources']}
-        require(all(expected.get(key)==value for key,value in bindings.items()),
+        require(expected==bindings,
                 'raw/reference source bindings differ from frozen CS plan')
         base['reference_member']=base['reference_member'] & np.asarray([s in self.source._reference_set for s in securities],dtype=bool)[None,:]
         base['reference_source_codes']=np.full((1,len(securities)),reference_code,dtype='int32')

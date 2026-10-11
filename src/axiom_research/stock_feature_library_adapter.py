@@ -6,6 +6,7 @@ their genuine StockFeatureView owner handle; cold restoration uses this loader
 and passes that handle explicitly to load_stock_ml_batch_inputs.
 """
 from copy import deepcopy
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -20,6 +21,39 @@ from .stock_compact_store import OwnedStore, StockFeatureView, _TOKEN, _size
 VERSION='stock_feature_library_training_projection_v1'
 
 
+def _feature_source_compatibility(view, source, selection):
+    """Same semantics and local selected facts, allowing unchanged historical frames."""
+    from axiom_engine.feature_library import feature_definitions
+    from .feature_catalog import load_feature_catalog_ref
+    from .stock_feature_library import normalized_feature_dependency_ref
+    cap=view.describe(); physical=source.source; spec=physical.manifest['spec']
+    require(cap['security_ids']==spec['universe'] and set(cap['sessions'])<=set(spec['feature_sessions']) and
+            [s['id'] for s in selection]==cap['columns'], 'Feature/source axes or selection mismatch')
+    catalog=load_feature_catalog_ref(spec['catalog_ref']); catalog.select(selection)
+    require(catalog.to_dict()['input_contract']=={'price_basis':'common_anchor_adjusted_v1',
+        'adjustment_anchor':'feature_session_visible_at_cutoff','amount_unit':'CNY'},
+        'unsupported training source/catalog input interpretation')
+    raw=feature_definitions(source.plan(catalog,selection,normalized=False),input_semantics=source.input_semantics())
+    normalized=feature_definitions(source.plan(catalog,selection,normalized=True),input_semantics=source.input_semantics())
+    def same(expected):
+        return all(cap['definitions'][name]['semantic_ref']==expected[name]['semantic_ref'] and
+                   cap['definitions'][name]['schema']==expected[name]['schema'] for name in cap['columns'])
+    layer='raw' if same(raw) else 'normalized' if same(normalized) else None
+    require(layer is not None, 'Feature/source definition semantics mismatch')
+    dependencies=source.dependency_refs(raw,cap['sessions'],cap['security_ids'])
+    if layer=='normalized':
+        dependencies={day:{name:normalized_feature_dependency_ref(source,day,raw[name]['semantic_ref'],ref)
+                           for name,ref in columns.items()} for day,columns in dependencies.items()}
+    tiles={(t['session'],t['column']):t['partition'] for t in view._view['tiles']}
+    require(all(tiles[day,name]['dependency_refs'][name]==ref for day,columns in dependencies.items()
+                for name,ref in columns.items()), 'Feature/source local dependency or reference mismatch')
+    return seal({'contract_version':'stock_feature_source_compatibility_v1','layer':layer,
+        'view_ref':view.identity,'semantic_refs':{n:cap['definitions'][n]['semantic_ref'] for n in cap['columns']},
+        'dependency_refs':dependencies,'reference_security_ids':list(source.reference_security_ids),
+        'source':source.descriptor,'snapshot':spec['snapshot'],'pit_policy':spec['pit_policy'],
+        'cutoff_by_session':{day:spec['cutoff_by_session'][day] for day in cap['sessions']}},'compatibility_ref')
+
+
 def _instant_us(value, null):
     value=int(value)
     if value==null: return None
@@ -31,11 +65,7 @@ def build_feature_library_training_view(view, source, *, selection, destination,
     """Export bounded daily blocks without Feature computation or new mathematics."""
     import numpy as np
     capabilities=view.describe(); physical=source.source; source.store.check()
-    from .feature_catalog import load_feature_catalog_ref
-    registered=load_feature_catalog_ref(physical.manifest['spec']['catalog_ref']).select(selection)
-    require([f['id'] for f in registered]==capabilities['columns'], 'unregistered training projection selection')
-    require(capabilities['security_ids']==physical.manifest['spec']['universe'], 'Feature/source physical axes mismatch')
-    require([s['id'] for s in selection]==capabilities['columns'], 'Feature training selection mismatch')
+    compatibility=_feature_source_compatibility(view,source,selection)
     spec=deepcopy(physical.manifest['spec']); days=capabilities['sessions']; securities=capabilities['sample_universe']
     spec.update(universe=securities,feature_sessions=days,feature_selection=deepcopy(selection),
                 ordered_features=list(capabilities['columns']))
@@ -45,6 +75,7 @@ def build_feature_library_training_view(view, source, *, selection, destination,
     schema=[deepcopy(capabilities['definitions'][n]['schema']) for n in capabilities['columns']]
     definition={'spec':spec,'library_view':view.descriptor,'source':source.descriptor,
                 'reference_security_ids':source.reference_security_ids,
+                'source_compatibility':compatibility,
                 'projection':'preserve_packed_cells_and_original_sample_membership_v1'}
     target=Path(destination).resolve()/digest(definition)[7:]; target.mkdir(parents=True,exist_ok=True)
     grid=row_index(days,securities); rid=write_part(target,grid,'row_index_ref')
@@ -87,7 +118,7 @@ def build_feature_library_training_view(view, source, *, selection, destination,
     return write_part(target,wire,'training_adapter_ref')
 
 
-def load_feature_library_training_view(descriptor, *, limits=None):
+def load_feature_library_training_view(descriptor, *, limits=None, source=None):
     """Fresh byte admission + exact library comparison; reuse existing row/fit owner."""
     import numpy as np
     store=OwnedStore(limits); handle=None
@@ -100,14 +131,19 @@ def load_feature_library_training_view(descriptor, *, limits=None):
         _schema(schema,columns); grid=store.read_json(wire['row_index'],key='row_index_ref')
         require(grid==row_index(days,securities), 'training projection row grid mismatch')
         blocks=[]; parents={}; count=len(securities)
-        with FeatureView(definition['library_view'],maximum_matrix_bytes=store.maximum_matrix_bytes,
+        from .stock_feature_library import SavedColumnFeatureSource
+        with (SavedColumnFeatureSource(definition['source'],reference_security_ids=definition['reference_security_ids'],
+                  maximum_source_bytes=store.limits['maximum_source_bytes'],maximum_working_bytes=store.maximum_matrix_bytes)
+              if source is None else nullcontext(source)) as admitted_source, \
+             FeatureView(definition['library_view'],maximum_matrix_bytes=store.maximum_matrix_bytes,
                          maximum_source_bytes=store.limits['maximum_source_bytes']) as library, \
              VerifiedMatrixStore(maximum_matrix_bytes=store.maximum_matrix_bytes,
                                  maximum_source_bytes=store.limits['maximum_source_bytes']) as member_store:
             capabilities=library.describe()
-            from .feature_catalog import load_feature_catalog_ref
-            registered=load_feature_catalog_ref(spec['catalog_ref']).select(spec['feature_selection'])
-            require([f['id'] for f in registered]==columns,'unregistered saved training projection selection')
+            require(admitted_source.descriptor==definition['source'], 'explicit admitted training source differs from saved binding')
+            require(definition['source_compatibility']==_feature_source_compatibility(
+                library,admitted_source,spec['feature_selection']),
+                'training Feature/source compatibility receipt mismatch')
             require(capabilities['sessions']==days and capabilities['sample_universe']==securities and
                     capabilities['columns']==columns and
                     [capabilities['definitions'][n]['schema'] for n in columns]==schema,
