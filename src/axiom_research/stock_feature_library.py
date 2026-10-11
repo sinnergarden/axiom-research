@@ -262,13 +262,13 @@ class CatalogFeatureLibrary:
 class _RawCrossSectionSource:
     def __init__(self, raw_view, source):
         self.raw_view,self.source=raw_view,source
-        self._tiles={(t['session'],t['column']):t['partition'] for t in raw_view._view['tiles']}
 
     def source_bindings(self, day, columns):
         reference=self.source.source.source_bindings()[-1]
         bindings={reference['id']:reference}
+        receipts=self.raw_view.column_receipts(day,list(columns))
         for column in columns:
-            for binding in self._tiles[day,column]['source_bindings'][column]:
+            for binding in receipts[column]['source_bindings']:
                 require(binding['id'] not in bindings or bindings[binding['id']]==binding, 'conflicting cached raw source ID')
                 bindings[binding['id']]=binding
         return sorted(bindings.values(),key=lambda b:b['id'])
@@ -280,11 +280,11 @@ class _RawCrossSectionSource:
         return FeaturePlan.from_dict(p)
 
     def dependency_refs(self, definitions, days, securities):
-        refs=self._tiles
         result={}
         for day in days:
+            refs=self.raw_view.column_receipts(day,list(definitions))
             result[day]={name:normalized_feature_dependency_ref(self.source,day,
-                refs[day,name]['semantic_refs'][name],refs[day,name]['dependency_refs'][name])
+                refs[name]['semantic_ref'],refs[name]['dependency_ref'])
                 for name in definitions}
         return result
 

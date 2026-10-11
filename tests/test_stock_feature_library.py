@@ -64,6 +64,13 @@ def saved_source(root, *, day_count=6, generation=0, value_shift=0, snapshot='sy
     return {'path':str(path),'file_digest':file_digest(path),'source_ref':manifest['source_ref']}
 
 
+def tiles(view):
+    cap=view.describe()
+    return [{"session":day,"column":column,"partition":receipt["partition"]}
+            for day in cap["sessions"]
+            for column,receipt in view.column_receipts(day).items()]
+
+
 class StockFeatureLibraryTests(unittest.TestCase):
     def test_second_experiment_adds_other_source_column_and_rejects_wrong_training_source(self):
         import json
@@ -79,21 +86,21 @@ class StockFeatureLibraryTests(unittest.TestCase):
                 day=source.source.manifest['spec']['feature_sessions'][0]
                 old,_=CatalogFeatureLibrary(library,source,catalog).ensure(selection=selection[:1],
                     output_sessions=[day],normalized=True)
-                with library.open_feature_view(old) as view: old_part=view._view['tiles'][0]['partition']['partition_ref']
+                with library.open_feature_view(old) as view: old_part=tiles(view)[0]['partition']['partition_ref']
             with SavedColumnFeatureSource(current,maximum_working_bytes=8*1024**2) as source:
                 descriptor,stats=CatalogFeatureLibrary(library,source,catalog).ensure(selection=selection,
                     output_sessions=[day],normalized=True)
                 self.assertEqual((stats['raw']['core_calls'],stats['cross_sectional']['core_calls']),(1,1))
                 self.assertEqual((stats['raw']['computed_output_cells'],stats['cross_sectional']['computed_output_cells']),(3,3))
                 with library.open_feature_view(descriptor) as view:
-                    self.assertEqual(view._view['tiles'][0]['partition']['partition_ref'],old_part)
+                    self.assertEqual(tiles(view)[0]['partition']['partition_ref'],old_part)
                     actual=view.project(); expected_plan=source.plan(catalog,selection,normalized=True)
                     inputs=source.prepare(expected_plan,day,['A','B','C'],{s['id']:digest(['direct']) for s in selection})
                     expected=execute_feature_columns(compile_feature_columns(expected_plan),inputs=inputs,
                         output_sessions=[day],max_working_bytes=8*1024**2)
                     for key in ('values','validity','available_at_utc_us'):
                         np.testing.assert_array_equal(actual[key],expected[key][0])
-                    new_tile=view._view['tiles'][1]['partition']
+                    new_tile=tiles(view)[1]['partition']
                     part=view._store.read_json({k:new_tile[k] for k in ('path','file_digest','partition_ref')},'partition_ref')
                     self.assertEqual([s['view_ref'] for s in part['column_source_bindings']['ALP003']],
                                      [current['source_ref']]*len(part['column_source_bindings']['ALP003']))

@@ -44,9 +44,10 @@ def _feature_source_compatibility(view, source, selection):
     if layer=='normalized':
         dependencies={day:{name:normalized_feature_dependency_ref(source,day,raw[name]['semantic_ref'],ref)
                            for name,ref in columns.items()} for day,columns in dependencies.items()}
-    tiles={(t['session'],t['column']):t['partition'] for t in view._view['tiles']}
-    require(all(tiles[day,name]['dependency_refs'][name]==ref for day,columns in dependencies.items()
-                for name,ref in columns.items()), 'Feature/source local dependency or reference mismatch')
+    for day,columns in dependencies.items():
+        receipts=view.column_receipts(day,list(columns))
+        require(all(receipts[name]['dependency_ref']==ref for name,ref in columns.items()),
+                'Feature/source local dependency or reference mismatch')
     return seal({'contract_version':'stock_feature_source_compatibility_v1','layer':layer,
         'view_ref':view.identity,'semantic_refs':{n:cap['definitions'][n]['semantic_ref'] for n in cap['columns']},
         'dependency_refs':dependencies,'reference_security_ids':list(source.reference_security_ids),
