@@ -35,7 +35,7 @@ def column_result_rows(result, selection, member):
     return rows, {'selection': selection, 'selection_ref': digest(selection), 'core_header': header}
 
 
-def iter_column_feature_days(source, *, catalog, sessions, maximum_resident_bytes, stats):
+def iter_column_feature_days(source, *, catalog, sessions, maximum_resident_bytes, stats, history_sessions=252):
     from axiom_engine.core import compile_feature_columns, execute_feature_columns
     from .stock_feature_columns import feature_column_plan
     plan = feature_column_plan(source, catalog); wire = plan.to_dict()
@@ -44,7 +44,7 @@ def iter_column_feature_days(source, *, catalog, sessions, maximum_resident_byte
     for day in sessions:
         tick = time.perf_counter_ns()
         inputs, selection = source.core_inputs(day, calendar_ref=wire['calendar_ref'],
-            reference_ref=wire['reference_ref'], schema=wire['input_schema'])
+            reference_ref=wire['reference_ref'], schema=wire['input_schema'], history_sessions=history_sessions)
         stats['column_view_ns'] = stats.get('column_view_ns', 0) + time.perf_counter_ns() - tick
         tick = time.perf_counter_ns()
         result = execute_feature_columns(compiled, inputs=inputs, output_sessions=[day],
@@ -73,6 +73,11 @@ def build_column_feature_matrix(data, *, spec, destination, storage_options, pro
     universe_id = _spec(spec); catalog = load_feature_catalog_ref(spec['catalog_ref'])
     chosen = catalog.select(spec['feature_selection'])
     require([c['id'] for c in chosen] == spec['ordered_features'], 'column Feature catalog order mismatch')
+    history_length = max(c['lookback'] for c in chosen); calendar = spec['calendar']
+    first = calendar.index(spec['feature_sessions'][0])
+    require(first >= history_length - 1 and spec['read_sessions'] == calendar[
+        first - history_length + 1:calendar.index(spec['feature_sessions'][-1]) + 1],
+        'actual Feature history range mismatch')
     source_path = Path(column_source) if column_source is not None else Path(destination) / 'shared-source/source.json'
     if source_path.exists():
         source = load_feature_column_source(source_path); source_metrics = {'data_read_calls': 0, 'reused': True}
@@ -80,6 +85,8 @@ def build_column_feature_matrix(data, *, spec, destination, storage_options, pro
         require(column_source is None, 'explicit saved column source does not exist')
         source, source_metrics = build_feature_column_source(data, spec=spec, destination=source_path.parent, progress=progress)
     physical_spec=source.manifest['spec']
+    require(all(physical_spec[k] == spec[k] for k in ('catalog_ref', 'feature_selection', 'ordered_features')),
+        'shared column source Feature catalog/selection mismatch')
     require(all(physical_spec[k]==spec[k] for k in ('calendar','universe','snapshot','pit_policy','scope')) and
         set(spec['read_sessions'])<=set(physical_spec['read_sessions']) and
         set(spec['feature_sessions'])<=set(physical_spec['feature_sessions']) and
@@ -150,7 +157,8 @@ def build_column_feature_matrix(data, *, spec, destination, storage_options, pro
                 progress({'stage': 'feature_column_block', 'completed_dates': len(completed),
                     'total_dates': len(spec['feature_sessions']), 'producer_stats': deepcopy(stats)})
         for daily, evidence in iter_column_feature_days(source, catalog=catalog,
-                sessions=spec['feature_sessions'][len(completed):], maximum_resident_bytes=options['maximum_resident_bytes'], stats=stats):
+                sessions=spec['feature_sessions'][len(completed):], maximum_resident_bytes=options['maximum_resident_bytes'],
+                stats=stats, history_sessions=history_length):
             rows.extend(daily); proof.append(evidence)
             if len(proof) == options['row_block_sessions']: publish()
         if proof: publish()

@@ -53,6 +53,7 @@ def fixture(root, *, source_spec=None, qlib_view=None, output_session=None):
     header={'contract_version':'feature_column_result_v1','plan_ref':digest(['synthetic plan']),
         'compiled_ref':digest(['synthetic compiled']),'implementation_ref':digest(['synthetic implementation']),
         'schema':schema,'input_refs':refs,'source_bindings':sources,
+        'reason_dictionary':[None,'SYNTHETIC_REASON'],
         'input_metadata':input_metadata,'input_buffers':input_buffers,
         'input_ref':_core_ref({'metadata':input_metadata,'buffers':input_buffers}),
         'sessions':[output_session],'security_ids':securities,'null_available_at_utc_us':-(2**63)}
@@ -184,6 +185,14 @@ class ColumnMetadataTests(unittest.TestCase):
             self.assertEqual(selections[0]['feature_ref'],parents['2023-01-03']['feature_ref'])
             self.assertIn(proof[0]['selection_ref'],reachable)
             self.assertNotIn('core_frame_ref',metadata['input_evidence'][0])
+            bad_rows=deepcopy(rows); bad_rows[0]['reasons'][0]=['SYNTHETIC_REASON']
+            from axiom_research.stock_matrix_feature_column_metadata import _validate_core_header
+            with self.assertRaisesRegex(ValueError,'output buffer differs'):
+                _validate_core_header(proof[0]['core_header'],bad_rows,proof[0]['selection'],spec,schema)
+            short=deepcopy(spec); short['read_sessions']=spec['read_sessions'][1:]
+            short['cutoff_by_session']={d:spec['cutoff_by_session'][d] for d in short['read_sessions']}
+            with self.assertRaisesRegex(ValueError,'history outside declared target'):
+                validate_metadata(metadata,rows,short,view,manifest,metadata['day_outputs'],universe_id='csi300')
             bad=deepcopy(metadata); p=bad['input_evidence'][0]
             p['core_header']['input_refs']=[descriptor['source_ref']]
             p.pop('day_evidence_ref'); p.update(seal(p,'day_evidence_ref'))

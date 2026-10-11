@@ -46,8 +46,16 @@ def _validate_core_header(header, rows, selection, spec, schema):
     packed=_row_buffers(rows,len(schema))
     clocks=_buffer_array((instant_us(a) if a is not None else header['null_available_at_utc_us']
         for row in rows for a in row['availability']),'int64_le')
+    dictionary=header['reason_dictionary']
+    require(type(dictionary) is list and dictionary and dictionary[0] is None and
+        len(set(dictionary))==len(dictionary),'packed Core reason dictionary mismatch')
+    reason_ids={reason:i for i,reason in enumerate(dictionary)}
+    require(all(len(reasons)<=1 and (not reasons or reasons[0] in reason_ids and reason_ids[reasons[0]]>0)
+        for row in rows for reasons in row['reasons']),'packed Core single reason required')
+    reasons=_buffer_array((reason_ids[r[0]] if r else 0 for row in rows for r in row['reasons']),'int32_le')
     for name,value,dtype in [('values',packed['values'],'<f8'),
-        ('validity',packed['value_validity'],'|b1'),('available_at_utc_us',clocks,'<i8')]:
+        ('validity',packed['value_validity'],'|b1'),('available_at_utc_us',clocks,'<i8'),
+        ('reason_codes',reasons,'<i4')]:
         require(header['output_buffers'][name]=={'shape':[1,len(rows),len(schema)],'dtype':dtype,
             'sha256':sha256(memoryview(value).cast('B')).hexdigest()},'packed Core output buffer differs from saved rows')
 
@@ -203,6 +211,9 @@ def validate_metadata(metadata, rows, spec, view, source_manifest, outputs, *, u
         _verify_ref(proof,'day_evidence_ref'); selection=proof['selection']; header=proof['core_header']
         _fields(selection,SELECTION_FIELDS,'exact daily column source selection required')
         history=ordered(selection['history_sessions'],'column Feature history')
+        target_end=spec['read_sessions'].index(day)+1
+        require(target_end>=len(history) and spec['read_sessions'][target_end-len(history):target_end]==history,
+                'column Feature history outside declared target read sessions')
         require(selection['source_ref']==source_ref and selection['session']==day and
             selection['anchor_session']==day and history[-1]==day and day in source_spec['feature_sessions'] and
             proof['selection_ref']==digest(selection),'column Feature selection identity/anchor mismatch')
