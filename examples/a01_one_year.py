@@ -4,6 +4,7 @@ Run each stage explicitly. This file adds no executor or process supervisor.
 The caller supplies local Data, immutable axes/config paths and byte budgets.
 """
 import argparse
+from contextlib import ExitStack
 import json
 from pathlib import Path
 
@@ -19,6 +20,7 @@ def main():
     args = parser.parse_args(); options = read(args.options)
     from axiom_research import (load_stock_sequential_configuration, to_dict,
         build_stock_feature_inputs, load_stock_feature_view,
+        load_stock_ml_batch_inputs,
         build_configured_stock_sequential_experiment,
         stock_evaluation_sessions, evaluate_stock_signal_input_analysis)
     from axiom_research.stock_artifacts import write_json
@@ -54,8 +56,10 @@ def main():
     limits.update({name:preparation[name] for name in ('maximum_parent_bytes','maximum_source_bytes')
         if name in preparation})
     feature_path = read(options['feature_result'])['path']
-    reuse = read(options['reuse_raw_from_batch']) if options.get('reuse_raw_from_batch') else None
-    with load_stock_feature_view(feature_path,limits=limits,residency='sequential') as feature:
+    reuse_manifest = read(options['reuse_raw_from_batch']) if options.get('reuse_raw_from_batch') else None
+    with load_stock_feature_view(feature_path,limits=limits,residency='sequential') as feature, ExitStack() as owners:
+        reuse = owners.enter_context(load_stock_ml_batch_inputs(reuse_manifest,
+            feature_inputs=feature,limits=limits,residency='sequential')) if reuse_manifest is not None else None
         snapshot = feature.to_dict()['spec']['snapshot']
         with data.open_column_source(snapshot=snapshot,limits=options['data_limits']) as source:
             metrics = {}
