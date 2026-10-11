@@ -549,13 +549,16 @@ class _CompactRows:
             return indexes[key]
         self.knowledge = np.asarray([code(r['knowledge_cutoff']) for r in rows], dtype='<u4')
         self.sources = np.asarray([code(r['source_refs']) for r in rows], dtype='<u4')
-        require(all(len(r['reasons'])==len(r['availability'])==width for r in rows),'complete matrix row metadata required')
+        require(all(len(r['validity'])==len(r['reasons'])==len(r['availability'])==width for r in rows),'complete matrix row metadata required')
         # Intern the complete row vector. The same route supports any column
         # count, retaining exact strings/lists without a dense N×F code panel.
         self.reasons = np.asarray([code(r['reasons']) for r in rows], dtype='<u4')
         self.availability = np.asarray([code(r['availability']) for r in rows], dtype='<u4')
-        self.bytes = sum(a.nbytes for a in (self.member,self.knowledge,self.sources,self.reasons,self.availability))+_resident_size(self.dictionary)
-        for a in (self.member,self.knowledge,self.sources,self.reasons,self.availability): a.flags.writeable = False
+        # Keep the original validity vector as an interned fact, so admitting
+        # another physical column part never needs the discarded wide JSON.
+        self.validity = np.asarray([code(r['validity']) for r in rows], dtype='<u4')
+        self.bytes = sum(a.nbytes for a in (self.member,self.knowledge,self.sources,self.reasons,self.availability,self.validity))+_resident_size(self.dictionary)
+        for a in (self.member,self.knowledge,self.sources,self.reasons,self.availability,self.validity): a.flags.writeable = False
 
     def row(self, ordinal, *, security, session, values, validity):
         return {'security_id':security,'session':session,'member':bool(self.member[ordinal]),
