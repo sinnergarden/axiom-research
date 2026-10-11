@@ -1,0 +1,32 @@
+{
+  "data_limits": {
+    "cache_bytes": 4294967296,
+    "max_working_bytes": 17179869184
+  },
+  "data_root": "<LOCAL_DATA_ROOT>",
+  "evaluation": {
+    "frequency": "daily",
+    "group_spec": {
+      "annualization": "none",
+      "group_assignment": "average_rank_fraction",
+      "group_count": 10,
+      "minimum_pairs": 20,
+      "rank_ties": "average",
+      "return_semantics": "raw_label_return",
+      "time_weighting": "equal_valid_sessions"
+    }
+  },
+  "experiment_file": "<ABSOLUTE_TEMPLATE_DIR>/subset-experiment.yaml",
+  "experiment_result": "<ABSOLUTE_SUBSET_OUTPUT_ROOT>/experiment-result.json",
+  "feature_column_source": null,
+  "feature_result": "<ABSOLUTE_MAIN_OUTPUT_ROOT>/feature-result.json",
+  "feature_spec": "<ASSEMBLED_AXES_JSON>",
+  "feature_storage_options": {
+    "column_block": 32,
+    "layout": "matrix_v3",
+    "maximum_resident_bytes": 17179869184,
+    "row_block_sessions": 8
+  },
+  "output_root": "<ABSOLUTE_SUBSET_OUTPUT_ROOT>",
+  "reuse_raw_from_batch": "<ABSOLUTE_MAIN_OUTPUT_ROOT>/batch.json"
+}

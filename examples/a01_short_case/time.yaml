@@ -1,0 +1,10 @@
+evaluation_cutoff: '2024-03-01T20:30:00+08:00'
+fit_time: '20:30'
+inference_time: '21:00'
+label_horizon_sessions: 40
+mature_sessions: 60
+model_time: '20:45'
+retrain_every_sessions: 20
+timezone: Asia/Shanghai
+trade_end_exclusive: '2023-02-08'
+trade_start: '2023-01-03'

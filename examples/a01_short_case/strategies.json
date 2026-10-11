@@ -1,0 +1,28 @@
+{
+  "initial_cash_minor": 50000000,
+  "variants": {
+    "top5": {
+      "selection": "top_k",
+      "top_k": 5
+    },
+    "rank_buffer5_keep10": {
+      "selection": "rank_buffer",
+      "top_k": 5,
+      "rank_buffer": {
+        "keep_rank": 10
+      }
+    },
+    "top5_weekly_exit20_10": {
+      "selection": "top_k",
+      "top_k": 5,
+      "exit_overlay": {
+        "take_profit": "0.20",
+        "stop_loss": "0.10",
+        "cost_basis": "fee_inclusive_ledger_cost_per_owned_share_v1",
+        "check": "rebalance_sessions_only",
+        "cooldown_rebalance_sessions": 1,
+        "reentry": "after_flat_and_cooldown"
+      }
+    }
+  }
+}

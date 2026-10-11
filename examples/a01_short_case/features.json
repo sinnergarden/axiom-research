@@ -1,0 +1,457 @@
+{
+  "contract_version": "stock_feature_inputs_spec_v1",
+  "catalog_ref": "sha256:d45348375b02da2bc05213b7dcd6f634ecd0bd9afc22b860a7cec2ad5cd84c5c",
+  "feature_selection": [
+    {
+      "id": "ALP001",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP002",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP003",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP004",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP005",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP006",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP007",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP008",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP009",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP010",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP011",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP012",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP014",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP015",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP016",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP017",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP018",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP019",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP020",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP021",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP022",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP023",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP024",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP025",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP026",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP027",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP028",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP044",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP045",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP046",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP047",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP048",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP049",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP050",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP051",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP052",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP053",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP064",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP065",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP066",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP067",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP068",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP069",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP070",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP071",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP072",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP073",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP099",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP100",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP101",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP102",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP103",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP104",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP105",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP106",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP107",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP108",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP109",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP110",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP111",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP112",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP113",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP114",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP115",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP116",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP117",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP118",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP119",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP120",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP121",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP122",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP123",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP124",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP125",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP126",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP127",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "ALP128",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "TRN001",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "TRN002",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "TRN003",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "TRN004",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "TRN005",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "LQD001",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "LQD002",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "LQD003",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "LQD004",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "LQD005",
+      "semantic_version": "1.0.0"
+    },
+    {
+      "id": "LQD006",
+      "semantic_version": "1.0.0"
+    }
+  ],
+  "ordered_features": [
+    "ALP001",
+    "ALP002",
+    "ALP003",
+    "ALP004",
+    "ALP005",
+    "ALP006",
+    "ALP007",
+    "ALP008",
+    "ALP009",
+    "ALP010",
+    "ALP011",
+    "ALP012",
+    "ALP014",
+    "ALP015",
+    "ALP016",
+    "ALP017",
+    "ALP018",
+    "ALP019",
+    "ALP020",
+    "ALP021",
+    "ALP022",
+    "ALP023",
+    "ALP024",
+    "ALP025",
+    "ALP026",
+    "ALP027",
+    "ALP028",
+    "ALP044",
+    "ALP045",
+    "ALP046",
+    "ALP047",
+    "ALP048",
+    "ALP049",
+    "ALP050",
+    "ALP051",
+    "ALP052",
+    "ALP053",
+    "ALP064",
+    "ALP065",
+    "ALP066",
+    "ALP067",
+    "ALP068",
+    "ALP069",
+    "ALP070",
+    "ALP071",
+    "ALP072",
+    "ALP073",
+    "ALP099",
+    "ALP100",
+    "ALP101",
+    "ALP102",
+    "ALP103",
+    "ALP104",
+    "ALP105",
+    "ALP106",
+    "ALP107",
+    "ALP108",
+    "ALP109",
+    "ALP110",
+    "ALP111",
+    "ALP112",
+    "ALP113",
+    "ALP114",
+    "ALP115",
+    "ALP116",
+    "ALP117",
+    "ALP118",
+    "ALP119",
+    "ALP120",
+    "ALP121",
+    "ALP122",
+    "ALP123",
+    "ALP124",
+    "ALP125",
+    "ALP126",
+    "ALP127",
+    "ALP128",
+    "TRN001",
+    "TRN002",
+    "TRN003",
+    "TRN004",
+    "TRN005",
+    "LQD001",
+    "LQD002",
+    "LQD003",
+    "LQD004",
+    "LQD005",
+    "LQD006"
+  ],
+  "feature_sessions": [
+    "<EXACT_PREPARATION_FEATURE_SESSIONS>"
+  ],
+  "read_sessions": [
+    "<EXACT_252_LOOKBACK_READ_SESSIONS>"
+  ],
+  "cutoff_by_session": {
+    "<EVERY_READ_SESSION>": "<AWARE_VENDOR_KNOWLEDGE_CUTOFF>"
+  }
+}

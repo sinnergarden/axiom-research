@@ -1,0 +1,15 @@
+{
+  "snapshot": "<FROZEN_SNAPSHOT_ID>",
+  "pit_policy": "best_effort_vendor_v1",
+  "scope": {
+    "path": "<ABSOLUTE_SAVED_SCOPE_JSON>",
+    "file_digest": "sha256:<SCOPE_FILE_HEX_DIGEST>",
+    "scope_bundle_ref": "sha256:<SCOPE_BUNDLE_HEX_DIGEST>"
+  },
+  "calendar": [
+    "<ALL_FROZEN_EXCHANGE_SESSIONS>"
+  ],
+  "universe": [
+    "<ALL_HISTORICAL_CSI300_SECURITY_IDS>"
+  ]
+}

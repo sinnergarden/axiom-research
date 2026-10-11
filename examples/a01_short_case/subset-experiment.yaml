@@ -1,0 +1,5 @@
+contract_version: stock_sequential_configuration_v1
+specification_files:
+- label.yaml
+- model.yaml
+dataset_file: subset-dataset.yaml
