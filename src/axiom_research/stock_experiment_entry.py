@@ -16,9 +16,8 @@ def build_configured_stock_sequential_experiment(data,*,configuration_path,featu
     """Notebook/worker entry; all schedule and model values come from YAML."""
     from .stock_experiment_config import load_stock_sequential_configuration
     configuration=load_stock_sequential_configuration(configuration_path);dataset=configuration['dataset']
-    from .result_registration import begin_stock_result_registration, publish_stock_result
-    from .stock_artifacts import write_json
-    from .api import to_dict
+    from .result_registration import (begin_stock_result_registration, publish_stock_result,
+        _save_stock_sequential_receipt, _record_stock_result_failure)
     root=Path(destination).resolve().parent
     context=registration or dict(request_path=root/'.result-request.json',
         roots={'research':str(Path(configuration_path).resolve().parent)},
@@ -38,18 +37,11 @@ def build_configured_stock_sequential_experiment(data,*,configuration_path,featu
             reuse_raw_from_batch=reuse_raw_from_batch,metrics=metrics,progress=progress)
         result.update(configuration_ref=configuration['configuration_ref'],dataset_configuration_ref=configuration['dataset_ref'],
             configuration_files=configuration['configuration_files'])
-        saved=deepcopy(result)
-        for name in ('raw_signal_evaluation_input','signal_evaluation_input'):
-            saved[name]=to_dict(saved[name])
-        if metrics is not None:saved['metrics']=deepcopy(metrics)
-        root.mkdir(parents=True,exist_ok=True)
-        write_json(root/'experiment-result.json',saved)
-        write_json(root/'batch.json',saved['batch_manifest'])
-        write_json(root/'prediction-bindings.json',saved['prediction_bindings'])
-        publish_stock_result(**context,experiment_result=root/'experiment-result.json')
+        saved_path=_save_stock_sequential_receipt(result,destination=root,metrics=metrics)
+        publish_stock_result(**context,experiment_result=saved_path)
         return result
     except Exception as exc:
-        publish_stock_result(**context,failure=type(exc).__name__+': '+str(exc))
+        _record_stock_result_failure(**context,failure=type(exc).__name__+': '+str(exc))
         raise
 
 

@@ -42,7 +42,8 @@ def main():
     except Exception as exc:
         if registration is not None:
             try:
-                publish_stock_result(**registration, failure=type(exc).__name__+': '+str(exc))
+                from axiom_research.result_registration import _record_stock_result_failure
+                _record_stock_result_failure(**registration, failure=type(exc).__name__+': '+str(exc))
             except Exception as registration_error:
                 import sys
                 print('Result registration failed: '+str(registration_error), file=sys.stderr)
@@ -62,7 +63,10 @@ def execute(args, options, configured, output, registration):
             'prediction_dates':len(configured['dataset']['scope']['sessions'])}))
         return
     if args.stage == 'evaluate':
-        saved = read(options['experiment_result']); scope = configured['dataset']['scope']
+        from axiom_research.result_registration import _registered_sequential_path
+        saved_path = _registered_sequential_path(**registration) if registration is not None else None
+        saved_path = saved_path or Path(options['experiment_result'])
+        saved = read(saved_path); scope = configured['dataset']['scope']
         trades = [d for f in configured['dataset']['fold_specs'] for d in f['oos_trade_sessions']]
         scope = {**scope, 'sessions':stock_evaluation_sessions(calendar=scope['calendar'],
             trade_sessions=trades,frequency=options['evaluation']['frequency'])}
@@ -73,7 +77,7 @@ def execute(args, options, configured, output, registration):
         write_json(output/'evaluation-result.json',result)
         if registration is not None:
             from axiom_research import publish_stock_result
-            publish_stock_result(**registration, experiment_result=options['experiment_result'],
+            publish_stock_result(**registration, experiment_result=saved_path,
                 signal_evaluation=output/'evaluation-result.json')
         return
     from axiom_data import Data
@@ -103,15 +107,8 @@ def execute(args, options, configured, output, registration):
                 column_source=source,destination=output/'training',reuse_raw_from_batch=reuse,
                 metrics=metrics,progress=lambda event:print(json.dumps(event),flush=True),
                 registration=registration)
-    for name in ('raw_signal_evaluation_input','signal_evaluation_input'):
-        result[name] = to_dict(result[name])
-    result['metrics'] = metrics
-    write_json(output/'experiment-result.json',result)
-    write_json(output/'batch.json',result['batch_manifest'])
-    write_json(output/'prediction-bindings.json',result['prediction_bindings'])
-    if registration is not None:
-        from axiom_research import publish_stock_result
-        publish_stock_result(**registration, experiment_result=output/'experiment-result.json')
+    # The configured producer has already saved and registered an immutable
+    # receipt group. The CLI must not rewrite files referenced by its head.
 
 
 if __name__ == '__main__': main()

@@ -165,10 +165,18 @@ class ResultDiscoveryTests(unittest.TestCase):
             predictions.append(dict(contract_version='stock_prediction_frame_v2',fold_spec_ref=digest(spec),
                 **{k:fold[k] for k in ('signal_run_ref','model_ref','feature_ref')}))
         bindings = dict(contract_version='stock_prediction_input_refs_v2',prediction_ref=digest('frames'),frames=[])
+        saved_folds=[]
+        for i,fold in enumerate(folds):
+            folder=self.root/('fold-'+str(i));folder.mkdir();write_json(folder/'fold.json',fold)
+            saved_folds.append(dict(path=str(folder),fold_ref=fold['fold_ref'],signal_run_ref=fold['signal_run_ref'],
+                                    fold_spec_ref=fold['definition']['fold_spec_ref']))
+            bindings['frames'].append(dict(kind='raw',fold_ref=fold['fold_ref'],signal_run_ref=fold['signal_run_ref'],
+                prediction_artifact=dict(manifest_uri=str(self.root/('prediction-'+str(i)+'.json')),
+                    content_digest=digest(predictions[i]),contract_version=predictions[i]['contract_version'])))
         sequential = dict(contract_version='stock_sequential_result_projection_v1',result_ref=digest('sequential'),
             configuration_ref=cfg['configuration_ref'],dataset_configuration_ref=cfg['dataset_ref'],spec_refs=refs,
             batch_ref=batch['batch_ref'],batch_content_digest=batch['content_digest'],
-            folds=[{k:f[k] for k in ('fold_ref','signal_run_ref')} for f in folds],prediction_input=bindings,
+            folds=saved_folds,prediction_input=bindings,
             signal_evaluation_input=dict(uri=str(inputs),artifact_id=digest('input'),content_digest=file_digest(inputs)))
         outputs = {'sequential':('StockSequentialResult',sequential,'result_ref',sequential['result_ref']),
             'batch':('StockMLBatchManifest',batch,'batch_ref',batch['content_digest']),
@@ -189,6 +197,104 @@ class ResultDiscoveryTests(unittest.TestCase):
             evaluation_artifact_keys=[]) for i,f in enumerate(folds)]
         manifest.pop('content_digest');manifest = _seal(manifest)
         return frozen, sequential, batch, folds, outputs, manifest
+
+    def owner_projection(self, outputs, path, **kwargs):
+        from axiom_research.stock_result_projection import StockSavedProjection
+        name=Path(path).parent.name if Path(path).name=='fold.json' else Path(path).stem
+        if name=='prediction-bindings':name='bindings'
+        if Path(path).name=='experiment-result.json':
+            raw=json.loads(Path(path).read_text());wire=deepcopy(outputs['sequential'][1])
+            wire['result_ref']=digest(raw)
+            return StockSavedProjection(wire,wire['result_ref'],wire['result_ref'])
+        _,wire,identity,content=outputs[name]
+        return StockSavedProjection(wire,wire[identity],content)
+
+    def patch_owners(self, stack, outputs):
+        from functools import partial
+        saved=partial(self.owner_projection,outputs)
+        for loader in ('load_stock_sequential_result','load_stock_ml_batch_manifest',
+                       'load_stock_prediction_bindings','load_stock_fold_projection','load_stock_prediction_projection'):
+            stack.enter_context(patch('axiom_research.stock_result_projection.'+loader,side_effect=saved))
+        for loader in ('load_stock_sequential_result','load_stock_prediction_bindings','load_stock_fold_projection'):
+            stack.enter_context(patch('axiom_research.result_registration.'+loader,side_effect=saved))
+
+    def test_blocked_engine_status_is_preserved_and_false_complete_is_rejected(self):
+        from contextlib import ExitStack
+        from types import SimpleNamespace
+        from axiom_research.stock_artifacts import write_json
+        _,seq,_,_,outputs,manifest=self.saved_output_fixture()
+        engine=self.root/'engine';engine.mkdir();roots={**self.roots,'engine':engine}
+        run=dict(contract_version='backtest_run_v8',run_id=digest('run'),content_digest=digest('run content'),
+            committed_sequence=7,status='BLOCKED',stopped={'reason':'HELD_EQUITY_FACT_GAP'},
+            signal_ref=seq['prediction_input']['prediction_ref'],request_manifest=dict(
+                portfolio_policy={'fixed':'policy'},prediction_input=seq['prediction_input']))
+        ref={k:run[k] for k in ('run_id','content_digest','committed_sequence')}
+        path=engine/'run.json';write_json(path,run)
+        saved=SimpleNamespace(wire=run,input_run_ref=ref,verify=lambda:SimpleNamespace(wire=run))
+        with ExitStack() as stack:
+            self.patch_owners(stack,outputs)
+            stack.enter_context(patch('axiom_engine.runtime.load_stock_backtest_projection',return_value=saved))
+            self.store.publish_result(manifest,roots=roots)
+            head=publish_stock_result(self.root/'output-request.json',index_path=self.index,roots=roots,
+                engine_handoff={'accounts':[dict(run_manifest=str(path),run_ref=ref,evaluations={})]})
+            actual=self.reader.result(head['result_id'],roots=roots)
+            self.assertEqual((head['status'],actual['accounts'][0]['status']),('BLOCKED','BLOCKED'))
+            self.assertEqual(actual['accounts'][0]['reason'],run['stopped']['reason'])
+            bad=self.revision(actual,status='COMPLETE',reason=None)
+            bad['accounts'][0].update(status='COMPLETE',reason=None)
+            bad.pop('content_digest');bad=_seal(bad)
+            before=self.index.read_bytes()
+            with self.assertRaisesRegex(ExperimentRecordError,'saved Engine status'):
+                self.store.publish_result(bad,roots=roots)
+            self.assertEqual(self.index.read_bytes(),before)
+
+    def test_metrics_retry_uses_immutable_receipts_and_failed_publication_preserves_head(self):
+        from contextlib import ExitStack
+        from axiom_research import from_dict
+        from axiom_research.stock_experiment_entry import build_configured_stock_sequential_experiment
+        from axiom_research.result_registration import _registered_sequential_path
+        frozen,seq,batch,_,outputs,_=self.saved_output_fixture();cfg=frozen['configuration']
+        configured=dict(configuration_ref=cfg['configuration_ref'],dataset=cfg['dataset'],dataset_ref=cfg['dataset_ref'],
+            specification=dict(configuration_ref=cfg['specification_ref'],spec_refs=cfg['spec_refs'],
+                specs={k:from_dict(v) for k,v in cfg['specs'].items()}),configuration_files=['fixture.yaml'])
+        raw=dict(batch_manifest=batch,folds=seq['folds'],prediction_bindings=seq['prediction_input']['frames'],
+            derived_signals=[],spec_refs=seq['spec_refs'],raw_signal_evaluation_input=seq['signal_evaluation_input'],
+            signal_evaluation_input=seq['signal_evaluation_input'])
+        context=dict(request_path=self.root/'output-request.json',index_path=self.index,roots=self.roots)
+        with ExitStack() as stack:
+            self.patch_owners(stack,outputs)
+            stack.enter_context(patch('axiom_research.stock_experiment_config.load_stock_sequential_configuration',
+                                     return_value=configured))
+            stack.enter_context(patch('axiom_research.stock_experiment_entry._build_stock_sequential_experiment',
+                                     side_effect=lambda *a,**kw:deepcopy(raw)))
+            def build(metric):
+                return build_configured_stock_sequential_experiment(None,configuration_path=self.root/'fixture.yaml',
+                    feature_inputs=None,column_source=None,destination=self.root/'output'/'training',
+                    metrics={'observed':metric},registration=context)
+            build(1);first=next(h for h in self.reader.index()['result_heads'] if h['result_id']==frozen['result_id'])
+            path1=_registered_sequential_path(**context);bytes1=path1.read_bytes();mtime1=path1.stat().st_mtime_ns
+            build(2);second=next(h for h in self.reader.index()['result_heads'] if h['result_id']==frozen['result_id'])
+            path2=_registered_sequential_path(**context)
+            self.assertNotEqual(path1,path2);self.assertEqual(first['result_id'],second['result_id'])
+            self.assertEqual(first['revision']+1,second['revision'])
+            self.assertEqual((path1.read_bytes(),path1.stat().st_mtime_ns),(bytes1,mtime1))
+            self.assertEqual(json.loads(path1.read_text())['metrics'],{'observed':1})
+            self.assertEqual(json.loads(path2.read_text())['metrics'],{'observed':2})
+            previous=self.reader.result(second['result_id'],roots=self.roots)
+            current_id=next(a['artifact_id'] for a in previous['artifacts'] if a['artifact_type']=='StockSequentialResult')
+            original=ExperimentStore.publish_result
+            def refused(store, candidate, *, roots):
+                artifact=next((a for a in candidate['artifacts'] if a['artifact_type']=='StockSequentialResult'),None)
+                if artifact is not None and artifact['artifact_id']!=current_id:
+                    raise ExperimentRecordError('Synthetic publication refusal')
+                return original(store,candidate,roots=roots)
+            before=self.index.read_bytes(),self.index.stat().st_mtime_ns
+            with patch.object(ExperimentStore,'publish_result',refused):
+                with self.assertRaisesRegex(ExperimentRecordError,'publication refusal'):build(3)
+            self.assertEqual((self.index.read_bytes(),self.index.stat().st_mtime_ns),before)
+            self.assertEqual(self.reader.result(second['result_id'],roots=self.roots),previous)
+            self.assertEqual(_registered_sequential_path(**context),path2)
+            self.assertEqual((path1.read_bytes(),path1.stat().st_mtime_ns),(bytes1,mtime1))
 
     def test_saved_definitions_must_match_frozen_configuration_not_self_reported_ref(self):
         from axiom_research.stock_result_projection import _verify_configuration_outputs
@@ -261,6 +367,97 @@ class ResultDiscoveryTests(unittest.TestCase):
             self.assertEqual(self.reader.result(head["result_id"],roots=self.roots)["result_id"],head["result_id"])
             self.assertEqual(len(self.reader.index()["result_heads"]),1)
 
+    def test_real_reader_preserves_manifest_when_owner_leaf_is_missing(self):
+        head=self.first();expected=self.reader.result(head['result_id'],roots=self.roots)
+        self.request.unlink()
+        self.assertEqual(self.reader.result(head['result_id'],roots=self.roots),expected)
+        outside=self.root.parent/(self.root.name+'-missing.json')
+        self.request.symlink_to(outside)
+        with self.assertRaisesRegex(ExperimentRecordError,'escapes trusted root'):
+            self.reader.result(head['result_id'],roots=self.roots)
+        self.request.unlink()
+        (self.root/head['manifest_ref']['relative_path']).unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.reader.result(head['result_id'],roots=self.roots)
+
+    def test_real_reader_to_ui_isolates_one_missing_saved_account(self):
+        import importlib.util
+        if importlib.util.find_spec('axiom_ui') is None:
+            self.skipTest('optional UI source needed for cross-owner read-only acceptance')
+        import axiom_engine
+        from axiom_ui.result_catalog import LocalResultCatalog
+        from axiom_research.stock_artifacts import write_json
+        fixtures=Path(axiom_engine.__file__).parents[2]/'tests'/'fixtures'
+        if not (fixtures/'top5_run_v1.json').is_file():
+            self.skipTest('Engine source saved-run fixtures needed')
+        head=self.first();manifest=self.reader.result(head['result_id'],roots=self.roots)
+        engine=self.root/'engine';engine.mkdir();roots={**self.roots,'engine':engine}
+        runs=[]
+        for i,name in enumerate(('top5_run_v1.json','top5_run_v1_2_members.json')):
+            target=engine/('run-'+str(i)+'.json');target.write_bytes((fixtures/name).read_bytes())
+            wire=json.loads(target.read_text());runs.append(wire);key='run-'+str(i)
+            manifest['artifacts'].append(dict(artifact_key=key,owner='Engine',artifact_type='BacktestRun',
+                artifact_id=wire['run_id'],artifact_contract_version=wire['contract_version'],
+                content_digest=wire['content_digest'],root_id='engine',relative_path=target.name))
+            # Separate declared identities in this historical read fixture;
+            # these pre-existing owner cases differ in execution membership.
+            manifest['accounts'].append(dict(strategy_ref=digest({'fixture':name,
+                'portfolio_policy':wire['plan']['portfolio_policy']}),
+                signal_run_ref=wire['signal_ref'],status=wire['status'],reason=None,
+                backtest_ref=dict(artifact_key=key,**{k:wire[k] for k in
+                    ('run_id','content_digest','committed_sequence')}),evaluation_refs=[]))
+        manifest=self.revision(manifest,status='PARTIAL',reason='Synthetic saved legacy account read fixture')
+        # Install a valid historical metadata snapshot through the real Store.
+        # No Reader, UI or owner loader is mocked; saved Engine fixtures supply
+        # both account outputs without running an account or its evaluator.
+        relative='historical-accounts.json';write_json(self.root/relative,manifest)
+        current={k:manifest[k] for k in ('result_id','question_id','version_ref','revision','status','reason')}
+        current.update(updated_at=manifest['created_at'],manifest_ref=dict(root_id='research',
+            relative_path=relative,content_digest=manifest['content_digest']))
+        def install(state):
+            state['result_heads'][current['result_id']]=current
+            return current,True
+        self.store._mutate(install)
+        (engine/'run-0.json').unlink()
+        before=self.index.read_bytes(),self.index.stat().st_mtime_ns
+        good=(engine/'run-1.json').read_bytes(),(engine/'run-1.json').stat().st_mtime_ns
+        self.assertEqual(self.reader.result(current['result_id'],roots=roots),manifest)
+        with patch('axiom_engine.runtime.run_backtest',side_effect=AssertionError('account executed')), \
+             patch('axiom_engine.runtime.evaluate_backtest',side_effect=AssertionError('evaluation recomputed')):
+            catalog=LocalResultCatalog(research_root=self.root,engine_root=engine)
+            self.assertIsInstance(catalog.reader,ExperimentReader)
+            page=catalog.detail_html(current['result_id'])
+        self.assertNotIn('保存清单未能验证',page)
+        self.assertIn('策略账户（2）',page)
+        self.assertIn('账户保存件未提供',page)
+        self.assertEqual(catalog.opened_runs[current['result_id']],{runs[1]['run_id']})
+        self.assertIn('已打开并验证的保存回测 1',catalog.index_html())
+        self.assertEqual((self.index.read_bytes(),self.index.stat().st_mtime_ns),before)
+        self.assertEqual(((engine/'run-1.json').read_bytes(),(engine/'run-1.json').stat().st_mtime_ns),good)
+
+    def test_saved_projection_rejects_external_sibling_before_reading_bytes(self):
+        from axiom_research import load_stock_sequential_result,load_stock_fold_projection
+        from axiom_research.stock_artifacts import write_json
+        outside=self.root.parent/(self.root.name+'-external.json');outside.write_text('{}')
+        original=Path.open
+        def guarded(path,*args,**kwargs):
+            if path.resolve()==outside.resolve():raise AssertionError('external bytes opened')
+            return original(path,*args,**kwargs)
+        try:
+            for sibling in ('batch.json','prediction-bindings.json','manifest.json'):
+                folder=self.root/sibling.replace('.json','');folder.mkdir()
+                write_json(folder/'experiment-result.json',{})
+                if sibling=='prediction-bindings.json':
+                    batch=dict(contract_version='stock_ml_batch_inputs_v5',status='COMPLETE',
+                        definition={},definition_ref=digest({}),folds=[])
+                    batch['batch_ref']=digest(batch);write_json(folder/'batch.json',_seal(batch))
+                (folder/sibling).symlink_to(outside)
+                with self.subTest(sibling=sibling),patch.object(Path,'open',guarded):
+                    with self.assertRaisesRegex(ExperimentRecordError,'escapes Research root'):
+                        if sibling=='manifest.json':load_stock_fold_projection(folder,research_root=self.root)
+                        else:load_stock_sequential_result(folder/'experiment-result.json',research_root=self.root)
+        finally:outside.unlink()
+
     def test_concurrent_revision_conflict_cannot_drop_updates(self):
         head=self.first();previous=self.reader.result(head["result_id"],roots=self.roots)
         def writer(reason):
@@ -329,7 +526,7 @@ class ResultDiscoveryTests(unittest.TestCase):
             result=build_configured_stock_sequential_experiment(None,configuration_path=self.root/'config.yaml',
                 feature_inputs=None,column_source=None,destination=self.root/'derived'/'training',registration=context)
         self.assertIs(result,output)
-        self.assertTrue((self.root/'derived'/'experiment-result.json').exists())
+        self.assertEqual(len(list((self.root/'derived'/'saved-sequential').glob('*/experiment-result.json'))),1)
         head=self.reader.index()['result_heads'][0]
         self.assertEqual(head['status'],'BLOCKED')
         self.assertIn('Derived',head['reason'])

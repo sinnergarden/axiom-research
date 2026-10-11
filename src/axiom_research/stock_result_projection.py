@@ -82,7 +82,7 @@ def load_stock_fold_projection(path, *, research_root=None, batch_item=None, bin
     base = path.parent if path.is_file() else path
     root = research_root or base
     base = _local(base, root)
-    manifest = read_json(base / "manifest.json")
+    manifest = read_json(_local(base / "manifest.json", root))
     from .stock_matrix_folds import OUTPUTS, _predictions
     expected = set(OUTPUTS) | {"fold.json", "booster.txt"}
     _require(manifest["contract_version"] == "stock_ml_fold_manifest_v2" and
@@ -161,8 +161,9 @@ def load_stock_sequential_result(path, *, research_root=None):
     """Public lightweight A01 saved-result projection bound to batch and frames."""
     path = Path(path).resolve(strict=True); root = research_root or path.parent
     _local(path, root)
-    value = read_json(path); batch = load_stock_ml_batch_manifest(path.parent / "batch.json")
-    bindings = load_stock_prediction_bindings(path.parent / "prediction-bindings.json")
+    value = read_json(path)
+    batch = load_stock_ml_batch_manifest(_local(path.parent / "batch.json", root))
+    bindings = load_stock_prediction_bindings(_local(path.parent / "prediction-bindings.json", root))
     _require(value["batch_manifest"] == batch.wire and
              value["prediction_bindings"] == bindings.wire["frames"] and
              len(value["folds"]) == len(batch.wire["folds"]) == len(bindings.wire["frames"]),
@@ -305,6 +306,17 @@ def _verify_manifest_lineage(manifest, artifacts, verified, sequential, batch, f
                  "Signal prediction/fold lineage mismatch")
 
 
+def _saved_account_status(wire):
+    state = wire["status"]; stopped = wire["stopped"]
+    _require(state in ("COMPLETE", "BLOCKED") and
+             (state == "COMPLETE") == (stopped is None), "saved account status/stopped mismatch")
+    if stopped is None:
+        return state, None
+    _require(type(stopped) is dict and type(stopped.get("reason")) is str and
+             bool(stopped["reason"]), "saved account stopped reason required")
+    return state, stopped["reason"]
+
+
 def verify_result_artifacts(manifest, artifacts, paths, roots):
     """Fixed owner loaders; no loader names or code are read from manifests."""
     verified = {}
@@ -383,6 +395,8 @@ def verify_result_artifacts(manifest, artifacts, paths, roots):
         backtest = account["backtest_ref"]
         if backtest is None: continue
         run = verified[backtest["artifact_key"]]
+        _require((account["status"], account["reason"]) == _saved_account_status(run),
+                 "account declaration differs from saved Engine status/reason")
         _require(run["committed_sequence"] == backtest["committed_sequence"] and
                  run["signal_ref"] == account["signal_run_ref"], "account run/signal binding mismatch")
         _require(digest(run["request_manifest"]["portfolio_policy"]) == account["strategy_ref"],

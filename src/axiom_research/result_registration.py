@@ -6,7 +6,8 @@ import uuid
 from .experiments import ExperimentStore, ExperimentReader, _require, _now
 from .stock_artifacts import digest, write_json
 from .stock_result_projection import (load_stock_result_configuration,
-    load_stock_sequential_result, load_stock_fold_projection, load_stock_prediction_bindings)
+    load_stock_sequential_result, load_stock_fold_projection, load_stock_prediction_bindings,
+    _saved_account_status)
 
 STOCK_LIMITS = dict(max_folds=10, max_prediction_rows=20000, max_market_rows=25000,
     max_input_bytes=64*1024*1024, max_read_bytes=64*1024, max_block_bytes=64*1024*1024,
@@ -30,6 +31,69 @@ def _immutable(path, value):
             stream.write(payload); stream.flush(); os.fsync(stream.fileno())
     except FileExistsError:
         _require(path.read_text() == payload, "conflicting frozen result request")
+
+
+def _save_stock_sequential_receipt(result, *, destination, metrics=None):
+    """Save a complete immutable sibling group before publishing its index ref."""
+    import os
+    import shutil
+    import tempfile
+    from .api import to_dict
+    from .result_discovery import read_json
+    saved = deepcopy(result)
+    for name in ("raw_signal_evaluation_input", "signal_evaluation_input"):
+        if type(saved[name]) is not dict:
+            saved[name] = to_dict(saved[name])
+    if metrics is not None:
+        saved["metrics"] = deepcopy(metrics)
+    files = {"experiment-result.json": saved, "batch.json": saved["batch_manifest"],
+             "prediction-bindings.json": saved["prediction_bindings"]}
+    parent = Path(destination).resolve() / "saved-sequential"
+    parent.mkdir(parents=True, exist_ok=True)
+    target = parent / digest(saved)[7:]
+    def check():
+        _require(target.is_dir() and not target.is_symlink() and
+                 {p.name for p in target.iterdir()} == set(files) and
+                 all(not (target/name).is_symlink() and read_json(target/name) == value
+                     for name, value in files.items()), "immutable sequential receipt conflict")
+    if target.exists():
+        check()
+    else:
+        stage = Path(tempfile.mkdtemp(prefix=".receipt-", dir=parent))
+        try:
+            for name, value in files.items():
+                _immutable(stage/name, value)
+            try:
+                os.rename(stage, target)
+            except OSError:
+                if not target.exists():
+                    raise
+            check()
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+    return target / "experiment-result.json"
+
+
+def _registered_sequential_path(request_path, *, index_path, roots, exists=True):
+    frozen = load_stock_result_configuration(request_path).wire
+    reader = ExperimentReader(index_path)
+    if not any(h["result_id"] == frozen["result_id"] for h in reader.index().get("result_heads", [])):
+        return None
+    manifest = reader.result(frozen["result_id"], roots=roots)
+    refs = [a for a in manifest["artifacts"] if a["artifact_type"] == "StockSequentialResult"]
+    if not refs:
+        return None
+    _require(len(refs) == 1, "one registered sequential receipt required")
+    from .result_discovery import resolve
+    ref = refs[0]
+    return resolve(ref["root_id"], ref["relative_path"], roots, exists=exists)
+
+
+def _record_stock_result_failure(request_path, *, index_path, roots, failure):
+    """A failed retry must keep an already published saved result consumable."""
+    if _registered_sequential_path(request_path, index_path=index_path, roots=roots, exists=False) is None:
+        return publish_stock_result(request_path, index_path=index_path, roots=roots, failure=failure)
+    return None
 
 
 def begin_stock_result_registration(configuration, **options):
@@ -199,8 +263,9 @@ def publish_stock_result(request_path, *, index_path, roots, experiment_result=N
                      wire["content_digest"], item["run_manifest"])
             old = next((a for a in manifest["accounts"] if a["strategy_ref"] == strategy_ref and
                         a["signal_run_ref"] == wire["signal_ref"]), None)
-            account = dict(strategy_ref=strategy_ref, signal_run_ref=wire["signal_ref"], status="COMPLETE",
-                reason=None, backtest_ref={"artifact_key": key, **run.input_run_ref},
+            state, reason = _saved_account_status(wire)
+            account = dict(strategy_ref=strategy_ref, signal_run_ref=wire["signal_ref"], status=state,
+                reason=reason, backtest_ref={"artifact_key": key, **run.input_run_ref},
                 evaluation_refs=[] if old is None else deepcopy(old["evaluation_refs"]))
             del run
             for report in item["evaluations"].values():
@@ -216,7 +281,8 @@ def publish_stock_result(request_path, *, index_path, roots, experiment_result=N
                         input_run_ref=evaluation["input_run_ref"]))
             manifest["accounts"] = [a for a in manifest["accounts"] if
                 (a["strategy_ref"], a["signal_run_ref"]) != (strategy_ref, wire["signal_ref"])] + [account]
-    complete = bool(manifest["folds"] and manifest["signals"])
+    complete = bool(manifest["folds"] and manifest["signals"]) and all(
+        row["status"] == "COMPLETE" for table in ("folds", "signals", "accounts") for row in manifest[table])
     if "signal_evaluation" in frozen["required_stages"]:
         complete &= all(s["evaluation_artifact_keys"] for s in manifest["signals"])
     if "accounts" in frozen["required_stages"]:
@@ -227,6 +293,9 @@ def publish_stock_result(request_path, *, index_path, roots, experiment_result=N
         manifest.update(status="COMPLETE", reason=None)
     elif manifest["folds"]:
         manifest.update(status="PARTIAL", reason="Required owner stages are not all saved")
+    blocked = next((a for a in manifest["accounts"] if a["status"] == "BLOCKED"), None)
+    if blocked is not None:
+        manifest.update(status="BLOCKED", reason="Saved Engine account is BLOCKED: " + blocked["reason"])
     if discovery_blocked is not None:
         manifest.update(status="BLOCKED", reason=discovery_blocked)
     if failure is not None:

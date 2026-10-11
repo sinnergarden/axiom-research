@@ -243,5 +243,8 @@ def result(reader, result_id, roots):
              head["manifest_ref"]["content_digest"] == manifest["content_digest"] and
              head["updated_at"] == manifest["created_at"], "head/manifest mismatch")
     for ref in artifacts.values():
-        resolve(ref["root_id"], ref["relative_path"], roots)
+        # A frozen manifest remains readable after one owner leaf is lost.
+        # Resolve existing symlinks for containment; existence and owner hash
+        # checks belong to each artifact loader, allowing UI item isolation.
+        resolve(ref["root_id"], ref["relative_path"], roots, exists=False)
     return manifest
