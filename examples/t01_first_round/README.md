@@ -1,7 +1,7 @@
 # T01 configuration
 
-Read `proposal.md`, then `time.yaml`, `features.json`, `label.yaml`, `model.yaml`,
-`strategies.json` and `evaluation.json`. The 88 ordered feature IDs, versions,
+Read `proposal.md`, then `dataset.yaml`, `options.json`, `features.json`,
+`label.yaml`, `model.yaml` and `strategies.json`. The 88 ordered feature IDs, versions,
 names, formulas and lookbacks come directly from the existing installed catalog.
 They are fixed for this first round.
 
@@ -15,16 +15,14 @@ existing owner behavior, not a new preprocessing implementation.
 
 The existing `examples/a01_one_year.py` CLI remains the research entry. Assemble
 the supplied `dataset.yaml`, `experiment.yaml` and `options.json` templates
-using a genuine frozen Data scope and source. Replace every `<...>` value with
-an actual local path or saved identity before validation. These templates are
-deliberately incomplete until Data supplies those artifacts; they contain no
-private snapshot or result path.
-`time.yaml` is copied into the existing dataset `weekly_schedule` field,
-using `stock_dataset_schedule_v2` and `compile_stock_weekly_folds`;
-`evaluation.json` is copied into the existing options `evaluation` field.
-The templates already contain copies of those objects. If editing the separate
-time or evaluation file, update its consumed copy before validation; the CLI
-does not read those fragment files automatically.
+using genuine frozen Data axes and an accepted Feature-library training
+projection. Replace every `<...>` value with an actual local path or saved
+identity before validation. The templates contain no private snapshot or result
+path. `dataset.yaml`'s `weekly_schedule` is the sole executable time
+configuration, consumed by `stock_dataset_schedule_v2` and
+`compile_stock_weekly_folds`. `options.json`'s `evaluation` is the sole
+executable evaluation configuration. Edit those objects directly; no duplicate
+time or evaluation fragment needs synchronization.
 `strategies.json` describes two calls to the existing Engine strategy factory.
 Its account cash, frequency and shared-prediction conditions are orchestration
 requirements rather than arguments to that factory.
@@ -74,7 +72,6 @@ After replacing the placeholders, use the formal Research CLI:
 
 ```sh
 python examples/a01_one_year.py --options /absolute/path/options.json --stage validate
-python examples/a01_one_year.py --options /absolute/path/options.json --stage features
 python examples/a01_one_year.py --options /absolute/path/options.json --stage train
 python examples/a01_one_year.py --options /absolute/path/options.json --stage evaluate
 ```
@@ -85,17 +82,11 @@ that handle to `build_configured_stock_sequential_experiment`. The existing
 sequential preparation owner borrows it for all folds and projects each active
 window. Do not invoke the projection builder or loader for every fold. The
 CLI accepts an explicit `feature_library_training_view` descriptor file in
-`library-options.json`; it calls the genuine library adapter loader once before
+`options.json`; it calls the genuine library adapter loader once before
 the existing owner. The descriptor contains the actual `path`, `file_digest`
 and `training_adapter_ref` returned by the projection builder. Use only
 `validate`, `train` and `evaluate` for that options file. The `features` stage
 is refused because the library projection is prepared by its own public owner.
-
-```sh
-python examples/a01_one_year.py --options /absolute/path/library-options.json --stage validate
-python examples/a01_one_year.py --options /absolute/path/library-options.json --stage train
-python examples/a01_one_year.py --options /absolute/path/library-options.json --stage evaluate
-```
 
 The existing label owner retains one preparation lifetime and as-of Data
 selection reuse. It prepares distinct per-fit Raw Label bindings and normalized
@@ -105,6 +96,12 @@ reuse requires exact endpoint, anchor and dependency matches. Sequential Feature
 windows retain overlapping admitted days. The cold projection loader first
 compares all saved cells and releases their payloads; active training windows
 subsequently read those files. Describe these admissions and reads separately.
+The Data Reader/Snapshot and decoded-partition LRU are shared throughout the
+run. Each cutoff still selects versions afresh; `previous` supplies diff axes
+rather than skipping selection. Research receives one owned readonly panel
+copy per price domain, then gathers native H40 endpoints in eight-day blocks.
+This is shared source decoding and bounded domain work, with no guarantee that
+an evicted partition will never be decoded again.
 
 `maximum_source_bytes` is a cumulative saved-file ingress budget, including
 metadata, rather than a resident-memory limit. The seven-year template sets
@@ -114,3 +111,17 @@ budget, and native LightGBM allocations need process resource monitoring.
 These owner budgets do not establish a 12 GiB whole-process RSS ceiling or
 an elapsed-time upper bound. Measure actual ingress, peak RSS and saved bytes
 at the existing stage boundaries before claiming full-period acceptance.
+
+The CLI prints one `feature_training_admission` event for the initial cold
+admission. `compact_labels.raw_label_prepare_seconds` covers each touched
+as-of price domain and its RawLabel production or reuse. Shared evaluation
+blocks prepared for later folds are charged when first touched. Each completed
+fold prints `sequential_fold` through the same
+formal run. Its `preparation_seconds` includes RawLabel, Feature-window work,
+normalization and checkpoint binding. `fold_metrics` forwards the existing
+`saved_input_validation_seconds`, `train_seconds`, `predict_seconds` and
+`total_seconds`. Input validation includes matrix projection; the residual
+after validation/train/predict includes saving and saved-output admission.
+Do not relabel either aggregate as a pure matrix or pure serialization timer.
+Use the first two or three folds of the full run to estimate the remaining
+359-fold cost, keeping one-time admission and initial preparation separate.

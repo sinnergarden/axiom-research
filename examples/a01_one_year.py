@@ -7,6 +7,7 @@ import argparse
 from contextlib import ExitStack
 import json
 from pathlib import Path
+import time
 
 
 def read(path):
@@ -97,6 +98,7 @@ def execute(args, options, configured, output, registration):
     limits.update({name:preparation[name] for name in ('maximum_parent_bytes','maximum_source_bytes')
         if name in preparation})
     reuse_manifest = read(options['reuse_raw_from_batch']) if options.get('reuse_raw_from_batch') else None
+    admission_begin = time.perf_counter()
     if options.get('feature_library_training_view'):
         from axiom_research.stock_feature_library_adapter import load_feature_library_training_view
         feature_owner = load_feature_library_training_view(
@@ -104,6 +106,8 @@ def execute(args, options, configured, output, registration):
     else:
         feature_owner = load_stock_feature_view(read(options['feature_result'])['path'],
             limits=limits,residency='sequential')
+    print(json.dumps({'stage':'feature_training_admission',
+        'seconds':time.perf_counter()-admission_begin}),flush=True)
     with feature_owner as feature, ExitStack() as owners:
         reuse = owners.enter_context(load_stock_ml_batch_inputs(reuse_manifest,
             feature_inputs=feature,limits=limits,residency='sequential')) if reuse_manifest is not None else None
