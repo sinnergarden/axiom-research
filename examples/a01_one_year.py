@@ -83,6 +83,8 @@ def execute(args, options, configured, output, registration):
     from axiom_data import Data
     data = Data(options['data_root'])
     if args.stage == 'features':
+        if options.get('feature_library_training_view'):
+            raise ValueError('Prepare the explicit Feature-library training projection with its public owner before train')
         feature = build_stock_feature_inputs(data,spec=read(options['feature_spec']),
             destination=output/'features',storage_options=options['feature_storage_options'],
             column_source=options.get('feature_column_source'),
@@ -94,9 +96,15 @@ def execute(args, options, configured, output, registration):
     limits = {'maximum_matrix_bytes':preparation['maximum_resident_bytes']}
     limits.update({name:preparation[name] for name in ('maximum_parent_bytes','maximum_source_bytes')
         if name in preparation})
-    feature_path = read(options['feature_result'])['path']
     reuse_manifest = read(options['reuse_raw_from_batch']) if options.get('reuse_raw_from_batch') else None
-    with load_stock_feature_view(feature_path,limits=limits,residency='sequential') as feature, ExitStack() as owners:
+    if options.get('feature_library_training_view'):
+        from axiom_research.stock_feature_library_adapter import load_feature_library_training_view
+        feature_owner = load_feature_library_training_view(
+            read(options['feature_library_training_view']), limits=limits)
+    else:
+        feature_owner = load_stock_feature_view(read(options['feature_result'])['path'],
+            limits=limits,residency='sequential')
+    with feature_owner as feature, ExitStack() as owners:
         reuse = owners.enter_context(load_stock_ml_batch_inputs(reuse_manifest,
             feature_inputs=feature,limits=limits,residency='sequential')) if reuse_manifest is not None else None
         snapshot = feature.to_dict()['spec']['snapshot']

@@ -70,7 +70,7 @@ do not pass the old profile as complete seven-year coverage. Report the
 actually admitted profile identity and fee values beside
 both local account results. Gross dividends exclude personal dividend taxes.
 
-After replacing the placeholders, use the unchanged formal Research CLI:
+After replacing the placeholders, use the formal Research CLI:
 
 ```sh
 python examples/a01_one_year.py --options /absolute/path/options.json --stage validate
@@ -84,5 +84,33 @@ training projection once, open its genuine `StockFeatureView` once, and pass
 that handle to `build_configured_stock_sequential_experiment`. The existing
 sequential preparation owner borrows it for all folds and projects each active
 window. Do not invoke the projection builder or loader for every fold. The
-current CLI recognizes the original Feature format; automatic dispatch for the
-candidate projection remains an owner integration task.
+CLI accepts an explicit `feature_library_training_view` descriptor file in
+`library-options.json`; it calls the genuine library adapter loader once before
+the existing owner. The descriptor contains the actual `path`, `file_digest`
+and `training_adapter_ref` returned by the projection builder. Use only
+`validate`, `train` and `evaluate` for that options file. The `features` stage
+is refused because the library projection is prepared by its own public owner.
+
+```sh
+python examples/a01_one_year.py --options /absolute/path/library-options.json --stage validate
+python examples/a01_one_year.py --options /absolute/path/library-options.json --stage train
+python examples/a01_one_year.py --options /absolute/path/library-options.json --stage evaluate
+```
+
+The existing label owner retains one preparation lifetime and as-of Data
+selection reuse. It prepares distinct per-fit Raw Label bindings and normalized
+cohorts; its training anchor is the actual fit session. It does not promise one
+global Raw Label table or eliminate every per-fold label calculation. Numeric
+reuse requires exact endpoint, anchor and dependency matches. Sequential Feature
+windows retain overlapping admitted days. The cold projection loader first
+compares all saved cells and releases their payloads; active training windows
+subsequently read those files. Describe these admissions and reads separately.
+
+`maximum_source_bytes` is a cumulative saved-file ingress budget, including
+metadata, rather than a resident-memory limit. The seven-year template sets
+it to 32 GiB to give the full Feature and per-fit Label bindings more headroom;
+the 12 GiB Research resident budget remains separate. Data also has its own
+budget, and native LightGBM allocations need process resource monitoring.
+These owner budgets do not establish a 12 GiB whole-process RSS ceiling or
+an elapsed-time upper bound. Measure actual ingress, peak RSS and saved bytes
+at the existing stage boundaries before claiming full-period acceptance.

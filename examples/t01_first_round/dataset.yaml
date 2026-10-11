@@ -18,7 +18,7 @@ preparation_options:
   row_block_sessions: 8
   column_block: 32
   maximum_resident_bytes: 12884901888
-  maximum_source_bytes: 8589934592
+  maximum_source_bytes: 34359738368
   maximum_parent_bytes: 67108864
   normalization_backend: core_cs_batch_v1
   control_layout: fold_controls_v2
