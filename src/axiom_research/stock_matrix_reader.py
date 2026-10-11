@@ -69,12 +69,14 @@ class VerifiedMatrixStore(_EngineMatrixStore):
         self._coverage_verified={}; self._native_verified=set()
         self._publication_accounting=None
         self.content = {}; self.closed = False; self.borrowers = 0; self.resident_bytes = 0; self.lease_bytes=0
+        self._operation_depth=0; self._operation_paths=set(); self._invalid=False
         self.metrics = {'unique_descriptor_admissions': 0, 'file_hash_calls': 0,
             'json_decode_calls': 0, 'mmap_opens': 0, 'source_bytes': 0,
             'hash_bytes': 0, 'common_key_index_builds': 0, 'fold_projection_calls': 0,
             'evaluation_projection_calls': 0,
             'projection_bytes': 0, 'data_read_calls': 0, 'core_calls': 0,
-            'train_calls': 0, 'predict_calls': 0, 'account_calls': 0}
+            'train_calls': 0, 'predict_calls': 0, 'account_calls': 0,
+            'source_stat_calls': 0, 'lifecycle_check_calls': 0}
 
     @property
     def np(self):
