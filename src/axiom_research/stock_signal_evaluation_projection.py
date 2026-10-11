@@ -57,7 +57,8 @@ def _check_marks(marks):
 
 def _read_checked(path, expected=None, *, marks=None,_budget=None):
     """Hash and parse the exact buffer consumed, including duplicate-key checks."""
-    path = Path(path)
+    from .saved_read_root import checked_saved_path
+    path = checked_saved_path(path)
     if _budget is not None:
         value=None
         try:

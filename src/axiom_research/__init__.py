@@ -6,6 +6,10 @@ from .api import (
 )
 from .experiments import (ExperimentStore, ExperimentReader,
                           ExperimentRecordError, RevisionConflict)
+from .stock_result_projection import (StockSavedProjection, load_stock_sequential_result,
+    load_stock_ml_batch_manifest, load_stock_prediction_bindings, load_stock_fold_projection,
+    load_stock_prediction_projection, load_stock_result_configuration)
+from .result_registration import begin_stock_result_registration, publish_stock_result
 from .stock_artifacts import (StockMLExperiment, load_stock_ml_experiment,
                               load_stock_model)
 from .stock_stage_report import export_stock_stage_report, load_stock_stage_report
