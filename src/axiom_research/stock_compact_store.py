@@ -450,6 +450,7 @@ def load_stock_feature_view(path, *, limits=None, residency="eager",model_featur
     """
     require(residency in ("eager","sequential"),"unknown Feature residency mode")
     begin=time.perf_counter(); path=Path(path).absolute(); store=OwnedStore(limits)
+    handle=None
     try:
         index_path=str(path/'index.json'); index=store.read_json({'path':index_path},legacy=True,keep=False)
         require(index.get('status')=='COMPLETE' and index.get('contract_version') in
@@ -546,7 +547,12 @@ def load_stock_feature_view(path, *, limits=None, residency="eager",model_featur
         store.metrics['resident_bytes']=store.resident_bytes
         return handle
     except BaseException:
-        store.close(); raise
+        try:
+            if handle is not None:
+                _trim_feature_window(_view_data(handle,check=False),set())
+        finally:
+            store.close()
+        raise
 
 
 def _validate_feature_cells(value, group, rows):
