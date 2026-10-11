@@ -180,7 +180,7 @@ class ModelFeatureSelectionTests(unittest.TestCase):
                  patch.object(OwnedStore,'buffer',side_effect=AssertionError('column/target IO reached')), \
                  patch('axiom_research.stock_compact_labels._price_view',side_effect=AssertionError('Data reached')), \
                  patch('axiom_research.stock_compact_labels._normalized',side_effect=AssertionError('Core reached')):
-                with self.assertRaisesRegex(ValueError,'fold/cutoff collection'):
+                with self.assertRaisesRegex(ValueError,'Raw reuse (fold/cutoff collection|source/fold/query plan) mismatch'):
                     prepare_stock_ml_batch_inputs(None,feature_inputs=view,fold_specs=f.folds()[:1],
                         destination=root/'single',preparation_options=self.options,
                         model_feature_selection=self.selection(f,0,100),reuse_raw_from_batch=source)

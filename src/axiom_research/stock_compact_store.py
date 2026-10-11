@@ -619,6 +619,67 @@ def _validate_feature_cells(value, group, rows):
         value=group=rows=store=None
 
 
+class _FeatureCellRows:
+    """Borrow interned row facts for validation, without a second row panel."""
+    def __init__(self, compact): self.compact=compact
+    def __len__(self): return len(self.compact.member)
+    def __iter__(self):
+        compact=self.compact
+        for i in range(len(self)):
+            yield {name:compact.dictionary[int(getattr(compact,code)[i])]
+                for name,code in (('knowledge_cutoff','knowledge'),
+                                  ('validity','validity'),('availability','availability'))}
+
+
+def _admit_feature_facts(value, block, group):
+    """Validate once, retain one compact representation, release native JSON."""
+    import numpy as np
+    from .stock_matrix_reader import _CompactRows
+    store=value['store']; spec=value['definition']['spec']; start,count=block['start'],block['count']
+    descriptor=block['descriptors'][0]['metadata']; compact=block.get('row_facts')
+    metadata=rows=row=parent=parents=None
+    try:
+        if compact is not None:
+            store.check_path(descriptor['path'])
+            if group: _validate_feature_cells(value,group,_FeatureCellRows(compact))
+            return compact
+        metadata=store.read_json(descriptor,legacy=True)
+        rows=metadata['rows']; require(len(rows)==count,'Feature metadata row count mismatch')
+        for i,row in enumerate(rows):
+            off=start+i; day=spec['feature_sessions'][off//len(spec['universe'])]
+            require((row['security_id'],row['session'])==(spec['universe'][off%len(spec['universe'])],day) and
+                    row['knowledge_cutoff']==spec['cutoff_by_session'][day] and type(row['member']) is bool,
+                    'Feature row key/cutoff/member mismatch')
+            require(len(row['validity'])==len(row['availability'])==len(row['reasons'])==len(spec['ordered_features']),
+                    'Feature row metadata width mismatch')
+        if group: _validate_feature_cells(value,group,rows)
+        store.reserve(_size(rows,maximum=store.maximum_matrix_bytes,
+            retained=store.shared_bytes+store.resident_bytes+store.lease_bytes)+count*256+4096)
+        compact=_CompactRows(rows,len(spec['ordered_features']),np)
+        parents={}
+        require(set(metadata['row_references'])==set(spec['feature_sessions'][
+            start//len(spec['universe']):(start+count)//len(spec['universe'])]),
+            'Feature metadata parent date scope mismatch')
+        for day,parent in metadata['row_references'].items():
+            require(reference(parent.get('feature_ref')) and reference(parent.get('qlib_view_ref')),
+                    'explicit Feature parent refs required')
+            require(day not in value['parents'] or value['parents'][day]==parent,'conflicting Feature parent reference')
+            if day not in value['parents']: parents[day]=deepcopy(parent)
+        charge=compact.bytes+_size(parents)
+        store.reserve(charge); store.resident_bytes+=charge
+        value['parents'].update(parents)
+        block.update(row_facts=compact,row_fact_charge=compact.bytes)
+        # The dictionaries above own their copied facts. Drop every native-row
+        # alias before crediting release; file hashes/epochs and buffers remain.
+        metadata=rows=row=parent=parents=None
+        store.release((descriptor['path'],))
+        store.metrics['feature_row_fact_admissions']=store.metrics.get('feature_row_fact_admissions',0)+1
+        return compact
+    except BaseException:
+        metadata=rows=row=parent=parents=compact=value=block=group=store=None
+        raise
+
+
 def _admit_feature_block(value, block):
     if block['parts'] is not None:
         try:
@@ -630,29 +691,17 @@ def _admit_feature_block(value, block):
             value=block=None
             raise
     import numpy as np
-    from .stock_matrix_reader import _CompactRows
-    store=value['store']; spec=value['definition']['spec']; columns=spec['ordered_features']
-    days=spec['feature_sessions']; securities=spec['universe']; start,count=block['start'],block['count']
-    group=[]; rows=metadata=compact=arrays=facts=flags=maximum=None
+    store=value['store']; count=block['count']
+    group=[]; compact=arrays=facts=flags=maximum=None
     try:
         for part in block['descriptors']:
             arrays={k:store.buffer(v) for k,v in part['buffers'].items()}
             require(all(a.shape==(count,len(part['columns'])) for a in arrays.values()),'Feature buffer shapes mismatch')
             group.append((part,arrays)); arrays=None
-        metadata=store.read_json(group[0][0]['metadata'],legacy=True,keep=False)
-        rows=metadata['rows']; require(len(rows)==count,'Feature metadata row count mismatch')
-        for i,row in enumerate(rows):
-            off=start+i; day=days[off//len(securities)]
-            require((row['security_id'],row['session'])==(securities[off%len(securities)],day) and
-                    row['knowledge_cutoff']==spec['cutoff_by_session'][day] and type(row['member']) is bool,
-                    'Feature row key/cutoff/member mismatch')
-            require(len(row['validity'])==len(row['availability'])==len(row['reasons'])==len(columns),
-                    'Feature row metadata width mismatch')
-        _validate_feature_cells(value,group,rows)
-        compact=_CompactRows(rows,len(columns),np)
+        compact=_admit_feature_facts(value,block,group)
         # Reduction happens once per admitted block, never one NumPy temporary
         # per eligibility row. Physical finiteness was checked above.
-        store.reserve(compact.bytes+count*32)
+        store.reserve(count*32)
         flags=np.full(count,block['complete_columns'],dtype='?')
         maximum=np.full(count,np.iinfo(np.int64).min,dtype='<i8')
         for part,arrays in group:
@@ -662,34 +711,22 @@ def _admit_feature_block(value, block):
             store.metrics['eligibility_reduction_calls']=store.metrics.get('eligibility_reduction_calls',0)+2
         flags.flags.writeable=False; maximum.flags.writeable=False
         facts=(flags,maximum)
-        require(set(metadata['row_references'])==set(days[start//len(securities):(start+count)//len(securities)]),
-                'Feature metadata parent date scope mismatch')
-        new_parents={}
-        for day,parent in metadata['row_references'].items():
-            require(reference(parent.get('feature_ref')) and reference(parent.get('qlib_view_ref')),
-                    'explicit Feature parent refs required')
-            require(day not in value['parents'] or value['parents'][day]==parent,'conflicting Feature parent reference')
-            if day not in value['parents']: new_parents[day]=deepcopy(parent)
-        parent_charge=_size(new_parents,maximum=store.maximum_matrix_bytes,
-            retained=store.resident_bytes+compact.bytes+flags.nbytes+maximum.nbytes)
-        charge=compact.bytes+flags.nbytes+maximum.nbytes
-        store.reserve(charge+parent_charge); store.resident_bytes+=charge+parent_charge
-        value['parents'].update(new_parents)
+        charge=flags.nbytes+maximum.nbytes
+        store.reserve(charge); store.resident_bytes+=charge
         block.update(parts=group,rows=compact,eligibility=facts,charge=charge)
         store.metrics['feature_block_admissions']=store.metrics.get('feature_block_admissions',0)+1
         store.metrics['resident_bytes']=store.resident_bytes
     except BaseException:
         # Tracebacks must not keep views alive after an owner credits release.
-        group.clear(); rows=metadata=compact=arrays=facts=flags=maximum=None
+        group.clear(); compact=arrays=facts=flags=maximum=None
         raise
 
 
 def _admit_model_columns(value, block, binding):
     """Admit selected physical parts into the existing owner's byte/JSON caches."""
     import numpy as np
-    from .stock_matrix_reader import _CompactRows
     store=value['store']; spec=value['definition']['spec']; columns=binding['ordered_features']
-    selected=set(columns); count=block['count']; start=block['start']; universe=spec['universe']
+    selected=set(columns); count=block['count']
     require(selected <= {c for p in block['descriptors'] for c in p['columns']},
             'selected Feature block is missing columns')
     if 'model_parts' not in block:
@@ -697,7 +734,7 @@ def _admit_model_columns(value, block, binding):
         store.reserve(control); store.resident_bytes+=control
         block.update(model_parts={},model_charge=control)
     cache=block['model_parts']
-    new=[]; metadata=None
+    new=[]
     try:
         for part,arrays in cache.values():
             store.check_path(part['metadata']['path'])
@@ -714,37 +751,10 @@ def _admit_model_columns(value, block, binding):
             require(all(a.shape==(count,len(part['columns'])) for a in arrays.values()),'Feature buffer shapes mismatch')
             new.append((part,arrays))
         if new or 'model_rows' not in block:
-            if block['parts'] is not None and 'model_rows' not in block:
-                block['model_rows']=block['rows']
+            compact=_admit_feature_facts(value,block,new)
+            if 'model_rows' not in block:
+                block['model_rows']=compact
                 store.metrics['active_model_feature_blocks']=store.metrics.get('active_model_feature_blocks',0)+1
-            else:
-                metadata=store.read_json(block['descriptors'][0]['metadata'],legacy=True)
-                rows=metadata['rows']; require(len(rows)==count,'Feature metadata row count mismatch')
-                for i,row in enumerate(rows):
-                    off=start+i; day=spec['feature_sessions'][off//len(universe)]
-                    require((row['security_id'],row['session'])==(universe[off%len(universe)],day) and
-                            row['knowledge_cutoff']==spec['cutoff_by_session'][day] and type(row['member']) is bool,
-                            'Feature row key/cutoff/member mismatch')
-                    require(len(row['validity'])==len(row['availability'])==len(row['reasons'])==len(spec['ordered_features']),
-                            'Feature row metadata width mismatch')
-                if new: _validate_feature_cells(value,new,rows)
-                if 'model_rows' not in block:
-                    store.reserve(_size(rows,maximum=store.maximum_matrix_bytes,
-                        retained=store.shared_bytes+store.resident_bytes+store.lease_bytes)+count*256+4096)
-                    compact=_CompactRows(rows,len(spec['ordered_features']),np)
-                    parents={}
-                    require(set(metadata['row_references'])==set(spec['feature_sessions'][
-                        start//len(universe):(start+count)//len(universe)]),'Feature metadata parent date scope mismatch')
-                    for day,parent in metadata['row_references'].items():
-                        require(reference(parent.get('feature_ref')) and reference(parent.get('qlib_view_ref')),
-                                'explicit Feature parent refs required')
-                        require(day not in value['parents'] or value['parents'][day]==parent,'conflicting Feature parent reference')
-                        if day not in value['parents']: parents[day]=deepcopy(parent)
-                    charge=compact.bytes+_size(parents)
-                    store.reserve(charge); store.resident_bytes+=charge
-                    block['model_rows']=compact; block['model_charge']+=compact.bytes
-                    store.metrics['active_model_feature_blocks']=store.metrics.get('active_model_feature_blocks',0)+1
-                    value['parents'].update(parents)
         for part,arrays in new:
             store.reserve(1024); store.resident_bytes+=1024
             block['model_charge']+=1024
@@ -771,7 +781,7 @@ def _admit_model_columns(value, block, binding):
         store.metrics['resident_bytes']=store.resident_bytes
         return cache,block['model_rows'],block['model_eligibility']
     except BaseException:
-        new.clear(); cache=arrays=rows=metadata=compact=flags=maximum=old=value=block=None
+        new.clear(); cache=arrays=compact=flags=maximum=old=value=block=None
         raise
 
 
@@ -824,6 +834,10 @@ def _trim_feature_window(value, wanted):
             charge=block.pop('model_charge',0); store.resident_bytes-=charge
             if 'model_rows' in block: store.metrics['active_model_feature_blocks']-=1
             for key in ('model_rows','model_parts','model_eligibility','model_eligibility_key'): block.pop(key,None)
+        if ordinal not in wanted and 'row_facts' in block:
+            charge=block.pop('row_fact_charge'); block.pop('row_facts')
+            store.resident_bytes-=charge
+            store.metrics['released_feature_metadata_bytes']=store.metrics.get('released_feature_metadata_bytes',0)+charge
     store.release_payloads(keep)
 
 
