@@ -47,6 +47,7 @@ def main():
     if args.stage == 'features':
         feature = build_stock_feature_inputs(data,spec=read(options['feature_spec']),
             destination=output/'features',storage_options=options['feature_storage_options'],
+            column_source=options.get('feature_column_source'),
             progress=lambda event:print(json.dumps(event),flush=True))
         write_json(output/'feature-result.json',{'path':str(feature.path),
             'feature_inputs_ref':feature.identity,'reused':feature.reused})

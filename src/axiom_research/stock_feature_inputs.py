@@ -233,7 +233,7 @@ def load_stock_feature_inputs(path, *, limits=None):
     limits = _limits(limits); path = Path(path); _bounded(path/'index.json', limits)
     marks = {str(path/'index.json'):file_fingerprint(path/'index.json')}
     value = _read(path/'index.json')
-    if value.get('contract_version') in ('stock_feature_inputs_v2','stock_feature_inputs_v3'):
+    if value.get('contract_version') in ('stock_feature_inputs_v2','stock_feature_inputs_v3','stock_feature_inputs_v4'):
         from .stock_matrix_reader import load_feature_matrix_index
         return load_feature_matrix_index(path, limits=limits, _index=value,
                                          _index_fingerprint=marks[str(path/'index.json')])
@@ -293,7 +293,7 @@ def _storage_options(options):
     require(type(options) is dict and not (set(options)-set(MATRIX_OPTIONS)),
             'exact matrix storage options required')
     value = {**MATRIX_OPTIONS, **options}
-    require(value['layout'] in ('matrix_v1','matrix_v2') and all(type(value[k]) is int and value[k] > 0
+    require(value['layout'] in ('matrix_v1','matrix_v2','matrix_v3') and all(type(value[k]) is int and value[k] > 0
             for k in ('row_block_sessions','column_block','maximum_resident_bytes')),
             'matrix layout and positive integer budgets required')
     return value
@@ -751,7 +751,7 @@ def _build_feature_matrix_impl(data, *, spec, destination, storage_options, prog
     return load_stock_feature_inputs(target)
 
 
-def build_stock_feature_inputs(data, *, spec, destination, shard_sessions=2, progress=None, storage_options=None):
+def build_stock_feature_inputs(data, *, spec, destination, shard_sessions=2, progress=None, storage_options=None, column_source=None):
     """Prepare original complete-date v1 parents with atomic per-shard resume.
 
     No Label, fitting, prediction, account or supplier call is made. Correctness
@@ -761,8 +761,14 @@ def build_stock_feature_inputs(data, *, spec, destination, shard_sessions=2, pro
     if storage_options is not None:
         require(shard_sessions == 2 and type(shard_sessions) is int,
                 'v1 shard_sessions conflicts with matrix storage options')
+        if storage_options.get('layout') == 'matrix_v3':
+            from .stock_feature_column_producer import build_column_feature_matrix
+            return build_column_feature_matrix(data, spec=spec, destination=destination,
+                storage_options=storage_options, progress=progress, column_source=column_source)
+        require(column_source is None, 'saved column source requires matrix_v3')
         return _build_feature_matrix(data, spec=spec, destination=destination,
                                      storage_options=storage_options, progress=progress)
+    require(column_source is None, 'saved column source requires matrix_v3')
     from .feature_catalog import load_feature_catalog_ref
     from .stock_ml import _implementation, _environment, _prepare_stock_qlib, _iter_stock_feature_days
     spec = deepcopy(spec)

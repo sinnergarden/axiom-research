@@ -26,8 +26,11 @@ def _hash_array(value):
 
 
 def _source_config(spec):
+    from .stock_feature_inputs import _spec
+    universe_id=_spec(spec)
+    require(universe_id=='csi300','column source currently supports only the fixed CSI300 profile')
     return {'snapshot':spec['snapshot'],'pit_policy':spec['pit_policy'],
-        'symbols':spec['universe'],'universe_id':'csi300','calendar':spec['calendar'],
+        'symbols':spec['universe'],'universe_id':universe_id,'calendar':spec['calendar'],
         'read_sessions':spec['read_sessions'],'feature_sessions':spec['feature_sessions'],
         'cutoff_by_session':spec['cutoff_by_session'],
         'feature_selection':spec['feature_selection'],'scope_ref':spec['scope']['scope_bundle_ref']}
@@ -117,22 +120,22 @@ class FeatureColumnSource:
             qualification='best_effort',availability_basis='declared_vendor_assumption')
             for field in (*FIELDS,'is_member')]
 
-    def core_inputs(self, day, *, calendar_ref, reference_ref, schema):
+    def core_inputs(self, day, *, calendar_ref, reference_ref, schema, history_sessions=252):
         import numpy as np
-        view=self.select(day); shape=view['member'].shape
+        view=self.select(day,history_sessions=history_sessions); shape=view['member'].shape
         ids={field:binding['id'] for field,binding in zip((*FIELDS,'is_member'),self.source_bindings())}
-        sets=[[]]+[[ids[field],ids['factor']] for field in FIELDS[:4]]+[[ids['amount_cny']],[ids['is_member']]]
+        sets=[[ids[field],ids['factor']] for field in FIELDS[:4]]+[[ids['amount_cny']],[ids['is_member']]]
         sets=[sorted(set(group)) for group in sets]
-        inputs=dict(contract_version='feature_column_inputs_v1',calendar_ref=calendar_ref,
-            reference_ref=reference_ref,schema=schema,source_bindings=self.source_bindings(),
+        inputs=dict(contract_version='feature_column_input_v1',calendar_ref=calendar_ref,
+            reference_ref=reference_ref,schema=schema,source_bindings=sorted(self.source_bindings(),key=lambda b:b['id']),
             sessions=list(view['sessions']),security_ids=list(view['universe']),
             cutoffs_utc_us=np.full(len(view['sessions']),instant_us(view['selection']['knowledge_cutoff'])//1000000*1000000,dtype='<i8'),
-            values=view['values'],validity=view['validity'],reason_codes=view['missing_reasons'],
+            values=view['values'],validity=view['validity'],reason_codes={k:v.astype('<i4') for k,v in view['missing_reasons'].items()},
             reason_dictionary=list(REASONS),available_at_utc_us=view['availability'],
-            source_codes={field:np.full(shape,i+1,dtype='<i4') for i,field in enumerate(FIELDS[:-1])},
+            source_codes={field:np.full(shape,i,dtype='<i4') for i,field in enumerate(FIELDS[:-1])},
             source_sets=sets,reference_member=view['member'],reference_industry=np.full(shape,None,dtype=object),
-            reference_available_at_utc_us=view['member_available'],reference_source_codes=np.full(shape,6,dtype='<i4'),
-            input_refs=[self.identity,view['selection_ref']])
+            reference_available_at_utc_us=view['member_available'],reference_source_codes=np.full(shape,5,dtype='<i4'),
+            input_refs={'source_ref':self.identity,'selection_ref':view['selection_ref']})
         return inputs,view['selection']
 
 

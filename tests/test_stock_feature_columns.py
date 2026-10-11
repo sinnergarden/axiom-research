@@ -77,5 +77,26 @@ class FeatureColumnSourceTests(unittest.TestCase):
         self.assertEqual(float(view['values']['amount_cny'][0,0]),10000.0)
         self.assertTrue(source.arrays['values'].flags.writeable is False)
 
+    def test_adapter_to_public_core_columns(self):
+        from axiom_engine.core import ABI,SEMANTICS,FeaturePlan,compile_feature_columns,execute_feature_columns
+        source=self.source(); spec=source.manifest['spec']; day=spec['feature_sessions'][0]
+        ref=digest(['synthetic adapter to public Core'])
+        schema=[{'name':f,'dtype':'float64','unit':'CNY' if f=='amount_cny' else 'CNY/share',
+            'stage':'fact','missing':'preserve'} for f in ('open','high','low','close','amount_cny')]
+        output={'name':'out','dtype':'float64','unit':'CNY/share','stage':'base','missing':'preserve'}
+        plan=FeaturePlan.from_dict({'abi':ABI,'semantics':SEMANTICS,'recipe_ref':ref,'calendar_ref':ref,
+            'reference_ref':ref,'reference_members':{d:{s:None for s in spec['universe']} for d in spec['read_sessions']},
+            'input_schema':schema,'event_schema':{},'sources':sorted(source.source_bindings(),key=lambda b:b['id']),
+            'observation_domain':'sessions','history_policy':'partial',
+            'nodes':[{'name':'out','op':'identity','version':'1','inputs':['close'],'params':{},'column':output}],
+            'outputs':[{'node':'out','column':output}],'obligations':[]})
+        inputs,selection=source.core_inputs(day,calendar_ref=ref,reference_ref=ref,schema=schema,history_sessions=3)
+        result=execute_feature_columns(compile_feature_columns(plan),inputs=inputs,output_sessions=[day],max_working_bytes=1024**2)
+        self.assertEqual(result['values'].shape,(1,2,1))
+        self.assertEqual(result['validity'][0,:,0].tolist(),[True,False])
+        self.assertEqual(float(result['values'][0,0,0]),14.0)
+        self.assertEqual(result['reason_dictionary'][result['reason_codes'][0,1,0]],'invalid_anchor_factor')
+        self.assertEqual(result['input_refs'],{'source_ref':source.identity,'selection_ref':digest(selection)})
+
 
 if __name__=='__main__': unittest.main()
