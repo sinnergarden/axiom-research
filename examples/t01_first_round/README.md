@@ -6,11 +6,17 @@ names, formulas and lookbacks come directly from the existing installed catalog.
 They are fixed for this first round.
 
 The existing `examples/a01_one_year.py` CLI remains the research entry. Assemble
-its existing dataset/experiment/options files using a genuine frozen Data scope
-and source. These public files contain no private snapshot or result path.
+the supplied `dataset.yaml`, `experiment.yaml` and `options.json` templates
+using a genuine frozen Data scope and source. Replace every `<...>` value with
+an actual local path or saved identity before validation. These templates are
+deliberately incomplete until Data supplies those artifacts; they contain no
+private snapshot or result path.
 `time.yaml` is copied into the existing dataset `weekly_schedule` field,
 using `stock_dataset_schedule_v2` and `compile_stock_weekly_folds`;
 `evaluation.json` is copied into the existing options `evaluation` field.
+The templates already contain copies of those objects. If editing the separate
+time or evaluation file, update its consumed copy before validation; the CLI
+does not read those fragment files automatically.
 `strategies.json` describes two calls to the existing Engine strategy factory.
 Its account cash, frequency and shared-prediction conditions are orchestration
 requirements rather than arguments to that factory.
@@ -34,3 +40,20 @@ Use the existing `run_saved_stock_strategy` and
 account path. Supply the original frozen market/profile/native inputs, source
 and account request. Attach both accounts with the same registration context.
 No account executor or Feature mathematics is introduced by these configs.
+
+After replacing the placeholders, use the unchanged formal Research CLI:
+
+```sh
+python examples/a01_one_year.py --options /absolute/path/options.json --stage validate
+python examples/a01_one_year.py --options /absolute/path/options.json --stage features
+python examples/a01_one_year.py --options /absolute/path/options.json --stage train
+python examples/a01_one_year.py --options /absolute/path/options.json --stage evaluate
+```
+
+For an accepted Feature-library projection, build/export its full-period
+training projection once, open its genuine `StockFeatureView` once, and pass
+that handle to `build_configured_stock_sequential_experiment`. The existing
+sequential preparation owner borrows it for all folds and projects each active
+window. Do not invoke the projection builder or loader for every fold. The
+current CLI recognizes the original Feature format; automatic dispatch for the
+candidate projection remains an owner integration task.
