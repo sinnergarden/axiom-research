@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "axiom-research"
-version = "0.2.6"
+version = "0.2.7"
 description = "Axiom Research R0 definitions, manifests and identity contracts"
 requires-python = ">=3.11"
-dependencies = ["axiom-engine>=0.3.0"]
+dependencies = ["axiom-engine>=0.3.2"]
 
 [project.optional-dependencies]
 configuration = ["PyYAML>=6"]
