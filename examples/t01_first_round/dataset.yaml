@@ -1,6 +1,6 @@
 contract_version: stock_dataset_schedule_v2
 axes_input:
-  path: <absolute_path_to_formal_Data_feature_axes.json>
+  path: <absolute_path_to_genuine_training_projection_feature_axes.json>
   file_digest: <actual_sha256_digest_of_axes_file>
 weekly_schedule:
   trade_start: '2019-01-02'

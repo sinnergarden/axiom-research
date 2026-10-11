@@ -15,7 +15,7 @@ existing owner behavior, not a new preprocessing implementation.
 
 The existing `examples/a01_one_year.py` CLI remains the research entry. Assemble
 the supplied `dataset.yaml`, `experiment.yaml` and `options.json` templates
-using genuine frozen Data axes and an accepted Feature-library training
+using the genuine training projection axes and an accepted Feature-library training
 projection. Replace every `<...>` value with an actual local path or saved
 identity before validation. The templates contain no private snapshot or result
 path. `dataset.yaml`'s `weekly_schedule` is the sole executable time
@@ -23,6 +23,14 @@ configuration, consumed by `stock_dataset_schedule_v2` and
 `compile_stock_weekly_folds`. `options.json`'s `evaluation` is the sole
 executable evaluation configuration. Edit those objects directly; no duplicate
 time or evaluation fragment needs synchronization.
+
+For this frozen scope the physical source/library contains 638 securities,
+including 32 used only in warmup. The original library sample universe and
+training projection contain 606. Bind that complete 606-security projection
+axis in `dataset.yaml`; prediction and StockMarketSpec use the same axis.
+Preserve the physical source and daily historical member mask. An OOS-only
+union does not replace the training projection axis.
+
 `strategies.json` describes two calls to the existing Engine strategy factory.
 Its account cash, frequency and shared-prediction conditions are orchestration
 requirements rather than arguments to that factory.
