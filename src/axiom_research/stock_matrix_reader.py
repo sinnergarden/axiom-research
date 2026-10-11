@@ -4,6 +4,7 @@ This module reads saved bytes only. It does not import Data, Feature Core,
 Qlib or a training backend. A verified store belongs to one reader/batch;
 descriptors are deduplicated there, never by a persisted trusted flag.
 """
+from axiom_engine.feature_library.store import VerifiedMatrixStore as _EngineMatrixStore
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,7 +48,7 @@ def _fields(value, fields, message):
     require(type(value) is dict and set(value) == set(fields), message)
 
 
-class VerifiedMatrixStore:
+class VerifiedMatrixStore(_EngineMatrixStore):
     """One admission, one file hash/decode, and readonly mmap ownership."""
     def __init__(self, *, maximum_source_bytes=8*1024**3, maximum_matrix_bytes=512*1024**2,
                  maximum_parent_bytes=64*1024**2, _path_resolver=None,_caller_retained_bytes=None):
@@ -300,42 +301,7 @@ class VerifiedMatrixStore:
                 self.coverage_identity(left)==(self.coverage_identity(right) if
                     right_coverage_identity is None else right_coverage_identity))
 
-    def _register(self, descriptor):
-        require(not self.closed, 'matrix store is closed')
-        path = descriptor.get('path')
-        require(type(path) is str and Path(path).is_absolute() and not self._resolve(path).is_symlink(),
-                'fixed absolute matrix file required')
-        require(_ref(descriptor.get('file_digest')), 'matrix file digest required')
-        if path in self.descriptors:
-            old = self.descriptors[path]
-            # Raw content-addressed files can appear as a 2-D partition and
-            # the corresponding flat Core buffer. Each logical descriptor is
-            # still checked below; only physical byte admission is shared.
-            require(old == descriptor or (set(old) == BUFFER_FIELDS and
-                    set(descriptor) == BUFFER_FIELDS and old['file_digest'] == descriptor['file_digest'] and
-                    old['buffer_digest'] == descriptor['buffer_digest']), 'conflicting matrix descriptor')
-            require(file_fingerprint(self._resolve(path)) == self.fingerprints[path], 'saved matrix source changed')
-            return False
-        mark = file_fingerprint(self._resolve(path))
-        require(self._hash_once(path) == descriptor['file_digest'], 'matrix file digest mismatch')
-        require(file_fingerprint(self._resolve(path)) == mark, 'matrix file changed during hash')
-        self._retain_entry(self.descriptors,path,deepcopy(descriptor)); self._retain_entry(self.fingerprints,path,mark)
-        return True
 
-    def _hash_once(self,path):
-        """Internal hook for the existing Qlib closure validator."""
-        path=str(Path(path).absolute()); physical=self._resolve(path)
-        require(not physical.is_symlink(),'fixed matrix file required')
-        mark=file_fingerprint(physical)
-        if path not in self._hashes:
-            require(self.metrics['source_bytes']+mark[2]<=self.maximum_source_bytes,'matrix source byte budget exceeded')
-            value=file_digest(physical)
-            require(file_fingerprint(physical)==mark,'matrix file changed during hash')
-            self._retain_entry(self._hashes,path,value); self._retain_entry(self.fingerprints,path,mark)
-            self.metrics['source_bytes']+=mark[2]; self.metrics['hash_bytes']+=mark[2]; self.metrics['file_hash_calls']+=1
-            self.metrics['unique_descriptor_admissions']+=1
-        require(file_fingerprint(physical)==self.fingerprints[path],'saved matrix source changed')
-        return self._hashes[path]
 
     def _decode_once(self,path):
         from .stock_parent_json import preflight_parent_file, stat_identity
@@ -470,33 +436,7 @@ class VerifiedMatrixStore:
         self._release_entry(self._native_bindings,descriptor['path'])
         self._release_entry(self._wire_bindings,descriptor['path'])
 
-    def buffer(self, descriptor):
-        _fields(descriptor, BUFFER_FIELDS, 'exact matrix buffer descriptor required')
-        require(descriptor['dtype'] in DTYPES and type(descriptor['shape']) is list and
-                bool(descriptor['shape']) and all(type(n) is int and n >= 0 for n in descriptor['shape']),
-                'matrix buffer dtype/shape required')
-        require(descriptor['buffer_digest'] == descriptor['file_digest'], 'raw buffer digest mismatch')
-        self._register(descriptor); path = descriptor['path']
-        key = path,descriptor['dtype'],tuple(descriptor['shape'])
-        if key not in self.arrays:
-            dtype = self.np.dtype(DTYPES[descriptor['dtype']])
-            size = math.prod(descriptor['shape']) * dtype.itemsize
-            require(size == self.fingerprints[path][2], 'matrix buffer byte length mismatch')
-            if size:
-                array = self.np.memmap(self._resolve(path), dtype=dtype, mode='r', shape=tuple(descriptor['shape']))
-                self.metrics['mmap_opens'] += 1
-            else:
-                array = self.np.empty(descriptor['shape'], dtype=dtype); array.flags.writeable = False
-            require(not array.flags.writeable, 'readonly matrix buffer required')
-            if descriptor['dtype'] == 'bool_u8':
-                require(bool(((array == 0) | (array == 1)).all()), 'matrix bool bytes must be 0/1')
-            self._retain_entry(self.arrays,key,array)
-        return self.arrays[key]
 
-    def check(self):
-        require(not self.closed, 'matrix store is closed')
-        require(all(file_fingerprint(self._resolve(p)) == mark for p, mark in self.fingerprints.items()),
-                'saved matrix source changed; initialize a fresh batch')
 
     def close(self):
         require(not self.closed,'matrix store is closed')

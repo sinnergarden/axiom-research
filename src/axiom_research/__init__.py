@@ -17,7 +17,7 @@ from .stock_signal_evaluation_projection import (save_stock_signal_evaluation_in
     evaluate_stock_signal_inputs, evaluate_stock_signal_input_periods,
     evaluate_stock_signal_input_analysis, audit_stock_signal_evaluation)
 
-__version__ = "0.2.6"
+__version__ = "0.2.7"
 
 # Readonly metadata consumers do not import an optional Data/Core build runtime.
 # Existing runtime names retain their public import paths and load when requested.
@@ -41,6 +41,8 @@ _RUNTIME_EXPORTS = {
     "load_feature_catalog": ".feature_catalog", "build_feature_plan": ".feature_catalog",
     "load_feature_catalog_ref": ".feature_catalog",
     "load_a01_feature_catalog": ".a01_catalog",
+    "SavedColumnFeatureSource": ".stock_feature_library",
+    "CatalogFeatureLibrary": ".stock_feature_library",
     "compile_stock_periodic_folds": ".stock_periodic_config",
     "stock_evaluation_sessions": ".stock_periodic_config",
     "build_forward_labels": ".labels", "mature_training_rows": ".labels",
