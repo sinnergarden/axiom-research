@@ -774,6 +774,32 @@ def evaluate_stock_signal_input_periods(input_ref, *, scope, destination):
     return result
 
 
+def evaluate_stock_signal_input_analysis(input_ref, *, scope, destination, group_spec):
+    """IC and raw-Label groups reuse one admitted frozen paired sample.
+
+    ``scope.sessions`` explicitly chooses actual daily or weekly observations.
+    This adapter saves Core's own group Document; it defines no statistics.
+    """
+    from axiom_engine.core.signal_groups import evaluate_signal_groups
+    marks = {}
+    ref, root, admitted = _load_inputs(input_ref, scope, marks=marks)
+    reports = _evaluate_prepared((ref, root, admitted), destination, marks)
+    groups = {}
+    for name, sample in (('common', admitted['common_input']),
+                         ('native', admitted['native_input'])):
+        wire = evaluate_signal_groups(sample, spec=group_spec).to_dict()
+        path = Path(destination).resolve()/'groups'/wire['groups_ref'][7:]/'groups.json'
+        if path.exists():
+            _require(_read_checked(path)[0] == wire, 'immutable signal group collision')
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            write_json(path, wire)
+        groups[name] = {'path': str(path), 'file_digest': file_digest(path),
+                        'groups_ref': wire['groups_ref'], 'input_ref': wire['input_ref']}
+    _check_marks(marks)
+    return {'statistics': reports, 'groups': groups}
+
+
 def audit_stock_signal_evaluation(path):
     """Revalidate every original source and compare its exact frozen projection."""
     saved = _load_v3_report(path)

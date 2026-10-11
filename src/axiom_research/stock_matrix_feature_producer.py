@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 import time
 
-from .stock_artifacts import digest
+from .stock_artifacts import digest, digest_stream, digest_array_rows
 
 
 FIELDS = ('open', 'high', 'low', 'close', 'amount_cny', 'factor')
@@ -218,7 +218,7 @@ class _NativeWindow:
                     row[field] = None if absent else convert(value)
         context = {**wire['context'], 'numeric_projection': {
             'contract_version': 'research_qlib_native_projection_v2', 'view_ref': view_ref,
-            'reader_batch_ref': digest(wire),
+            'reader_batch_ref': digest_stream(wire),
             'revision_admission': 'actual_reader_float32_with_native_value_reuse',
             'dtype': 'float32_values_promoted_to_float64'}}
         # to_json already owns canonical metadata. Keep this selected snapshot
@@ -691,18 +691,22 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
             # Public adjustment serializes source/derivation lineage. Reserve
             # those copies before calling it, rather than after large wires exist.
             factors_bytes = _batch_bytes(factors,stats=stats)
-            adjustment_reserve = resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes+24*(prices_bytes+factors_bytes)
+            from .stock_feature_memory import adjustment_peak_bytes
+            adjustment_charge = adjustment_peak_bytes(prices, factors, prices_wire)
+            stats['adjustment_stage_charge'] = adjustment_charge
+            adjustment_reserve = (resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes+
+                                  adjustment_charge['peak_bytes'])
             _guard_resident(adjustment_reserve, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature adjustment/source working set exceeds resident budget')
             tick = time.perf_counter_ns()
             adjusted_wire = _adjust_feature_wire(prices, factors, day, prices_wire)
-            del prices_wire
-            adjusted_bytes = 4*(prices_bytes+factors_bytes)
-            reader_bytes = prices_bytes+factors_bytes+adjusted_bytes
+            del prices_wire, prices, factors
+            adjusted_bytes = _owned_bytes(adjusted_wire)
+            reader_bytes = 0  # original input batches were released above
             stats['reader_batch_size_reuses'] += 2
             # to_json owns this wire. The adapter only reads it and retains
             # provenance aliases; no Data operation receives this private graph.
-            adjusted_wire_bytes = 2*adjusted_bytes
+            adjusted_wire_bytes = adjusted_bytes
             _guard_resident(resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes+
                 reader_bytes+adjusted_wire_bytes+read_estimate,
                 maximum_resident_bytes=maximum_resident_bytes, stats=stats,
@@ -719,24 +723,37 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
             _guard_resident(reserve, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature membership/source working set exceeds resident budget')
             membership_wire = membership.to_json()
-            wire_estimate = adjusted_wire_bytes+2*membership_bytes
+            del membership
+            wire_estimate = _owned_bytes((adjusted_wire, membership_wire))
             _guard_resident(retained+3*wire_estimate,
                 maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature adapter/wire copies exceed resident budget')
             adapted = _adapt_decision_wires(adjusted_wire, membership_wire,
                 recipe_ref=catalog.recipe_ref(config['feature_selection'], normalized=True),
                 output_keys=tuple((security, day) for security in symbols), source_granularity='batch_field')
+            facts, context = adapted.facts, adapted.context
+            members = {row['security_id']: row['is_member'] for row in membership_wire['records'] if row['session'] == day}
+            adjusted_ref = next(source['batch_ref'] for source in adapted.source_evidence.values()
+                if source['field'] != 'is_member')
+            membership_ref = next(source['batch_ref'] for source in adapted.source_evidence.values()
+                if source['field'] == 'is_member')
+            source_evidence = {key: {
+                **{name: value for name, value in source.items() if name != 'provenance_by_key'},
+                'provenance_by_key_ref': digest_array_rows(source['provenance_by_key'])}
+                for key, source in adapted.source_evidence.items()}
             plan = build_feature_plan(adapted.plan, config['feature_selection'], catalog=catalog, normalized=True)
-            documents = [plan, adapted.facts, adapted.context]
+            del adjusted_wire, membership_wire, adapted
+            documents = [plan, facts, context]
+            retained = resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes
             # Serialized lengths plus an eightfold decoded/header allowance;
             # Core cell/dependency workspace is reserved separately below.
             document_estimate = sum(sys.getsizeof(document.payload) for document in documents)*8
-            _guard_resident(retained+wire_estimate+document_estimate,
+            _guard_resident(retained+document_estimate,
                 maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature Core snapshot copies exceed resident budget')
-            wires = plan.to_dict(), adapted.facts.to_dict(), adapted.context.to_dict()
+            wires = plan.to_dict(), facts.to_dict(), context.to_dict()
             if not config.get("_compact_source",False):
-                signature = _view_signature(plan, adapted.facts, adapted.context, calendar=sessions, _wires=wires)
+                signature = _view_signature(plan, facts, context, calendar=sessions, _wires=wires)
                 if previous is not None:
                     classification = classify_shared_feature_views(previous, signature)
                     counts = stats['classifier_status_counts']
@@ -748,30 +765,24 @@ def iter_matrix_feature_days(data, *, config, catalog, chosen, qlib_inputs,
                 previous = signature
                 previous_bytes = len(signature['facts'])*1024+len(signature['reference'])*512+len(sessions)*256
                 stats['signature_charge_estimates'] = stats.get('signature_charge_estimates', 0)+1
-            owned = (base+window.bytes+reuse_budget_bytes+_pending_owned_bytes(pending)+reader_bytes+
-                     membership_bytes+previous_bytes+wire_estimate+3*document_estimate)
+            owned = (base+window.bytes+reuse_budget_bytes+_pending_owned_bytes(pending)+
+                    previous_bytes+3*document_estimate)
             _guard_resident(owned, maximum_resident_bytes=maximum_resident_bytes, stats=stats,
                 caller_retained_bytes=caller_retained_bytes, reason='Feature input working graph exceeds resident budget')
-            members = {row['security_id']: row['is_member'] for row in membership_wire['records'] if row['session'] == day}
             if config.get('_compact_source',False):
                 stats['feature_source_batch_ref_reuses']=stats.get('feature_source_batch_ref_reuses',0)+2
             evidence = {'session': day, 'core_plan': wires[0],
-                'fact_ref': adapted.facts.identity, 'context_ref': adapted.context.identity,
+                'fact_ref': facts.identity, 'context_ref': context.identity,
                 'sessions': list(history), 'cutoffs': cutoffs,
-                'adjusted_input_ref': (next(source['batch_ref'] for source in adapted.source_evidence.values()
-                    if source['field']!='is_member') if config.get('_compact_source',False) else digest(adjusted_wire)),
-                'membership_ref': (next(source['batch_ref'] for source in adapted.source_evidence.values()
-                    if source['field']=='is_member') if config.get('_compact_source',False) else digest(membership_wire)), 'source_evidence': {key: {
-                    **{name: value for name, value in source.items() if name != 'provenance_by_key'},
-                    'provenance_by_key_ref': digest(source['provenance_by_key'])}
-                    for key, source in adapted.source_evidence.items()}}
+                'adjusted_input_ref': adjusted_ref,
+                'membership_ref': membership_ref, 'source_evidence': source_evidence}
             workspace, output_reserve = _core_view_bounds(*wires, snapshots=document_estimate)
-            current_view = _seal_pending_view((plan, adapted.facts, adapted.context),
+            current_view = _seal_pending_view((plan, facts, context),
                 evidence, members, workspace, output_reserve, stats=stats,
                 owned_estimate=document_estimate+output_reserve+len(members)*512)
             # Only immutable original Documents and compact saved provenance
             # survive collection. No source DataFrames or full adapter graph do.
-            del prices, factors, adjusted_wire, membership, membership_wire, adapted, plan
+            del plan, facts, context, source_evidence, adjusted_ref, membership_ref
             del wires, documents, evidence, members
             stats['feature_adaptation_ns'] += time.perf_counter_ns()-tick
             read_estimate = max(read_estimate, owned-(resident_base+_pending_owned_bytes(pending)+reuse_budget_bytes))

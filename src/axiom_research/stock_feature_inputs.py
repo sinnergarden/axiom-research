@@ -533,7 +533,7 @@ def _build_feature_matrix(data, *, spec, destination, storage_options, progress)
 
 
 def _build_feature_matrix_impl(data, *, spec, destination, storage_options, progress, _publication_store=None):
-    from .feature_catalog import load_feature_catalog
+    from .feature_catalog import load_feature_catalog_ref
     from .stock_ml import _implementation, _environment
     from .stock_matrix_feature_producer import prepare_matrix_qlib, iter_matrix_feature_days
     from .stock_matrix_storage import row_index, write_part
@@ -543,7 +543,7 @@ def _build_feature_matrix_impl(data, *, spec, destination, storage_options, prog
     from .stock_matrix_feature_sources import _FeatureCoverageWriter
     coverage_writer=_FeatureCoverageWriter() if compact else None
     source_marks={spec['scope']['path']:file_fingerprint(spec['scope']['path'])}
-    universe_id=_spec(spec); catalog=load_feature_catalog(); chosen=catalog.select(spec['feature_selection'])
+    universe_id=_spec(spec); catalog=load_feature_catalog_ref(spec['catalog_ref']); chosen=catalog.select(spec['feature_selection'])
     require(catalog.identity == spec['catalog_ref'] and [c['id'] for c in chosen] == spec['ordered_features'],
             'current Feature catalog mismatch')
     history_length=max(c['lookback'] for c in chosen); calendar=spec['calendar']
@@ -763,13 +763,13 @@ def build_stock_feature_inputs(data, *, spec, destination, shard_sessions=2, pro
                 'v1 shard_sessions conflicts with matrix storage options')
         return _build_feature_matrix(data, spec=spec, destination=destination,
                                      storage_options=storage_options, progress=progress)
-    from .feature_catalog import load_feature_catalog
+    from .feature_catalog import load_feature_catalog_ref
     from .stock_ml import _implementation, _environment, _prepare_stock_qlib, _iter_stock_feature_days
     spec = deepcopy(spec)
     source_marks = {spec['scope']['path']:file_fingerprint(spec['scope']['path'])}
     universe_id = _spec(spec)
     require(type(shard_sessions) is int and shard_sessions > 0, 'positive shard session count required')
-    catalog = load_feature_catalog(); chosen = catalog.select(spec['feature_selection'])
+    catalog = load_feature_catalog_ref(spec['catalog_ref']); chosen = catalog.select(spec['feature_selection'])
     require(catalog.identity == spec['catalog_ref'] and [c['id'] for c in chosen] == spec['ordered_features'],
             'current Feature catalog mismatch')
     history_length = max(c['lookback'] for c in chosen)

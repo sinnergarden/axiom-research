@@ -67,8 +67,8 @@ def build_stock_ml_fold_from_saved_inputs(input_manifest, *, fold_spec, destinat
     projection = project_saved_fold(inputs, spec) if batch is None else batch._project(inputs, spec)
     features, labels, training, excluded, raw_refs, evaluation = projection
     compact = spec['contract_version'] in ('stock_ml_fold_spec_v2', 'stock_ml_fold_spec_v3')
-    from .feature_catalog import load_feature_catalog
-    catalog = load_feature_catalog()
+    from .feature_catalog import load_feature_catalog_ref
+    catalog = load_feature_catalog_ref(inputs['catalog_ref'])
     require(inputs['catalog_ref'] == catalog.identity and inputs['ordered_features'] ==
             [x['id'] for x in catalog.select(inputs['feature_selection'])], 'current catalog selection mismatch')
     implementations = _implementation()

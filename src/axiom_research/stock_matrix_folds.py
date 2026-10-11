@@ -54,8 +54,8 @@ def _dataset(projection,inputs,spec):
 
 def _fold_definition(inputs,spec,common,parameters,rounds,training_binding=None):
     from .stock_ml import _implementation,_environment
-    from .feature_catalog import load_feature_catalog
-    catalog=load_feature_catalog()
+    from .feature_catalog import load_feature_catalog_ref
+    catalog=load_feature_catalog_ref(common['catalog_ref'])
     require(common['catalog_ref']==catalog.identity and common['ordered_features']==[
         f['id'] for f in catalog.select(common['feature_selection'])], 'current catalog selection mismatch')
     implementations=_implementation() if 'target_spec' not in common else {'research':{name:file_digest(Path(__file__).with_name(name)) for name in (
@@ -93,7 +93,6 @@ def _build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,train
     from .stock_ml import _implementation,_environment,_signal_evidence
     from .stock_folds import prediction_rows
     from .stock_training import fit_predict_stock_model
-    from .feature_catalog import load_feature_catalog
     begin=time.perf_counter();training_binding=None
     if training_spec is None:parameters,rounds=training_profile(training_options)
     else:

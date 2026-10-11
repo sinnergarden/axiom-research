@@ -14,7 +14,8 @@ from .stock_feature_inputs import StockFeatureInputs, load_stock_feature_inputs
 from .stock_signal_evaluation import (StockSignalEvaluation, evaluate_stock_signal,
     evaluate_stock_signals, save_stock_signal_evaluation, load_stock_signal_evaluation)
 from .stock_signal_evaluation_projection import (save_stock_signal_evaluation_inputs,
-    evaluate_stock_signal_inputs, evaluate_stock_signal_input_periods, audit_stock_signal_evaluation)
+    evaluate_stock_signal_inputs, evaluate_stock_signal_input_periods,
+    evaluate_stock_signal_input_analysis, audit_stock_signal_evaluation)
 
 __version__ = "0.2.6"
 
@@ -38,6 +39,10 @@ _RUNTIME_EXPORTS = {
     "audit_stock_ml_batch_inputs": ".stock_compact_audit",
     "normalize_forward_labels": ".stock_label_normalization",
     "load_feature_catalog": ".feature_catalog", "build_feature_plan": ".feature_catalog",
+    "load_feature_catalog_ref": ".feature_catalog",
+    "load_a01_feature_catalog": ".a01_catalog",
+    "compile_stock_periodic_folds": ".stock_periodic_config",
+    "stock_evaluation_sessions": ".stock_periodic_config",
     "build_forward_labels": ".labels", "mature_training_rows": ".labels",
     "load_stock_experiment_specs": ".stock_experiment_config",
     "load_stock_sequential_configuration": ".stock_experiment_config",

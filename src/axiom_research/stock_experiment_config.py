@@ -143,6 +143,13 @@ def load_stock_sequential_configuration(path):
     if type(dataset) is dict and dataset.get('contract_version')=='stock_dataset_schedule_v2':
         from .stock_weekly_config import _expand_weekly_dataset
         dataset,compilation=_expand_weekly_dataset(dataset,dataset_path)
+    elif type(dataset) is dict and dataset.get('contract_version')=='stock_dataset_schedule_v3':
+        from .stock_periodic_config import _expand_periodic_dataset
+        dataset,compilation=_expand_periodic_dataset(dataset,dataset_path)
+        require('label' in configuration['specs'] and
+            configuration['specs']['label'].horizon_sessions ==
+            compilation['periodic_schedule']['label_horizon_sessions'],
+            'periodic maturity plan and training Label horizon differ')
     require(type(dataset) is dict and set(dataset)=={'contract_version','fold_specs','scope',
         'preparation_options','model_feature_selection','signal_contexts'} and
         dataset['contract_version']=='stock_dataset_schedule_v1' and
@@ -176,6 +183,7 @@ def load_stock_sequential_configuration(path):
             'specification_ref':configuration['configuration_ref'],'dataset_ref':dataset_ref}),
         'configuration_files':[str(path),str(dataset_path),*configuration['configuration_files']]}
     if compilation is not None:
-        result['weekly_compilation']=compilation
+        result['periodic_compilation' if compilation['contract_version']=='stock_periodic_compilation_v1'
+            else 'weekly_compilation']=compilation
         result['configuration_files'].append(compilation['axes_input']['path'])
     return result
