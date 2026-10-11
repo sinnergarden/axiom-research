@@ -12,7 +12,7 @@ from .stock_artifacts import digest
 
 
 def build_configured_stock_sequential_experiment(data,*,configuration_path,feature_inputs,
-    column_source,destination,metrics=None,progress=None):
+    column_source,destination,reuse_raw_from_batch=None,metrics=None,progress=None):
     """Notebook/worker entry; all schedule and model values come from YAML."""
     from .stock_experiment_config import load_stock_sequential_configuration
     configuration=load_stock_sequential_configuration(configuration_path);dataset=configuration['dataset']
@@ -20,7 +20,7 @@ def build_configured_stock_sequential_experiment(data,*,configuration_path,featu
         feature_inputs=feature_inputs,fold_specs=dataset['fold_specs'],column_source=column_source,
         preparation_options=dataset['preparation_options'],scope=dataset['scope'],destination=destination,
         model_feature_selection=dataset['model_feature_selection'],signal_contexts=dataset['signal_contexts'],
-        metrics=metrics,progress=progress)
+        reuse_raw_from_batch=reuse_raw_from_batch,metrics=metrics,progress=progress)
     result.update(configuration_ref=configuration['configuration_ref'],dataset_configuration_ref=configuration['dataset_ref'],
         configuration_files=configuration['configuration_files'])
     return result
@@ -28,18 +28,19 @@ def build_configured_stock_sequential_experiment(data,*,configuration_path,featu
 
 def build_stock_sequential_experiment(data, *, configuration_paths, feature_inputs,
     fold_specs, column_source, preparation_options, scope, destination,
-    model_feature_selection=None, signal_contexts=None, metrics=None, progress=None):
+    model_feature_selection=None, signal_contexts=None, reuse_raw_from_batch=None,metrics=None, progress=None):
     """Load typed specs once and run the concrete shared preparation sequence."""
     from .stock_experiment_config import load_stock_experiment_specs
     return _build_stock_sequential_experiment(data,configuration=load_stock_experiment_specs(configuration_paths),
         feature_inputs=feature_inputs,fold_specs=fold_specs,column_source=column_source,
         preparation_options=preparation_options,scope=scope,destination=destination,
-        model_feature_selection=model_feature_selection,signal_contexts=signal_contexts,metrics=metrics,progress=progress)
+        model_feature_selection=model_feature_selection,signal_contexts=signal_contexts,
+        reuse_raw_from_batch=reuse_raw_from_batch,metrics=metrics,progress=progress)
 
 
 def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
     fold_specs, column_source, preparation_options, scope, destination,
-    model_feature_selection=None, signal_contexts=None, metrics=None, progress=None):
+    model_feature_selection=None, signal_contexts=None, reuse_raw_from_batch=None,metrics=None, progress=None):
     """Prepare/build/freeze a sequence through one shared Feature/source owner.
 
     The executable configuration roles here are label/model and optional signal.
@@ -68,7 +69,7 @@ def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
     with open_stock_ml_batch_preparation(data,feature_inputs=feature_inputs,fold_specs=fold_specs,
         destination=root/'prepared',preparation_options=preparation_options,label_spec=specs['label'],
         column_source=column_source,model_feature_selection=model_feature_selection,metrics=metrics,
-        progress=progress) as owner:
+        reuse_raw_from_batch=reuse_raw_from_batch,progress=progress) as owner:
         with open_stock_signal_evaluation_freeze(owner.batch,scope=scope,destination=root/'oos',signal_name='model') as writer:
             while True:
                 with owner.operation():

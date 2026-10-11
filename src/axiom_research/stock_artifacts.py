@@ -23,6 +23,15 @@ def digest_array_rows(rows):
     h.update(b']'); return 'sha256:'+h.hexdigest()
 
 
+def digest_stream(value, *, default=None):
+    """Same canonical bytes as digest, without a whole JSON text/bytes copy."""
+    encoder=json.JSONEncoder(sort_keys=True,separators=(',',':'),ensure_ascii=False,
+        allow_nan=False,default=default)
+    h=sha256()
+    for piece in encoder.iterencode(value): h.update(piece.encode('utf-8'))
+    return 'sha256:'+h.hexdigest()
+
+
 def file_digest(path):
     h = sha256()
     with Path(path).open('rb') as f:

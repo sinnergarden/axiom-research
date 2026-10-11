@@ -1,0 +1,23 @@
+contract_version: stock_dataset_schedule_v3
+axes_input:
+  path: <ASSEMBLED_AXES_JSON>
+  file_digest: sha256:<AXES_FILE_HEX_DIGEST>
+periodic_schedule:
+  evaluation_cutoff: '2024-03-01T20:30:00+08:00'
+  fit_time: '20:30'
+  inference_time: '21:00'
+  label_horizon_sessions: 40
+  mature_sessions: 60
+  model_time: '20:45'
+  retrain_every_sessions: 20
+  timezone: Asia/Shanghai
+  trade_end_exclusive: '2023-02-08'
+  trade_start: '2023-01-03'
+preparation_options:
+  row_block_sessions: 8
+  column_block: 32
+  maximum_resident_bytes: 17179869184
+  normalization_backend: core_cs_batch_v1
+  control_layout: fold_controls_v2
+model_feature_selection: null
+signal_contexts: null

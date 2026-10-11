@@ -12,7 +12,7 @@ import tempfile
 import time
 
 from .stock_artifacts import (StockMLExperiment, digest, file_digest, write_json,
-                             load_stock_ml_experiment, load_stock_model)
+                             load_stock_ml_experiment, load_stock_model, digest_stream)
 
 VERSION = 'axiom.stock_ml/1'
 from .stock_training import LGBM_PARAMETERS, TREES, TARGET_SEMANTICS
@@ -96,8 +96,8 @@ def _project_qlib(batch, values, view_ref):
 
 
 def _feature_projection(adjusted_wire, native_wire):
-    return {'operation':'keyed_join_native_amount','adjusted_ref':digest(adjusted_wire),
-            'native_ref':digest(native_wire), 'native_fields':['amount_cny']}
+    return {'operation':'keyed_join_native_amount','adjusted_ref':digest_stream(adjusted_wire),
+            'native_ref':digest_stream(native_wire), 'native_fields':['amount_cny']}
 
 
 def _join_feature_wire(adjusted_wire, native_wire, projection):
@@ -137,6 +137,7 @@ def _adjust_feature_wire(prices, factors, session, native_wire):
     adjusted = adjust_prices(prices,factors,fields=('open','high','low','close'),
                              factor_field='factor',anchor_session=session,decision_session=session)
     adjusted_wire = adjusted.to_json()
+    del adjusted
     return _join_feature_wire(adjusted_wire, native_wire, _feature_projection(adjusted_wire, native_wire))
 
 

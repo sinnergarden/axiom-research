@@ -454,7 +454,7 @@ def load_stock_feature_view(path, *, limits=None, residency="eager",model_featur
     try:
         index_path=str(path/'index.json'); index=store.read_json({'path':index_path},legacy=True,keep=False)
         require(index.get('status')=='COMPLETE' and index.get('contract_version') in
-                ('stock_feature_inputs_v2','stock_feature_inputs_v3'),'saved typed Feature input required')
+                ('stock_feature_inputs_v2','stock_feature_inputs_v3','stock_feature_inputs_v4'),'saved typed Feature input required')
         spec=deepcopy(index['definition']['spec']); days=ordered(spec['feature_sessions'],'Feature sessions')
         securities=ordered(spec['universe'],'Feature securities'); columns=spec['ordered_features']
         column_positions={column:i for i,column in enumerate(columns)}

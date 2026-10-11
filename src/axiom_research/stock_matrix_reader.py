@@ -714,7 +714,7 @@ class FeatureMatrixInputs:
 
 
 def admit_feature_matrix_parts(store, *, spec,view,schema,row_index,partitions,complete=False,universe_id=None,
-                               start_offset=0,metadata_version='stock_matrix_feature_metadata_v1'):
+                               start_offset=0,metadata_version='stock_matrix_feature_metadata_v1',column_source=None):
     from .stock_feature_inputs import _validate_feature_matrix_block, _feature_contents
     admitted,coverage=_validate_partitions(partitions,row_index,{'features':schema},store,metadata=False)
     stop = row_index['row_count'] if complete else max((p['row_offset']+p['row_count'] for p in partitions), default=0)
@@ -729,7 +729,9 @@ def admit_feature_matrix_parts(store, *, spec,view,schema,row_index,partitions,c
     for (start,count,_),parts in sorted(groups.items()):
         metadata=store.read_json(parts[0][0]['metadata'],'metadata_ref')
         require(metadata.get('contract_version')==metadata_version,'Feature index/metadata version mismatch')
-        if metadata_version=='stock_matrix_feature_metadata_v2':
+        if metadata_version=='stock_matrix_feature_metadata_v3':
+            require(metadata['source_descriptor']==column_source,'Feature definition/physical source mismatch')
+        if metadata_version in ('stock_matrix_feature_metadata_v2','stock_matrix_feature_metadata_v3'):
             require(metadata['schema']==schema,'Feature metadata/buffer schema mismatch')
         rows=deepcopy(metadata['rows'])
         require(len(rows)==count and start%len(spec['universe'])==0 and count%len(spec['universe'])==0,'complete day Feature block required')
@@ -744,7 +746,10 @@ def admit_feature_matrix_parts(store, *, spec,view,schema,row_index,partitions,c
                     require(row['validity'][k] is valid,'Feature binary validity mismatch')
                     at=row['availability'][k]; present=bool(arrays['available_at_validity'][i,j])
                     require(present is (at is not None) and (not present or int(arrays['available_at_utc_us'][i,j])==_us(at)), 'Feature binary clock mismatch')
-        if metadata_version=='stock_matrix_feature_metadata_v2':
+        if metadata_version=='stock_matrix_feature_metadata_v3':
+            from .stock_matrix_feature_column_metadata import admit_metadata
+            source_rows,hashes,parents=admit_metadata(store,metadata,rows,parts,spec,view,universe_id=universe_id)
+        elif metadata_version=='stock_matrix_feature_metadata_v2':
             from .stock_matrix_feature_sources import admit_metadata
             source_rows,hashes,parents=admit_metadata(store,metadata,rows,parts,spec,view,universe_id=universe_id)
         else:
@@ -759,6 +764,8 @@ def admit_feature_matrix_parts(store, *, spec,view,schema,row_index,partitions,c
         blocks.append({'start':start,'count':count,'parts':parts, 'rows':compact,
             'row_references':deepcopy(metadata['row_references']),
             '_source_selection_rows':deepcopy(source_rows),'_sessions':list(metadata['sessions'])})
+        if metadata_version=='stock_matrix_feature_metadata_v3':
+            blocks[-1]['_column_source_descriptor']=deepcopy(column_source)
         if metadata_version=='stock_matrix_feature_metadata_v1':
             blocks[-1]['_original_feature_ref']=metadata['original_feature_ref']
         reachable.update(hashes); parentrefs.update(parents)
@@ -771,7 +778,7 @@ def admit_feature_matrix_parts(store, *, spec,view,schema,row_index,partitions,c
 
 
 def load_feature_matrix_index(path, limits=None, *, store=None, _index=None, _index_fingerprint=None):
-    """Strict v2/v3 dispatch target. No Feature/provider execution occurs."""
+    """Strict v2/v3/v4 dispatch target. No Feature/provider execution occurs."""
     from .stock_feature_inputs import _spec, _qlib, _qlib_scope, _validate_feature_matrix_block
     begin=time.perf_counter(); path=Path(path); index_path=path/'index.json'
     if limits is not None:
@@ -796,18 +803,27 @@ def load_feature_matrix_index(path, limits=None, *, store=None, _index=None, _in
             # Feature ref is a defined projection, not digest(index minus ref).
             store._register(index_desc); store.json[index_name]=value; store.metrics['json_decode_calls']+=1
         _fields(value,FEATURE_INDEX_FIELDS,'exact Feature matrix index required')
-        require(value['contract_version'] in ('stock_feature_inputs_v2','stock_feature_inputs_v3') and value['status']=='COMPLETE', 'complete Feature matrix index required')
-        compact=value['contract_version']=='stock_feature_inputs_v3'
+        require(value['contract_version'] in ('stock_feature_inputs_v2','stock_feature_inputs_v3','stock_feature_inputs_v4') and value['status']=='COMPLETE', 'complete Feature matrix index required')
+        packed=value['contract_version']=='stock_feature_inputs_v4'
+        compact=value['contract_version'] in ('stock_feature_inputs_v3','stock_feature_inputs_v4')
         _verify_ref(value,'content_digest'); definition=value['definition']
-        _fields(definition,{'spec','storage_options','implementation_sources','implementation_ref','environment'},'exact matrix Feature definition required')
+        _fields(definition,{'spec','storage_options','implementation_sources','implementation_ref','environment'}|
+            ({'column_source'} if packed else set()),'exact matrix Feature definition required')
         require(definition['implementation_ref']==digest(definition['implementation_sources']) and
                 value['definition_ref']==digest(definition),'matrix Feature implementation/definition mismatch')
         options=definition['storage_options']; _fields(options,{'layout','row_block_sessions','column_block','maximum_resident_bytes'},'exact matrix storage options required')
-        require(options['layout']==('matrix_v2' if compact else 'matrix_v1') and all(type(options[k]) is int and options[k]>0 for k in options if k!='layout'), 'matrix storage options invalid')
+        require(options['layout']==('matrix_v3' if packed else 'matrix_v2' if compact else 'matrix_v1') and all(type(options[k]) is int and options[k]>0 for k in options if k!='layout'), 'matrix storage options invalid')
         spec=definition['spec']; universe_id=_spec(spec,reader=store.read_json)
         view=_qlib(value['qlib_manifest'],{'maximum_parent_bytes':store.maximum_parent_bytes},fingerprints=store.fingerprints,
                    _file_hasher=store._hash_once,_json_reader=store._decode_once)
-        require(view==value['qlib_view'],'matrix Qlib reference mismatch'); _qlib_scope(view,spec,universe_id)
+        require(view==value['qlib_view'],'matrix Qlib reference mismatch')
+        if packed:
+            from .stock_matrix_feature_column_metadata import verify_feature_column_source, validate_source_projection
+            source_manifest,_=verify_feature_column_source(definition['column_source'],store=store)
+            validate_source_projection(spec,source_manifest['spec'])
+            _qlib_scope(view,source_manifest['spec'],universe_id)
+        else:
+            _qlib_scope(view,spec,universe_id)
         require(value['feature_inputs_ref']==digest({k:value[k] for k in ('contract_version','definition_ref','qlib_manifest',
             'schema_digest','row_index','source_selection','partitions')}),'matrix Feature identity mismatch')
         require(value['schema_digest']==digest(value['schema']),'matrix Feature schema digest mismatch'); _schema(value['schema'],spec['ordered_features'])
@@ -815,13 +831,22 @@ def load_feature_matrix_index(path, limits=None, *, store=None, _index=None, _in
         require(row_index['sessions']==spec['feature_sessions'] and row_index['security_ids']==spec['universe'],'matrix Feature scope mismatch')
         selection=store.read_json(value['source_selection'],'source_selection_ref')
         _fields(selection,{'contract_version','definition_ref','feature_rows','source_selection_ref'},'exact Feature source selection required')
-        require(selection['contract_version']==('stock_feature_source_selection_v2' if compact else 'stock_feature_source_selection_v1') and selection['definition_ref']==value['definition_ref'], 'Feature source-selection definition mismatch')
+        require(selection['contract_version']==('stock_feature_source_selection_v3' if packed else 'stock_feature_source_selection_v2' if compact else 'stock_feature_source_selection_v1') and selection['definition_ref']==value['definition_ref'], 'Feature source-selection definition mismatch')
         covered,blocks,reachable,parentrefs=admit_feature_matrix_parts(store,spec=spec,view=view,schema=value['schema'],row_index=row_index,partitions=value['partitions'],complete=True,universe_id=universe_id,
-            metadata_version='stock_matrix_feature_metadata_v2' if compact else 'stock_matrix_feature_metadata_v1')
+            metadata_version='stock_matrix_feature_metadata_v3' if packed else 'stock_matrix_feature_metadata_v2' if compact else 'stock_matrix_feature_metadata_v1',
+            column_source=definition.get('column_source'))
         require(selection['feature_rows']==[r for b in blocks for r in b['_source_selection_rows']],
                 'Feature source selection differs from actual proof')
         require([r['session'] for r in selection['feature_rows']]==spec['feature_sessions'],'Feature selection date coverage mismatch')
         for r in selection['feature_rows']:
+            if packed:
+                _fields(r,{'source_ref','session','history_sessions','anchor_session','knowledge_cutoff',
+                           'selection_ref','core_result_ref','feature_ref'},'exact packed Feature selection row required')
+                require(_instant(r['knowledge_cutoff'])==_instant(spec['cutoff_by_session'][r['session']]) and
+                    r['anchor_session']==r['session'] and r['history_sessions'][-1]==r['session'] and
+                    all(r[key] in reachable for key in ('source_ref','selection_ref','core_result_ref')) and
+                    r['feature_ref']==parentrefs[r['session']]['feature_ref'], 'packed Feature source selection closure mismatch')
+                continue
             fields={'session','cutoff','history_sessions','adjustment_anchor','query_refs'}
             _fields(r,fields|({'day_evidence_ref','feature_ref'} if compact else {'selected_versions_ref'}),'exact Feature selection row required')
             require(_instant(r['cutoff'])==_instant(spec['cutoff_by_session'][r['session']]) and r['adjustment_anchor']==r['session'] and
@@ -856,7 +881,11 @@ def _published_feature_matrix(path, value, store, row_index, blocks, reachable, 
     require(store._decode_once(name)==expected,'published Feature index changed')
     _verify_ref(expected,'content_digest')
     selection=store.read_json(expected['source_selection'],'source_selection_ref')
-    require(selection=={'contract_version':'stock_feature_source_selection_v2','definition_ref':expected['definition_ref'],
+    version='stock_feature_source_selection_v3' if expected['contract_version']=='stock_feature_inputs_v4' else 'stock_feature_source_selection_v2'
+    if expected['contract_version']=='stock_feature_inputs_v4':
+        require(all(b.get('_column_source_descriptor')==expected['definition']['column_source'] for b in blocks),
+                'published Feature definition/physical source mismatch')
+    require(selection=={'contract_version':version,'definition_ref':expected['definition_ref'],
         'feature_rows':[r for b in blocks for r in b['_source_selection_rows']],
         'source_selection_ref':expected['source_selection']['source_selection_ref']},
         'published Feature selection changed')
@@ -1890,7 +1919,7 @@ def _admit_matrix_view(descriptor,folds,*,limits=None,_store=None):
         store._register(feature_desc); index=store._decode_once(feature_desc['path'])
         store.json[feature_desc['path']]=index
         require(index['feature_inputs_ref']==feature_desc['feature_inputs_ref'],'prepared Feature index identity mismatch')
-        if index['contract_version'] in ('stock_feature_inputs_v2','stock_feature_inputs_v3'):
+        if index['contract_version'] in ('stock_feature_inputs_v2','stock_feature_inputs_v3','stock_feature_inputs_v4'):
             feature=load_feature_matrix_index(Path(feature_desc['path']).parent,store=store,_index=index)
             require([p for p in view['partitions'] if p['table']=='features']==index['partitions'],
                     'prepared Feature partitions changed from frozen index')
@@ -1953,7 +1982,7 @@ def _admit_matrix_view(descriptor,folds,*,limits=None,_store=None):
             common=definition,fold_specs=fold_specs)
         selection=store.read_json(view['source_selection'],'source_selection_ref')
         _fields(selection,{'contract_version','feature_inputs_ref','feature_rows','label_rows','source_selection_ref'},'exact prepared source-selection required')
-        selection_version='stock_matrix_source_selection_v2' if index['contract_version']=='stock_feature_inputs_v3' else 'stock_matrix_source_selection_v1'
+        selection_version='stock_matrix_source_selection_v2' if index['contract_version'] in ('stock_feature_inputs_v3','stock_feature_inputs_v4') else 'stock_matrix_source_selection_v1'
         require(selection['contract_version']==selection_version and selection['feature_inputs_ref']==feature.identity and
                 selection['feature_rows']==[r for b in feature._blocks for r in b['_source_selection_rows']],
                 'prepared Feature source-selection mismatch')

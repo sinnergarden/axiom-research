@@ -186,6 +186,25 @@ def load_feature_catalog(path: str | Path | None = None) -> FeatureCatalog:
     return FeatureCatalog(source.read_text(encoding="utf-8"))
 
 
+def load_feature_catalog_ref(reference: str) -> FeatureCatalog:
+    """Resolve an immutable installed recipe set without changing old defaults.
+
+    A catalog digest, rather than a caller-controlled replacement path, selects
+    the numerical definition used by Feature preparation and model admission.
+    """
+    legacy = load_feature_catalog()
+    if legacy.identity == reference:
+        return legacy
+    for name in ("a01_price_v1.json",):
+        source = files("axiom_research").joinpath("catalogs", name)
+        if not source.is_file():
+            continue
+        catalog = FeatureCatalog(source.read_text(encoding="utf-8"))
+        if catalog.identity == reference:
+            return catalog
+    raise FeatureCatalogError("unknown installed Feature catalog digest: " + str(reference))
+
+
 def build_feature_plan(base_plan: FeaturePlan,
                        selections: Sequence[FeatureSelection | Mapping[str, str]], *,
                        catalog: FeatureCatalog | None = None,

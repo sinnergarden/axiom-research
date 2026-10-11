@@ -28,9 +28,8 @@ def _require(condition: bool, reason: str) -> None:
 
 
 def _digest(value: Any) -> str:
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"),
-                         ensure_ascii=False, allow_nan=False, default=str)
-    return "sha256:" + sha256(payload.encode()).hexdigest()
+    from .stock_artifacts import digest_stream
+    return digest_stream(value, default=str)
 
 
 def _utc(value: Any, *, availability: bool = False) -> str:
