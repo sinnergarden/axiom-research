@@ -73,6 +73,7 @@ def main():
     result['metrics'] = metrics
     write_json(output/'experiment-result.json',result)
     write_json(output/'batch.json',result['batch_manifest'])
+    write_json(output/'prediction-bindings.json',result['prediction_bindings'])
 
 
 if __name__ == '__main__': main()
