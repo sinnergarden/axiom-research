@@ -104,6 +104,17 @@ def publish_stock_result(request_path, *, index_path, roots, experiment_result=N
     from .result_discovery import read_json
     from .stock_result_projection import load_stock_ml_batch_manifest
     frozen = load_stock_result_configuration(request_path).wire
+    discovery_blocked = None
+    if experiment_result is not None:
+        path = Path(experiment_result).resolve(strict=True)
+        _require(path.is_relative_to(Path(roots["research"]).resolve(strict=True)),
+                 "saved artifact outside configured root")
+        if read_json(path).get("derived_signals"):
+            # Preserve the existing configured Derived builder. This discovery
+            # profile validates original raw fold bindings only; its limitation
+            # must not turn an otherwise successful owner build into a failure.
+            discovery_blocked = "Saved Derived outputs are outside the raw-fold result discovery profile"
+            experiment_result = signal_evaluation = engine_handoff = None
     store = ExperimentStore(index_path); reader = ExperimentReader(index_path)
     previous = None
     if Path(index_path).exists():
@@ -216,6 +227,8 @@ def publish_stock_result(request_path, *, index_path, roots, experiment_result=N
         manifest.update(status="COMPLETE", reason=None)
     elif manifest["folds"]:
         manifest.update(status="PARTIAL", reason="Required owner stages are not all saved")
+    if discovery_blocked is not None:
+        manifest.update(status="BLOCKED", reason=discovery_blocked)
     if failure is not None:
         manifest.update(status="FAILED", reason=str(failure))
     manifest["artifacts"].sort(key=lambda a: a["artifact_key"])
