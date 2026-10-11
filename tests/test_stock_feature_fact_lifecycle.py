@@ -19,6 +19,54 @@ import test_stock_model_feature_selection as selection_tests
 class FeatureFactLifecycleTests(unittest.TestCase):
     def fixture(self, root): return selection_tests.ModelFeatureSelectionTests().fixture(root)
 
+    def test_retained_eager_admission_error_releases_facts_before_store_close(self):
+        import sys
+        import axiom_research.stock_compact_store as owner
+        from axiom_research.stock_matrix_reader import _CompactRows
+        with tempfile.TemporaryDirectory() as temp:
+            f, path = self.fixture(Path(temp))
+            for selected in (False, True):
+                with self.subTest(selected=selected):
+                    facts, stores, close_order = [], [], []
+                    actual_init = _CompactRows.__init__
+                    actual_reserve = owner.OwnedStore.reserve
+                    actual_close = owner.OwnedStore.close
+                    admission = '_admit_model_columns' if selected else '_admit_feature_block'
+
+                    def track(compact, *args, **kwargs):
+                        actual_init(compact, *args, **kwargs)
+                        facts.append(weakref.ref(compact))
+
+                    def fail_after_conversion(store, *args, **kwargs):
+                        if facts and sys._getframe(1).f_code.co_name == admission:
+                            stores.append(weakref.ref(store))
+                            raise ValueError('synthetic admission failure after compact conversion')
+                        return actual_reserve(store, *args, **kwargs)
+
+                    def observe_close(store):
+                        for state in list(owner._VIEWS.values()):
+                            if state['store'] is store:
+                                close_order.append(all('row_facts' not in b and
+                                    b['parts'] is None and 'model_parts' not in b for b in state['blocks']))
+                        return actual_close(store)
+
+                    caught = None
+                    with patch.object(_CompactRows, '__init__', new=track), \
+                         patch.object(owner.OwnedStore, 'reserve', new=fail_after_conversion), \
+                         patch.object(owner.OwnedStore, 'close', new=observe_close):
+                        try:
+                            load_stock_feature_view(path, residency='eager',
+                                model_feature_selection=deepcopy(f.selection[:3]) if selected else None)
+                        except ValueError as error:
+                            caught = error
+                    self.assertIsNotNone(caught)
+                    self.assertIsNotNone(caught.__traceback__)
+                    gc.collect()  # Do not discard the retained admission traceback.
+                    self.assertTrue(facts and all(ref() is None for ref in facts))
+                    self.assertEqual(close_order, [True])
+                    self.assertTrue(stores and all(ref() is None or
+                        (ref().closed and ref().resident_bytes == 0) for ref in stores))
+
     def test_full_and_subset_share_one_fact_owner_and_release_native_json(self):
         with tempfile.TemporaryDirectory() as temp:
             f,path=self.fixture(Path(temp)); selection=deepcopy(f.selection[:3])

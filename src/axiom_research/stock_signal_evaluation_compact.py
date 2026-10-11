@@ -256,6 +256,10 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
                 if not _defer_source_checks: _check_marks(lease_marks)
             del lease, documents, fold, model, features, signal, indexed, feature_index, own_members, own_features, row
         projected[name] = {'rows': rows, 'members': members, 'prediction_features': prediction_features}
+    from .stock_batch import _data
+    from .stock_signal_evaluation_build import _complete_owner_source_records
+    owner_state=_data(batch)['matrix_state']
+    _complete_owner_source_records(owner_state,manifest,records,marks,closures,retain=owner_state.store.reserve)
     if _signals_only:
         if not _defer_source_checks: batch._check_sources(); _check_marks(marks)
         return {'projected': projected, 'metadata': metadata, 'refs': refs, 'closures': closures,
