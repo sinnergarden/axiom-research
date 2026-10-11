@@ -18,6 +18,8 @@ specs:
     price_basis: common_anchor_adjusted_v1
     benchmark_semantics: absolute_return
     corporate_action_semantics: factor_ratio_no_separate_cashflow
+    # Raw return definition only. dataset.yaml core_cs_batch_v1 applies the
+    # existing forward_label_cs_zscore_v1 to mature training cross-sections.
     normalization_policy: none
     maturity:
       contract_type: MaturitySpec

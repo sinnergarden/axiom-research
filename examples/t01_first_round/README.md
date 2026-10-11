@@ -5,6 +5,14 @@ Read `proposal.md`, then `time.yaml`, `features.json`, `label.yaml`, `model.yaml
 names, formulas and lookbacks come directly from the existing installed catalog.
 They are fixed for this first round.
 
+`label.yaml` defines raw H40 returns and therefore says `normalization_policy:
+none`. Training is wired through `dataset.yaml`'s existing
+`preparation_options.normalization_backend: core_cs_batch_v1`. Its sequential
+owner calls `forward_label_cs_zscore_v1` per mature feature-date cross-section
+(ddof 0, epsilon 1e-12, constant/missing outcomes excluded), and feeds the
+normalized target to fit. Signal evaluation retains raw returns. This is the
+existing owner behavior, not a new preprocessing implementation.
+
 The existing `examples/a01_one_year.py` CLI remains the research entry. Assemble
 the supplied `dataset.yaml`, `experiment.yaml` and `options.json` templates
 using a genuine frozen Data scope and source. Replace every `<...>` value with
@@ -34,12 +42,25 @@ and evaluation uses a 2026-03-09 cutoff.
 This is a calendar plan. Formal Data scope, historical member qualification,
 source expansion, Feature production and the seven-year experiment remain
 pending. It does not establish actual complete data or accepted results.
+Historical members and visibility use `best_effort_vendor_v1` and
+`declared_vendor_assumption`; actual historical receipt times are unverified.
 
 Use the existing `run_saved_stock_strategy` and
 `evaluate_saved_stock_strategy` Research adapters over the sole Engine Runtime
 account path. Supply the original frozen market/profile/native inputs, source
 and account request. Attach both accounts with the same registration context.
 No account executor or Feature mathematics is introduced by these configs.
+
+The inspected existing profile declares 0.0003 commission, minimum CNY 5,
+zero slippage bps and 10% daily-volume participation. Its fee schedule uses
+sell stamp tax 0.001 before 2023-08-28 and 0.0005 thereafter; two-sided transfer
+fees are 0.00002 before 2022-04-29 and 0.00001 thereafter. Those are saved model
+assumptions and source-backed schedule values. The inspected profile's rules
+cover the old short calendar and its verified fee window is only 2019-06-28
+through 2024-06-28. A genuine seven-year profile and verified fee window must
+be prepared by Engine; do not pass the old profile as complete seven-year
+coverage. Report the actually admitted profile identity and fee values beside
+both local account results. Gross dividends exclude personal dividend taxes.
 
 After replacing the placeholders, use the unchanged formal Research CLI:
 
