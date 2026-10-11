@@ -133,7 +133,12 @@ class SharedExecutionTests(unittest.TestCase):
                         column_source=source,destination=root/'experiment',metrics=resume_metrics)
                     for fold in reused['folds']:load_stock_ml_fold(fold['path'])
                 self.assertEqual(source.statistics,before)
-                self.assertEqual(reused['folds'],result['folds'])
+                self.assertEqual(reused,result)
+                frozen=_read(result['raw_signal_evaluation_input'].uri)
+                source_paths={item['path'] for item in frozen['admission_receipt']['source_records']}
+                prepared_root=Path(result['batch_manifest']['prepared_view']['path']).parent
+                self.assertIn(str(prepared_root/'batch.json'),source_paths)
+                self.assertNotIn(str(prepared_root/'definition.json'),source_paths)
                 self.assertEqual(pins,{p:file_digest(p) for p in pins})
                 self.assertTrue(all(n==1 for n in initial_hashes.values()))
                 self.assertEqual(resume_metrics['shared_execution']['targets']['fold_window_admissions'],2)
@@ -151,6 +156,30 @@ class SharedExecutionTests(unittest.TestCase):
                         saved_fold_file_digests=pins,unchanged_on_resume=True,
                         limitations=['Small synthetic correctness/count acceptance only; no long-history performance PASS.',
                             'OwnedStore admissions count logical hashing/decoding, not all writer byte-verification IO.']))
+
+    def test_complete_receipt_keeps_definition_and_final_manifest_mutation_guards(self):
+        from axiom_research import build_configured_stock_sequential_experiment
+        from axiom_research.stock_signal_evaluation_build import _BuildOOSWriter
+        from test_stock_folds import backend
+        original=_BuildOOSWriter._complete_owner_sources
+        for target in ('definition.json','batch.json'):
+            with self.subTest(target=target),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);data,snapshot,fixture,feature,config=real_configuration(root)
+                seen=[]
+                def corrupt(writer):
+                    original(writer)
+                    path=Path(writer.manifest['prepared_view']['path']).with_name(target)
+                    with path.open('ab') as stream:stream.write(b'\n')
+                    seen.append(path)
+                with patch('axiom_research.feature_catalog.load_feature_catalog',return_value=fixture.catalog), \
+                     patch('axiom_research.stock_training.fit_predict_stock_model',side_effect=backend), \
+                     patch.object(_BuildOOSWriter,'_complete_owner_sources',new=corrupt), \
+                     data.open_column_source(snapshot=snapshot,limits={'cache_bytes':16*1024**2,'max_working_bytes':64*1024**2}) as source:
+                    with self.assertRaisesRegex(ValueError,'source changed|source fingerprint changed|changed source'):
+                        build_configured_stock_sequential_experiment(data,configuration_path=config,feature_inputs=feature,
+                            column_source=source,destination=root/'experiment')
+                self.assertEqual(len(seen),1)
+                self.assertEqual(list((root/'experiment'/'oos').iterdir()),[])
 
     def test_maturity_equality_keeps_scalar_not_member_precedence(self):
         from axiom_research.stock_target_spec import resolve_stock_label_spec,eligible_target_reason

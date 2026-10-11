@@ -56,6 +56,30 @@ def _consume_saved_fold(target,*,batch,writer):
         return run
 
 
+def _complete_owner_source_records(state,manifest,records,marks,closures,*,retain):
+    """Use the published COMPLETE root while guarding the original plan epoch."""
+    if state.incomplete:return
+    published=None
+    try:
+        view=Path(manifest['prepared_view']['path'])
+        plan=str(view.with_name('definition.json'));final=str(view.with_name('batch.json'))
+        if plan not in records:return  # Ordinary COMPLETE/legacy admission is already stable.
+        require(records[plan]==state.store.hashes.get(plan),'checkpoint definition source pin required')
+        published=state.store.read_json({'path':final},key='content_digest',keep=False)
+        require(published==manifest,'published COMPLETE owner differs from frozen owner')
+        pin=state.store.hashes[final];mark=tuple(state.store.marks[final])
+        require(final not in records or records[final]==pin,'conflicting COMPLETE source pin')
+        retain(4096+sum(len(source['source_paths'])*256
+            for sources in closures.values() for source in sources))
+        records.pop(plan);records[final]=pin;marks[Path(final)]=mark
+        for sources in closures.values():
+            for source in sources:
+                source['source_paths']=sorted({final if path==plan else path for path in source['source_paths']})
+        # marks retains the original definition too: changing either source
+        # before the directory publication still rejects the frozen receipt.
+    finally:published=None
+
+
 class _BuildOOSWriter:
     """Only small fold controls/proof metadata survive each temporary shard."""
     def __init__(self,batch,scope,destination,name):
@@ -183,6 +207,10 @@ class _BuildOOSWriter:
             fold=spec=days=selected=local=admitted=records=marks=raw=_=None
             new_records=new_sources=new_lineages=delta=p=r=s=day=name=None
 
+    def _complete_owner_sources(self):
+        _complete_owner_source_records(self.state,self.manifest,self.records,self.marks,self.closures,
+            retain=self._retain)
+
     def finish(self):
         from .stock_signal_evaluation_matrix import _matrix_input_root,_publish_matrix_inputs,_label_projection_ref
         try:
@@ -190,6 +218,7 @@ class _BuildOOSWriter:
             self._refresh_manifest()
             require(not self.state.incomplete,'complete checkpoint batch required before OOS publication')
             require(set(self.shards)==set(self.scope['sessions']),'complete build OOS date scope required')
+            self._complete_owner_sources()
             self.state.store.reserve(self.charge*4+len(self.scope['universe'])*16384+65536)
             self.raw['sources']={r:self.raw['sources'][r] for r in sorted(self.raw['sources'])}
             self.raw['label_inputs']=[self.lineages[r] for r in sorted(self.lineages)]
