@@ -1,0 +1,17 @@
+{
+  "cash_cny": 500000,
+  "rebalance": "first_exchange_session_of_each_ISO_week",
+  "primary": {
+    "selection": "rank_buffer",
+    "top_k": 5,
+    "rank_buffer": {
+      "keep_rank": 10
+    }
+  },
+  "control": {
+    "selection": "top_k",
+    "top_k": 5
+  },
+  "same_saved_predictions": true,
+  "execution_and_fees": "reuse_frozen_original_Engine_profile_no_change"
+}
