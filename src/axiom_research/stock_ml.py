@@ -95,6 +95,51 @@ def _project_qlib(batch, values, view_ref):
     return DataBatch(frame, batch.field_meta, context)
 
 
+def _feature_projection(adjusted_wire, native_wire):
+    return {'operation':'keyed_join_native_amount','adjusted_ref':digest(adjusted_wire),
+            'native_ref':digest(native_wire), 'native_fields':['amount_cny']}
+
+
+def _join_feature_wire(adjusted_wire, native_wire, projection):
+    """One-to-one amount join over this call's strict DataBatch snapshots."""
+    amounts = {}
+    for row in native_wire['records']:
+        key = row['security_id'], row['session']
+        if key in amounts:
+            raise ValueError('duplicate native amount key')
+        if 'amount_cny' not in row:
+            raise ValueError('native amount field required')
+        amounts[key] = row['amount_cny']
+    keys = [(row['security_id'], row['session']) for row in adjusted_wire['records']]
+    if len(keys) != len(set(keys)):
+        raise ValueError('duplicate adjusted Feature key')
+    query = native_wire['context']['query']
+    expected = {(security, day) for day in query['sessions'] for security in query['symbols']}
+    if set(keys) != set(amounts) or set(keys) != expected:
+        raise ValueError('complete one-to-one Feature amount keys required')
+    if 'amount_cny' not in native_wire['field_meta']:
+        raise ValueError('native amount provenance required')
+    return {'records':[{**row,'amount_cny':amounts[row['security_id'],row['session']]}
+                       for row in adjusted_wire['records']],
+        'field_meta':{**adjusted_wire['field_meta'],'amount_cny':native_wire['field_meta']['amount_cny']},
+        'context':{**adjusted_wire['context'], 'query':{**adjusted_wire['context']['query'],
+            'fields':['open','high','low','close','amount_cny']}, 'research_projection':{
+                **projection, 'native_fields':list(projection['native_fields'])}}}
+
+
+def _adjust_feature_wire(prices, factors, session, native_wire):
+    """Internal producer path: public adjustment, then a complete wire join.
+
+    native_wire is the private projected snapshot returned with prices by
+    _NativeWindow.project in this same call. No joined DataFrame is retained.
+    """
+    from axiom_data import adjust_prices
+    adjusted = adjust_prices(prices,factors,fields=('open','high','low','close'),
+                             factor_field='factor',anchor_session=session,decision_session=session)
+    adjusted_wire = adjusted.to_json()
+    return _join_feature_wire(adjusted_wire, native_wire, _feature_projection(adjusted_wire, native_wire))
+
+
 def _adjust_feature(prices, factors, session, *, _with_wire=False):
     from axiom_data import DataBatch, adjust_prices
     adjusted = adjust_prices(prices,factors,fields=('open','high','low','close'),
@@ -102,25 +147,14 @@ def _adjust_feature(prices, factors, session, *, _with_wire=False):
     frame = adjusted.frame.merge(prices.frame[['security_id','session','amount_cny']],
                                 on=['security_id','session'],validate='one_to_one')
     adjusted_wire = adjusted.to_json(); native_wire = prices.to_json()
-    projection = {'operation':'keyed_join_native_amount','adjusted_ref':digest(adjusted_wire),
-                  'native_ref':digest(native_wire), 'native_fields':['amount_cny']}
+    projection = _feature_projection(adjusted_wire, native_wire)
     context = {**adjusted.context, 'query':{**adjusted.context['query'],
         'fields':['open','high','low','close','amount_cny']}, 'research_projection':{
         **projection}}
     batch = DataBatch(frame,{**adjusted.field_meta,'amount_cny':prices.field_meta['amount_cny']},context)
     if not _with_wire:
         return batch
-    # Public adjust_prices and the one-to-one frame join have already admitted
-    # the full grid. Reuse this call's strict JSON fields/provenance rather than
-    # serializing the same four adjusted columns after joining native amount.
-    amounts = {(r['security_id'],r['session']):r['amount_cny'] for r in native_wire['records']}
-    wire = {'records':[{**r,'amount_cny':amounts[r['security_id'],r['session']]}
-                       for r in adjusted_wire['records']],
-        'field_meta':{**adjusted_wire['field_meta'],'amount_cny':native_wire['field_meta']['amount_cny']},
-        'context':{**adjusted_wire['context'], 'query':{**adjusted_wire['context']['query'],
-            'fields':['open','high','low','close','amount_cny']}, 'research_projection':{
-                **projection,'native_fields':list(projection['native_fields'])}}}
-    return batch,wire
+    return batch,_join_feature_wire(adjusted_wire, native_wire, projection)
 
 
 def _validate_config(config):

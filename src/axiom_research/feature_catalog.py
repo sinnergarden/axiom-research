@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
-from axiom_engine.core import FeaturePlan, required_history, validate_plan
+from axiom_engine.core import FeaturePlan, required_history
 
 
 class FeatureCatalogError(ValueError):
@@ -230,7 +230,8 @@ def build_feature_plan(base_plan: FeaturePlan,
         p["outputs"].append({"node": name, "column": column})
     p["recipe_ref"] = catalog.recipe_ref(selections, normalized=normalized)
     plan = FeaturePlan.from_dict(p)
-    validate_plan(plan, execution=True)
+    # required_history performs the same execution validation on this immutable
+    # Plan before walking its dependency closure.
     history = required_history(plan)
     _require(all(history[f["id"]] + 1 == f["lookback"] for f in selected),
              "catalog lookback differs from Core recipe dependency closure")
@@ -255,4 +256,3 @@ def render_feature_catalog(catalog: FeatureCatalog | None = None) -> str:
             "group", "id", "name", "semantic_version", "formula", "dependencies",
             "lookback", "normalization", "missing_policy")) + " |")
     return "\n".join(lines) + "\n"
-

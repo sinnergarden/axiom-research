@@ -118,6 +118,9 @@ class MaturitySpec(Contract):
 
 @dataclass(frozen=True, kw_only=True)
 class LabelSpec(Contract):
+    # v1 measures the distance between endpoints. The stock v2 profile names
+    # the close endpoint offset h in open(T+1) -> close(T+h) explicitly.
+    contract_version: Literal["1", "2"] = "1"
     name: str
     key: tuple[str, ...]
     horizon_sessions: int

@@ -237,12 +237,29 @@ def _saved_signal(descriptor, scope, *, batch=None):
             feature_clocks = [_instant(v) for v in original['availability'] if v is not None]
             _require(knowledge == _instant(original['knowledge_cutoff']) and
                 available == max(feature_clocks + [_instant(model['fit_cutoff'])]), 'Signal original clock mismatch')
+    clocks = [model['fit_cutoff'], *(r['knowledge_cutoff'] for r in feature_index.values()),
+              *(r['knowledge_cutoff'] for r in indexed.values())]
+    if version == 'stock_prediction_run_v1':
+        clocks.extend(c for q in view['queries'] + [view['universe_query']]
+                      for c in q['cutoff_by_session'].values())
     return {'signal': signal, 'rows': indexed, 'members': feature_index,
-        'snapshot': snapshot, 'pit': pit, 'source_records': _source_records(root)}
+        'snapshot': snapshot, 'pit': pit, 'source_records': _source_records(root),
+        'metadata': {'signal_contract_version': version, 'signal_run_ref': signal['signal_run_ref'],
+            'prediction_sessions': sorted(set(dates)),
+            'signal_stage': signal['signal_stage'], 'score_unit': signal['score_unit'],
+            'score_semantics': signal['score_semantics'], 'model': model,
+            'feature_contract_version': feature.get('contract_version'), 'feature_ref': feature['feature_ref'],
+            'snapshot': snapshot, 'pit_policy': pit,
+            'evaluation_clock_floor': max(map(_instant, clocks)).isoformat().replace('+00:00', 'Z')}}
 
 
 def _raw_labels(descriptor, scope, snapshot, pit):
     raw = _descriptor(descriptor, 'label_ref')
+    return _validate_raw_labels(raw, scope, snapshot, pit)
+
+
+def _validate_raw_label_header(raw, scope, snapshot, pit):
+    """The original source, endpoint, Snapshot/PIT and visibility constraints."""
     _require(raw.get('contract_version') == 'stock_label_build_v1', 'evaluation requires saved Raw Labels')
     calendar = scope['calendar']; cutoff = _instant(scope['evaluation_cutoff'])
     _require(raw.get('calendar_ref') == digest({'contract_version': 'stock_label_calendar_v1', 'sessions': calendar}),
@@ -255,14 +272,20 @@ def _raw_labels(descriptor, scope, snapshot, pit):
         spec.get('label_id') == f"forward_{spec['horizon_sessions']}_session_open_close_v1" and
         spec.get('start_price') == 'open' and spec.get('end_price') == 'close',
         'Raw Label endpoint semantics required')
-    ctx = raw['source_evidence']['context']
+    return _label_source_context(raw['source_evidence']['context'], scope, snapshot, pit,
+        price_basis=spec.get('price_basis'), adjustment_anchor=spec.get('adjustment_anchor'))
+
+
+def _label_source_context(ctx, scope, snapshot, pit, *, price_basis, adjustment_anchor, compact=False):
+    """Shared saved outcome query/anchor/PIT checks without runtime imports."""
+    calendar = scope['calendar']; cutoff = _instant(scope['evaluation_cutoff'])
     _require(ctx.get('snapshot_id') == snapshot, 'Raw Label Snapshot mismatch')
     query = ctx['query']; universe = query['symbols']
     _require(set(scope['universe']) <= set(universe), 'evaluation universe outside Raw Labels')
     _query(query, snapshot=snapshot, pit=pit, universe=universe, cutoff=cutoff, purpose='label_outcomes')
     _require(set(query['sessions']) <= set(calendar), 'Raw Label query outside calendar')
     _require(ctx.get('domain') == 'market_daily' and set(query.get('fields', ())) == {'open', 'close'} and
-        query.get('price_basis') == spec.get('price_basis') == 'common_anchor_adjusted_v1',
+        query.get('price_basis') == price_basis == 'common_anchor_adjusted_v1',
         'Raw Label price basis/domain/fields mismatch')
     clocks = {_instant(c) for c in query['cutoff_by_session'].values()}
     _require(len(clocks) == 1, 'Raw Label requires one outcome query cutoff')
@@ -272,13 +295,20 @@ def _raw_labels(descriptor, scope, snapshot, pit):
         derivation.get('recipe_version') == 'common_anchor_price_v1' and
         derivation.get('formula') == 'price_t * factor_t / factor_anchor' and
         derivation.get('decision_session') == query['sessions'][-1] and
-        derivation.get('anchor_session') == spec.get('adjustment_anchor') == query.get('adjustment_anchor') and
+        derivation.get('anchor_session') == adjustment_anchor == query.get('adjustment_anchor') and
         derivation['anchor_session'] in calendar and derivation['anchor_session'] <= query['sessions'][-1],
         'Raw Label source derivation/anchor mismatch')
     for name in ('price_query', 'factor_query'):
         _query(derivation[name], snapshot=snapshot, pit=pit, universe=universe,
             cutoff=cutoff, purpose='label_outcomes')
         native = derivation[name]
+        if compact:
+            # The saved Data query excludes its domain. Price and factor
+            # domains live in context.domain and derivation.factor_domain.
+            # Preserve consistency if a query also carries a domain.
+            _require('domain' not in native or native['domain'] ==
+                ('market_daily' if name == 'price_query' else 'adjustment_factors'),
+                'compact native source domain mismatch')
         expected_sessions = set(query['sessions']) | ({derivation['anchor_session']} if name == 'factor_query' else set())
         fields_ok = ({'open', 'close'} <= set(native.get('fields', ())) if name == 'price_query'
             else derivation.get('factor_domain') == 'adjustment_factors' and
@@ -290,6 +320,13 @@ def _raw_labels(descriptor, scope, snapshot, pit):
         _require(all((native.get('policy_by_session') or {}).get(day) ==
             (query.get('policy_by_session') or {}).get(day) for day in query['sessions']),
             'Raw Label native per-session PIT policy mismatch')
+    return universe, source_cutoff
+
+
+def _validate_raw_labels(raw, scope, snapshot, pit):
+    """Admit the same original RawLabel wire, including a checked input buffer."""
+    universe, source_cutoff = _validate_raw_label_header(raw, scope, snapshot, pit)
+    calendar = scope['calendar']; query = raw['source_evidence']['context']['query']; spec = raw['label_spec']
     dates = sorted({r['feature_session'] for r in raw['rows']})
     _require(set(dates) <= set(calendar) and set(scope['sessions']) <= set(dates), 'Raw Label feature scope mismatch')
     indexed = _grid(raw['rows'], universe, dates, 'feature_session', 'Raw Label')
@@ -313,17 +350,19 @@ def _raw_labels(descriptor, scope, snapshot, pit):
     return raw, indexed
 
 
-def _inputs(signal_inputs, raw_label_input, scope, *, batch=None):
+def _admit_inputs(signal_inputs, raw_label_input, scope, *, batch=None):
     _require(isinstance(signal_inputs, dict) and bool(signal_inputs) and
         all(type(key) is str and key for key in signal_inputs), 'ordered Signal mapping required')
-    projected, closures, refs = {}, {}, {}
+    projected, closures, refs, metadata = {}, {}, {}, {}
     snapshot = pit = None
     for name, descriptors in signal_inputs.items():
+        metadata[name] = []
         descriptors = descriptors if type(descriptors) is list else [descriptors]
         _require(bool(descriptors), 'nonempty weekly Signal list required')
-        rows, members, sources, signal_refs, previous = {}, {}, [], [], None
+        rows, members, prediction_features, sources, signal_refs, previous = {}, {}, {}, [], [], None
         for descriptor in descriptors:
             item = _saved_signal(descriptor, scope, batch=batch)
+            metadata[name].append(item['metadata'])
             if snapshot is None:
                 snapshot, pit = item['snapshot'], item['pit']
             _require((snapshot, pit) == (item['snapshot'], item['pit']), 'comparison Snapshot/PIT mismatch')
@@ -332,15 +371,27 @@ def _inputs(signal_inputs, raw_label_input, scope, *, batch=None):
             previous = dates[-1]
             _require(not set(rows) & set(item['rows']), 'duplicate weekly Signal key')
             rows.update(item['rows'])
+            # Feature dates can overlap across weekly folds and carry different
+            # revisions. Keep the exact dependency of each disjoint prediction;
+            # the merged membership map below only supplies the shared mask.
+            prediction_features.update({key: item['members'][key] for key in item['rows']})
             for key, row in item['members'].items():
                 _require(key not in members or members[key]['member'] is row['member'], 'weekly historical membership conflict')
                 members[key] = row
             signal_refs.append(item['signal']['signal_run_ref'])
             sources.append({'signal_input': deepcopy(descriptor), 'model_ref': item['signal']['model_ref'],
                 'feature_ref': item['signal']['feature_ref'], 'source_records': item['source_records']})
-        projected[name] = {'rows': rows, 'members': members}
+        projected[name] = {'rows': rows, 'members': members, 'prediction_features': prediction_features}
         closures[name] = sources; refs[name] = signal_refs
     raw, labels = _raw_labels(raw_label_input, scope, snapshot, pit)
+    return {'projected': projected, 'closures': closures, 'refs': refs, 'metadata': metadata,
+            'raw': raw, 'labels': labels, 'scope': scope}
+
+
+def _select_inputs(admission, scope):
+    """The shared exact sample/coverage selection for original and frozen inputs."""
+    projected, closures, refs = (admission[k] for k in ('projected', 'closures', 'refs'))
+    raw, labels = admission['raw'], admission['labels']
     keys = [(security, day) for day in scope['sessions'] for security in scope['universe']]
     historical, native, reasons, coverage = {}, {}, {}, {}
     evaluation_cutoff = _instant(scope['evaluation_cutoff'])
@@ -384,14 +435,20 @@ def _inputs(signal_inputs, raw_label_input, scope, *, batch=None):
     def table(mask):
         pairs = [{'signal_key': signal_keys[name], 'security_id': security, 'session': day,
             'score': projected[name]['rows'][security, day]['score'], 'outcome': labels[security, day]['return']}
-            for name in signal_inputs for security, day in mask[name]]
+            for name in projected for security, day in mask[name]]
         return {'contract_version': 'signal_statistics_input_v1', 'sessions': scope['sessions'],
             'signal_keys': list(signal_keys.values()), 'pairs': sorted(pairs,
                 key=lambda p: (p['signal_key'], p['session'], p['security_id']))}
     mask = {'signals': [{'name': name, 'signal_key': signal_keys[name], 'input_signal_refs': refs[name]}
-                       for name in signal_inputs], 'label_ref': raw['label_ref'], 'scope': scope,
+                       for name in projected], 'label_ref': raw['label_ref'], 'scope': scope,
         'common_keys': [list(key) for key in common],
-        'native_keys': {name: [list(key) for key in native[name]] for name in signal_inputs}}
-    return {'scope': scope, 'raw': raw, 'refs': refs, 'closures': closures, 'signal_keys': signal_keys,
-        'mask': mask, 'common_input': table({name: common for name in signal_inputs}),
+        'native_keys': {name: [list(key) for key in native[name]] for name in projected}}
+    result={'scope': scope, 'raw': raw, 'refs': refs, 'closures': closures, 'signal_keys': signal_keys,
+        'mask': mask, 'common_input': table({name: common for name in projected}),
         'native_input': table(native), 'native_coverage': coverage, 'common_keys': common}
+    if 'signal_lineage' in admission:result['signal_lineage']=deepcopy(admission['signal_lineage'])
+    return result
+
+
+def _inputs(signal_inputs, raw_label_input, scope, *, batch=None):
+    return _select_inputs(_admit_inputs(signal_inputs, raw_label_input, scope, batch=batch), scope)

@@ -12,6 +12,17 @@ def digest(value):
         ensure_ascii=False, allow_nan=False).encode()).hexdigest()
 
 
+def digest_array_rows(rows):
+    """Hash the identical canonical JSON array with only one logical row live."""
+    encoder=json.JSONEncoder(sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
+    h=sha256(); h.update(b'['); first=True
+    for row in rows:
+        if not first: h.update(b',')
+        first=False
+        for piece in encoder.iterencode(row): h.update(piece.encode('utf-8'))
+    h.update(b']'); return 'sha256:'+h.hexdigest()
+
+
 def file_digest(path):
     h = sha256()
     with Path(path).open('rb') as f:
@@ -36,14 +47,25 @@ def write_json(path, value):
         ensure_ascii=False, allow_nan=False) + '\n', encoding='utf-8')
 
 
-def _read(path):
+def _read(path, *, _stream=None, _expected_bytes=None, _expected_digest=None):
     def unique(pairs):
         out = {}
         for k, v in pairs:
             if k in out: raise ValueError('duplicate JSON key: ' + k)
             out[k] = v
         return out
-    return json.loads(Path(path).read_text(), object_pairs_hook=unique,
+    if _stream is None:
+        text=Path(path).read_text()
+    else:
+        if type(_expected_bytes) is not int or _expected_bytes<0:
+            raise ValueError('fixed JSON stream byte length required')
+        payload=_stream.read(_expected_bytes+1)
+        if type(payload) is not bytes or len(payload)!=_expected_bytes:
+            raise ValueError('saved JSON stream byte length changed')
+        if _expected_digest!='sha256:'+sha256(payload).hexdigest():
+            raise ValueError('saved JSON stream bytes changed')
+        text=payload.decode('utf-8')
+    return json.loads(text, object_pairs_hook=unique,
                       parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)))
 
 

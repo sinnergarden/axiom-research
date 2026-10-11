@@ -13,8 +13,10 @@ from .stock_fold_artifacts import StockMLFold, load_stock_ml_fold
 from .stock_feature_inputs import StockFeatureInputs, load_stock_feature_inputs
 from .stock_signal_evaluation import (StockSignalEvaluation, evaluate_stock_signal,
     evaluate_stock_signals, save_stock_signal_evaluation, load_stock_signal_evaluation)
+from .stock_signal_evaluation_projection import (save_stock_signal_evaluation_inputs,
+    evaluate_stock_signal_inputs, evaluate_stock_signal_input_periods, audit_stock_signal_evaluation)
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 
 # Readonly metadata consumers do not import an optional Data/Core build runtime.
 # Existing runtime names retain their public import paths and load when requested.
@@ -31,9 +33,30 @@ _RUNTIME_EXPORTS = {
     "build_stock_ml_fold_from_saved_inputs": ".stock_folds",
     "StockMLBatchInputs": ".stock_batch", "load_stock_ml_batch_inputs": ".stock_batch",
     "build_stock_feature_inputs": ".stock_feature_inputs",
+    "prepare_stock_ml_batch_inputs": ".stock_matrix_prepare",
+    "load_stock_feature_view": ".stock_compact_store",
+    "audit_stock_ml_batch_inputs": ".stock_compact_audit",
     "normalize_forward_labels": ".stock_label_normalization",
     "load_feature_catalog": ".feature_catalog", "build_feature_plan": ".feature_catalog",
     "build_forward_labels": ".labels", "mature_training_rows": ".labels",
+    "load_stock_experiment_specs": ".stock_experiment_config",
+    "load_stock_sequential_configuration": ".stock_experiment_config",
+    "compile_stock_weekly_folds": ".stock_weekly_config",
+    "resolve_stock_training_spec": ".stock_training",
+    "open_stock_ml_batch_preparation": ".stock_sequential_api",
+    "open_stock_signal_evaluation_freeze": ".stock_sequential_api",
+    "build_stock_derived_signal": ".stock_derived_signal",
+    "load_stock_derived_signal": ".stock_derived_signal",
+    "resolve_stock_label_spec": ".stock_target_spec",
+    "build_stock_evaluation_label_inputs": ".stock_evaluation_labels",
+    "load_stock_evaluation_label_inputs": ".stock_evaluation_labels",
+    "build_stock_sequential_experiment": ".stock_experiment_entry",
+    "build_configured_stock_sequential_experiment": ".stock_experiment_entry",
+    "save_stock_derived_signal_evaluation_inputs": ".stock_signal_evaluation_derived",
+    "evaluate_stock_sequential_signals": ".stock_experiment_entry",
+    "stock_request_with_saved_predictions": ".stock_experiment_entry",
+    "run_saved_stock_strategy": ".stock_experiment_entry",
+    "evaluate_saved_stock_strategy": ".stock_experiment_entry",
 }
 __all__ = [name for name in globals() if not name.startswith("_")] + list(_RUNTIME_EXPORTS)
 

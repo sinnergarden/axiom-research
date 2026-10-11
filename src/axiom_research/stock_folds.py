@@ -39,21 +39,34 @@ def prediction_rows(features, spec, model, scores):
     return rows
 
 
-def build_stock_ml_fold_from_saved_inputs(input_manifest, *, fold_spec, destination, metrics=None, batch=None):
+def build_stock_ml_fold_from_saved_inputs(input_manifest, *, fold_spec, destination, metrics=None, batch=None,
+                                        training_options=None,model_feature_selection=None,training_spec=None):
     """Fit/predict once; an exact, fully validated definition alone permits HIT.
 
     Parent paths are explicit and remain required. An initialized batch reuses
     verified common parents and a shared Feature matrix within this process.
     A separate public loader always verifies the complete saved closure.
+    Saved matrix inputs also accept training_options containing only
+    learning_rate and/or num_boost_round. All other existing profile values
+    remain fixed; these options change the model identity, not prepared inputs.
+    model_feature_selection, when supplied, must match the saved prepared
+    cohort. Prepare a different subset using the original Raw targets first.
     """
     begin = time.perf_counter()
     inputs, spec = deepcopy(input_manifest), deepcopy(fold_spec)
+    if inputs.get('contract_version') in ('stock_ml_saved_inputs_v2','stock_ml_saved_inputs_v3','stock_ml_saved_inputs_v4','stock_ml_saved_inputs_v5'):
+        from .stock_matrix_folds import build_matrix_fold
+        return build_matrix_fold(inputs,spec=spec,destination=destination,metrics=metrics,batch=batch,
+                                 training_options=training_options,model_feature_selection=model_feature_selection,training_spec=training_spec)
+    require(model_feature_selection is None,'model_feature_selection requires compact saved inputs')
+    require(training_spec is None,'typed TrainingSpec requires v5 inputs')
+    require(training_options is None, 'training_options requires saved matrix inputs')
     if batch is not None:
         from .stock_batch import _data
         _data(batch)  # Reject a caller-created object or a skip-validation flag.
     projection = project_saved_fold(inputs, spec) if batch is None else batch._project(inputs, spec)
     features, labels, training, excluded, raw_refs, evaluation = projection
-    compact = spec['contract_version'] == 'stock_ml_fold_spec_v2'
+    compact = spec['contract_version'] in ('stock_ml_fold_spec_v2', 'stock_ml_fold_spec_v3')
     from .feature_catalog import load_feature_catalog
     catalog = load_feature_catalog()
     require(inputs['catalog_ref'] == catalog.identity and inputs['ordered_features'] ==
