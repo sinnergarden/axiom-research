@@ -113,6 +113,24 @@ def load_stock_fold_projection(path, *, research_root=None, batch_item=None, bin
     _require(model["booster_digest"] == manifest["files"]["booster.txt"] and
              model["dataset_ref"] == fold["dataset_ref"] and model["feature_ref"] == fold["feature_ref"],
              "model/output linkage mismatch")
+    if "training_spec" in definition:
+        from .stock_training import resolve_stock_training_spec
+        parameters, rounds, training = resolve_stock_training_spec(definition["training_spec"])
+        _require(definition["training_spec_ref"] == training["training_spec_ref"] and
+                 definition["parameters"] == parameters and definition["num_boost_round"] == rounds,
+                 "saved TrainingSpec/parameters mismatch")
+    _require(model["parameters"] == definition["parameters"] and
+             model["num_boost_round"] == definition["num_boost_round"],
+             "saved model/training definition mismatch")
+    if "target_spec" in definition:
+        from .stock_target_spec import resolve_stock_label_spec
+        _require(definition["target_spec"] == resolve_stock_label_spec(
+            definition["target_spec"]["label_spec"]), "saved LabelSpec definition mismatch")
+    selection = definition.get("model_feature_selection")
+    if selection is not None:
+        _require(model["feature_selection"] == selection["selection"] and
+                 model["ordered_features"] == selection["ordered_features"],
+                 "saved model/Feature selection mismatch")
     common = {"universe": features["universe"], "catalog_ref": features["catalog_ref"]}
     if "target_spec" in definition:
         common["target_spec"] = definition["target_spec"]
@@ -207,6 +225,86 @@ def load_stock_prediction_projection(path, *, research_root=None):
     return StockSavedProjection(value, value["signal_run_ref"], digest_stream(value))
 
 
+def _verify_configuration_outputs(configuration, sequential, batch, folds, root):
+    """Compare actual saved definitions, not just a result's configuration claim."""
+    from .stock_target_spec import resolve_stock_label_spec
+    from .stock_training import resolve_stock_training_spec
+    from .stock_compact_store import _model_feature_binding
+    from .stock_signal_evaluation_inputs import _scope
+    cfg = configuration["configuration"]; dataset = cfg["dataset"]
+    definition = batch["definition"]
+    options = deepcopy(dataset["preparation_options"])
+    # The existing column preparation owner saves this declared default even
+    # when it was omitted from the YAML transport.
+    options.setdefault("control_layout", "fold_controls_v2")
+    _require(sequential["configuration_ref"] == cfg["configuration_ref"] and
+             sequential["dataset_configuration_ref"] == cfg["dataset_ref"] and
+             sequential["spec_refs"] == cfg["spec_refs"], "result configuration mismatch")
+    _require(definition["fold_specs"] == dataset["fold_specs"] and
+             [f["fold_spec"] for f in batch["folds"]] == dataset["fold_specs"] and
+             definition["preparation_options"] == options,
+             "saved batch differs from frozen Dataset")
+    target = resolve_stock_label_spec(cfg["specs"]["label"])
+    parameters, rounds, training = resolve_stock_training_spec(cfg["specs"]["model"])
+    _require(definition["target_spec"] == target and
+             target["label_definition_ref"] == cfg["spec_refs"]["label"] and
+             training["training_spec_ref"] == cfg["spec_refs"]["model"],
+             "saved batch differs from frozen Label/Training definitions")
+    view = definition["feature_view"]
+    selection = _model_feature_binding({"definition": view}, dataset["model_feature_selection"])
+    _require(definition.get("model_feature_selection") == selection and
+             all(view["spec"][k] == dataset["scope"][k] for k in ("calendar", "universe")),
+             "saved Feature scope/selection differs from frozen Dataset")
+    input_ref = sequential["signal_evaluation_input"]
+    input_path = _local(input_ref["uri"], root)
+    inputs = _checked(input_path, input_ref["content_digest"])
+    _require(inputs["input_id"] == input_ref["artifact_id"] and
+             inputs["scope"] == _scope(dataset["scope"]), "saved Signal input scope mismatch")
+    for saved, item, spec in zip(sequential["folds"], batch["folds"], dataset["fold_specs"]):
+        _require(saved["fold_ref"] in folds, "saved fold artifact missing")
+        fold = folds[saved["fold_ref"]]; actual = fold["definition"]
+        _require(actual["fold_spec"] == spec and actual["input_manifest"] == item["input_manifest"] and
+                 actual["target_spec"] == target and actual.get("model_feature_selection") == selection and
+                 actual["training_spec"] == training["training_spec"] and
+                 actual["training_spec_ref"] == training["training_spec_ref"] and
+                 actual["parameters"] == parameters and actual["num_boost_round"] == rounds,
+                 "saved fold differs from frozen Dataset/Label/Training/Feature selection")
+
+
+def _verify_manifest_lineage(manifest, artifacts, verified, sequential, batch, folds):
+    """Keep each navigation edge on its actual owner identity and original frame."""
+    frames = sequential["prediction_input"]
+    def check(keys, fold):
+        found = set()
+        for key in keys:
+            kind = artifacts[key]["artifact_type"]; value = verified[key]
+            if kind == "StockMLFoldProjection":
+                _require(value["fold_ref"] == fold["fold_ref"], "fold lineage identity mismatch")
+            elif kind == "StockMLBatchManifest":
+                _require(value == batch, "fold lineage batch mismatch")
+            elif kind == "StockPredictionBindings":
+                _require(value == frames, "fold lineage original frames mismatch")
+            elif kind == "StockSequentialResult":
+                _require(value == sequential, "fold lineage sequential result mismatch")
+            else:
+                raise ValueError("unsupported fold lineage artifact type")
+            found.add(kind)
+        _require("StockMLFoldProjection" in found, "fold lineage artifact missing")
+    for declaration in manifest["folds"]:
+        check(declaration["artifact_keys"], folds[declaration["fold_ref"]])
+    by_signal = {folds[f["fold_ref"]]["signal_run_ref"]: folds[f["fold_ref"]]
+                 for f in sequential["folds"]}
+    for signal in manifest["signals"]:
+        _require(signal["signal_run_ref"] in by_signal, "Signal original fold missing")
+        fold = by_signal[signal["signal_run_ref"]]
+        check(signal["lineage_artifact_keys"], fold)
+        key = signal["prediction_artifact_key"]
+        _require(key is not None and artifacts[key]["artifact_type"] == "StockPredictionRun" and
+                 all(verified[key][k] == fold[k] for k in ("signal_run_ref", "model_ref", "feature_ref")) and
+                 verified[key]["fold_spec_ref"] == fold["definition"]["fold_spec_ref"],
+                 "Signal prediction/fold lineage mismatch")
+
+
 def verify_result_artifacts(manifest, artifacts, paths, roots):
     """Fixed owner loaders; no loader names or code are read from manifests."""
     verified = {}
@@ -253,12 +351,19 @@ def verify_result_artifacts(manifest, artifacts, paths, roots):
     _require(all(configuration[k] == manifest[k] for k in ("result_id", "question_id", "version_ref")),
              "result/configuration identity mismatch")
     sequential = [v for k, v in verified.items() if artifacts[k]["artifact_type"] == "StockSequentialResult"]
+    folds = {v["fold_ref"]: v for k, v in verified.items()
+             if artifacts[k]["artifact_type"] == "StockMLFoldProjection"}
+    _require(len(sequential) <= 1 and (sequential or not (manifest["folds"] or manifest["signals"])),
+             "one saved sequential result required for fold/Signal declarations")
     for value in sequential:
-        _require(value["configuration_ref"] == configuration["configuration"]["configuration_ref"],
-                 "result configuration mismatch")
+        batches = [v for k, v in verified.items() if artifacts[k]["artifact_type"] == "StockMLBatchManifest" and
+                   v["batch_ref"] == value["batch_ref"] and v["content_digest"] == value["batch_content_digest"]]
+        _require(bool(batches), "original sequential batch artifact missing")
+        _verify_configuration_outputs(configuration, value, batches[0], folds, roots["research"])
         _require({f["fold_ref"] for f in value["folds"]} == {f["fold_ref"] for f in manifest["folds"]} and
                  {f["signal_run_ref"] for f in value["folds"]} ==
                  {s["signal_run_ref"] for s in manifest["signals"]}, "result fold/Signal declaration mismatch")
+        _verify_manifest_lineage(manifest, artifacts, verified, value, batches[0], folds)
     if manifest["status"] == "COMPLETE":
         _require(len(sequential) == 1 and
                  len(manifest["folds"]) == len(configuration["configuration"]["dataset"]["fold_specs"]),
