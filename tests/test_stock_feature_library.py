@@ -72,6 +72,35 @@ def tiles(view):
 
 
 class StockFeatureLibraryTests(unittest.TestCase):
+    def test_training_projection_rejects_library_change_before_publication(self):
+        from unittest.mock import patch
+        from axiom_research import stock_feature_library_adapter as adapter
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); original=saved_source(root/'source')
+            selection=[{'id':'ALP001','semantic_version':'1.0.0'}]
+            library=FeatureLibrary(root/'features',maximum_working_bytes=8*1024**2)
+            with SavedColumnFeatureSource(original,maximum_working_bytes=8*1024**2) as source:
+                descriptor,_=CatalogFeatureLibrary(library,source,load_a01_feature_catalog()).ensure(
+                    selection=selection,output_sessions=source.source.manifest['spec']['feature_sessions'],normalized=True)
+                with library.open_feature_view(descriptor) as view:
+                    day=view.describe()['sessions'][0]
+                    view.project([('A',day)])
+                    path=Path(view._partition(day,'ALP001')['buffers']['values']['path'])
+                    write=adapter.write_buffer; changed=False
+                    def mutate_during_write(*args,**kwargs):
+                        nonlocal changed
+                        result=write(*args,**kwargs)
+                        if not changed:
+                            changed=True; path.write_bytes(path.read_bytes())
+                        return result
+                    with patch.object(adapter,'write_buffer',side_effect=mutate_during_write), \
+                         self.assertRaisesRegex(ValueError,'saved matrix source changed'):
+                        adapter.build_feature_library_training_view(view,source,selection=selection,
+                            destination=root/'training',maximum_working_bytes=8*1024**2)
+                    self.assertTrue(view._store._invalid)
+                    self.assertFalse(any('training_adapter_ref' in p.read_text()
+                                         for p in (root/'training').rglob('*.json')))
+
     def test_second_experiment_adds_other_source_column_and_rejects_wrong_training_source(self):
         import json
         from axiom_research.stock_feature_library_adapter import (
