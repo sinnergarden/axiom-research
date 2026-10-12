@@ -296,6 +296,23 @@ def publish_stock_result(request_path, *, index_path, roots, experiment_result=N
                         input_run_ref=evaluation["input_run_ref"]))
             manifest["accounts"] = [a for a in manifest["accounts"] if
                 (a["strategy_ref"], a["signal_run_ref"]) != (strategy_ref, wire["signal_ref"])] + [account]
+    _stock_result_status(manifest, frozen, failure=failure)
+    manifest["artifacts"].sort(key=lambda a: a["artifact_key"])
+    manifest["accounts"].sort(key=lambda a: (a["strategy_ref"], a["signal_run_ref"]))
+    for signal in manifest["signals"]:
+        signal["evaluation_artifact_keys"].sort()
+    for account in manifest["accounts"]:
+        account["evaluation_refs"].sort(key=lambda e: e["evaluation_ref"])
+    # Repeating an unchanged save keeps both the head and immutable revision.
+    if previous is not None:
+        semantic = lambda m: {k:v for k,v in m.items() if k not in ("revision","created_at","content_digest")}
+        if semantic(previous) == semantic(manifest):
+            return store.publish_result(previous, roots=roots)
+    return store.publish_result(_seal(manifest), roots=roots)
+
+
+def _stock_result_status(manifest, frozen, *, failure=None):
+    """Project declared stage status after the selected owner admission."""
     complete = bool(manifest["signals"]) and ("training" not in frozen["required_stages"] or
         bool(manifest["folds"])) and all(
         row["status"] == "COMPLETE" for table in ("folds", "signals", "accounts") for row in manifest[table])
@@ -314,18 +331,6 @@ def publish_stock_result(request_path, *, index_path, roots, experiment_result=N
         manifest.update(status="BLOCKED", reason="Saved Engine account is BLOCKED: " + blocked["reason"])
     if failure is not None:
         manifest.update(status="FAILED", reason=str(failure))
-    manifest["artifacts"].sort(key=lambda a: a["artifact_key"])
-    manifest["accounts"].sort(key=lambda a: (a["strategy_ref"], a["signal_run_ref"]))
-    for signal in manifest["signals"]:
-        signal["evaluation_artifact_keys"].sort()
-    for account in manifest["accounts"]:
-        account["evaluation_refs"].sort(key=lambda e: e["evaluation_ref"])
-    # Repeating an unchanged save keeps both the head and immutable revision.
-    if previous is not None:
-        semantic = lambda m: {k:v for k,v in m.items() if k not in ("revision","created_at","content_digest")}
-        if semantic(previous) == semantic(manifest):
-            return store.publish_result(previous, roots=roots)
-    return store.publish_result(_seal(manifest), roots=roots)
 
 
 def attach_stock_account(request_path, *, index_path, roots, run_path, evaluation_paths=()):
@@ -346,3 +351,17 @@ def attach_stock_account(request_path, *, index_path, roots, run_path, evaluatio
     return publish_stock_result(request_path, index_path=index_path, roots=roots,
         engine_handoff={"accounts": [{"run_manifest": str(run_path), "run_ref": run_ref,
                                      "evaluations": reports}]})
+
+
+def attach_stock_account_from_basis(basis, *, index_path, roots, run_path, evaluation_paths):
+    """Append one saved account to a fixed registered result without historical leaf audit.
+
+    basis pins result_id, revision, manifest_ref and content_digest. Training,
+    signals and their evaluations are inherited exactly from that registered
+    revision. Only its small configuration/bindings and the new account/evaluation
+    bytes are checked now; publish_stock_result retains full owner verification.
+    A changed head is refused, except for an exact immediate retry of this save.
+    """
+    from .result_discovery import _publish_registered_account
+    return _publish_registered_account(ExperimentStore(index_path), deepcopy(basis), roots,
+        run_path=run_path, evaluation_paths=evaluation_paths)

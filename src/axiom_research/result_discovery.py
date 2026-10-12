@@ -190,6 +190,11 @@ def _publish(store, manifest, roots, session):
              for key, ref in artifacts.items()}
     marks = {path: mark(path) for path in paths.values()}
     verify_result_artifacts(manifest, artifacts, paths, roots)
+    return _commit_result(store, manifest, roots, session, artifacts, paths, marks)
+
+
+def _commit_result(store, manifest, roots, session, artifacts, paths, marks, *, compare=None):
+    """The common locked, atomic commit after the selected admission contract."""
     relative = "results/" + manifest["result_id"][7:] + "/" + (
         str(manifest["revision"]) + "-" + manifest["content_digest"][7:] + ".json")
     path = resolve("research", relative, roots, exists=False)
@@ -197,6 +202,8 @@ def _publish(store, manifest, roots, session):
     head.update(updated_at=manifest["created_at"], manifest_ref={
         "root_id": "research", "relative_path": relative, "content_digest": manifest["content_digest"]})
     def operation(state):
+        if compare is not None:
+            compare(state)
         _require(manifest["question_id"] in state["questions"] and
                  manifest["version_ref"] in state["versions"] and
                  state["versions"][manifest["version_ref"]]["question_id"] == manifest["question_id"],
@@ -241,6 +248,82 @@ def _publish(store, manifest, roots, session):
         state.setdefault("result_heads", {})[manifest["result_id"]] = head
         return head, True
     return store._mutate(operation)
+
+
+def _registered_account_basis(reader, basis, roots):
+    """Read a pinned registered revision; only an immediate exact retry may be ahead."""
+    from .experiments import _read
+    from .stock_result_projection import _metadata, _local
+    _fields(basis, ("result_id", "revision", "manifest_ref", "content_digest"), "account basis")
+    _hash(basis["result_id"], "basis result_id")
+    _integer(basis["revision"], "basis revision")
+    _hash(basis["content_digest"], "basis content_digest")
+    locator(basis["manifest_ref"])
+    _require(basis["manifest_ref"]["root_id"] == "research" and
+             basis["manifest_ref"]["content_digest"] == basis["content_digest"],
+             "basis manifest identity mismatch")
+    path = resolve("research", basis["manifest_ref"]["relative_path"], roots)
+    manifest = _metadata(_local(path, roots["research"]))
+    validate_manifest(manifest)
+    _require(all(manifest[k] == basis[k] for k in ("result_id", "revision", "content_digest")),
+             "basis manifest identity mismatch")
+    fixed_head = {k: manifest[k] for k in
+                  ("result_id", "question_id", "version_ref", "revision", "status", "reason")}
+    fixed_head.update(updated_at=manifest["created_at"], manifest_ref=deepcopy(basis["manifest_ref"]))
+    current = _read(reader.path).get("result_heads", {}).get(basis["result_id"])
+    _require(current == fixed_head or (current is not None and
+             current["revision"] == basis["revision"] + 1 and
+             (current["question_id"], current["version_ref"]) ==
+             (fixed_head["question_id"], fixed_head["version_ref"])), "registered basis conflict")
+    return manifest, fixed_head, current
+
+
+def _publish_registered_account(store, basis, roots, *, run_path, evaluation_paths):
+    """Inherit registered Research identities and admit one new saved Engine account."""
+    from .experiments import ExperimentReader, _now
+    from .stock_result_projection import _projection_session, _project_registered_account
+    with _projection_session(check_on_exit=False) as session:
+        previous, fixed_head, expected_head = _registered_account_basis(
+            ExperimentReader(store.path), basis, roots)
+        account, additions, configuration = _project_registered_account(
+            previous, roots, run_path=run_path, evaluation_paths=evaluation_paths)
+        _require(not any((a["strategy_ref"], a["signal_run_ref"]) ==
+                         (account["strategy_ref"], account["signal_run_ref"])
+                         for a in previous["accounts"]), "basis already contains this strategy account")
+        manifest = deepcopy(previous)
+        inherited_keys = {a["artifact_key"] for a in previous["artifacts"]}
+        _require(not inherited_keys.intersection(a["artifact_key"] for a in additions),
+                 "new account artifact collides with basis")
+        manifest["artifacts"].extend(additions)
+        manifest["artifacts"].sort(key=lambda a: a["artifact_key"])
+        manifest["accounts"].append(account)
+        manifest["accounts"].sort(key=lambda a: (a["strategy_ref"], a["signal_run_ref"]))
+        from .result_registration import _stock_result_status
+        _stock_result_status(manifest, configuration)
+        manifest.update(revision=previous["revision"] + 1, created_at=_now())
+        manifest.pop("content_digest")
+        from .stock_artifacts import digest
+        manifest["content_digest"] = digest(manifest)
+        if expected_head != fixed_head:
+            current = ExperimentReader(store.path).result(basis["result_id"], roots=roots)
+            semantic = lambda m: {k: v for k, v in m.items()
+                                  if k not in ("created_at", "content_digest")}
+            _require(semantic(current) == semantic(manifest), "registered basis conflict")
+            manifest = current
+        validate_manifest(manifest)
+        # Only new owner outputs and the small basis/binding documents were read.
+        # Their nested leaves are retained by the session until the locked commit.
+        new_artifacts = {a["artifact_key"]: a for a in additions}
+        paths = {k: resolve(a["root_id"], a["relative_path"], roots) for k, a in new_artifacts.items()}
+        marks = {p: mark(p) for p in paths.values()}
+        def compare(state):
+            _require(state.get("result_heads", {}).get(basis["result_id"]) == expected_head,
+                     "registered basis/head conflict")
+            # Re-read the fixed small manifest inside the lock as well as checking
+            # the observed locators/metadata of every newly validated owner leaf.
+            pinned = read_json(resolve("research", basis["manifest_ref"]["relative_path"], roots))
+            _require(pinned == previous, "registered basis changed during publication")
+        return _commit_result(store, manifest, roots, session, new_artifacts, paths, marks, compare=compare)
 
 
 def result(reader, result_id, roots):
