@@ -213,7 +213,7 @@ class ResultDiscoveryTests(unittest.TestCase):
         from functools import partial
         saved=partial(self.owner_projection,outputs)
         for loader in ('load_stock_sequential_result','load_stock_ml_batch_manifest',
-                       'load_stock_prediction_bindings','load_stock_fold_projection','load_stock_prediction_projection'):
+                       'load_stock_prediction_bindings','load_stock_fold_projection','_load_stock_prediction_registration_projection'):
             stack.enter_context(patch('axiom_research.stock_result_projection.'+loader,side_effect=saved))
         for loader in ('load_stock_sequential_result','load_stock_prediction_bindings','load_stock_fold_projection'):
             stack.enter_context(patch('axiom_research.result_registration.'+loader,side_effect=saved))
@@ -328,7 +328,7 @@ class ResultDiscoveryTests(unittest.TestCase):
         before = self.index.read_bytes(),self.index.stat().st_mtime_ns
         with ExitStack() as stack:
             for loader in ('load_stock_sequential_result','load_stock_ml_batch_manifest',
-                           'load_stock_prediction_bindings','load_stock_fold_projection','load_stock_prediction_projection'):
+                           'load_stock_prediction_bindings','load_stock_fold_projection','_load_stock_prediction_registration_projection'):
                 stack.enter_context(patch('axiom_research.stock_result_projection.'+loader,side_effect=saved))
             with self.assertRaisesRegex(ExperimentRecordError,'frozen Dataset'):
                 self.store.publish_result(manifest,roots=self.roots)
@@ -343,7 +343,7 @@ class ResultDiscoveryTests(unittest.TestCase):
             return StockSavedProjection(wire,wire[identity],content)
         with ExitStack() as stack:
             for loader in ('load_stock_sequential_result','load_stock_ml_batch_manifest',
-                           'load_stock_prediction_bindings','load_stock_fold_projection','load_stock_prediction_projection'):
+                           'load_stock_prediction_bindings','load_stock_fold_projection','_load_stock_prediction_registration_projection'):
                 stack.enter_context(patch('axiom_research.stock_result_projection.'+loader,side_effect=saved))
             before = self.index.read_bytes(),self.index.stat().st_mtime_ns
             for table,field in [('folds','artifact_keys'),('signals','lineage_artifact_keys')]:

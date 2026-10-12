@@ -175,6 +175,14 @@ def mark(path):
 
 def publish(store, manifest, roots):
     """Owner validation precedes the original index lock and atomic replacement."""
+    from .stock_result_projection import _projection_session
+    # The final check belongs inside the index transaction. A change after a
+    # successful commit must not turn that committed publication into failure.
+    with _projection_session(check_on_exit=False) as session:
+        return _publish(store, manifest, roots, session)
+
+
+def _publish(store, manifest, roots, session):
     manifest = deepcopy(manifest)
     artifacts = validate_manifest(manifest)
     from .stock_result_projection import verify_result_artifacts
@@ -193,6 +201,12 @@ def publish(store, manifest, roots):
                  manifest["version_ref"] in state["versions"] and
                  state["versions"][manifest["version_ref"]]["question_id"] == manifest["question_id"],
                  "result must belong to an existing question/version")
+        # Include every nested owner leaf read while assembling this publish,
+        # not merely the small typed navigation documents in the manifest.
+        session.check()
+        for key, ref in artifacts.items():
+            _require(resolve(ref["root_id"], ref["relative_path"], roots) == paths[key],
+                     "artifact locator changed during publication")
         for source, expected in marks.items():
             _require(mark(source) == expected, "artifact changed during publication")
         heads = state.get("result_heads", {})
