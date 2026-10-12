@@ -504,33 +504,6 @@ class ResultDiscoveryTests(unittest.TestCase):
                     registration=context)
         self.assertEqual(self.reader.index()["result_heads"][0]["status"],"FAILED")
 
-    def test_existing_derived_builder_returns_outputs_with_explicit_discovery_limitation(self):
-        from axiom_research import ArtifactRef
-        from axiom_research.stock_experiment_entry import build_configured_stock_sequential_experiment
-        cfg=configuration()
-        cfg['dataset'].update(preparation_options={},scope={},model_feature_selection=None,signal_contexts=None)
-        cfg['dataset_ref']=digest(cfg['dataset'])
-        cfg['configuration_ref']=digest(dict(contract_version='stock_sequential_effective_configuration_v1',
-            specification_ref=cfg['specification']['configuration_ref'],dataset_ref=cfg['dataset_ref']))
-        cfg['configuration_files']=[str(self.root/'config.yaml')]
-        context={**self.options};context.pop('required_stages');context['request_path']=self.root/'derived-request.json'
-        reference=ArtifactRef(artifact_type='StockSignalEvaluationInputs',artifact_id=digest('input'),
-            artifact_contract_version='stock_signal_evaluation_inputs_v4',content_digest=digest('input'),
-            uri=str(self.root/'saved-input.json'))
-        output=dict(batch_manifest={'saved':'owner'},derived_signals=[{'signal_run_ref':digest('derived')}],
-            prediction_bindings=[],raw_signal_evaluation_input=reference,signal_evaluation_input=reference)
-        with patch('axiom_research.stock_experiment_config.load_stock_sequential_configuration',return_value=cfg), \
-             patch('axiom_research.stock_experiment_entry._build_stock_sequential_experiment',return_value=output), \
-             patch('axiom_research.stock_result_projection.load_stock_sequential_result',
-                   side_effect=AssertionError('Derived passed to raw-only discovery')):
-            result=build_configured_stock_sequential_experiment(None,configuration_path=self.root/'config.yaml',
-                feature_inputs=None,column_source=None,destination=self.root/'derived'/'training',registration=context)
-        self.assertIs(result,output)
-        self.assertEqual(len(list((self.root/'derived'/'saved-sequential').glob('*/experiment-result.json'))),1)
-        head=self.reader.index()['result_heads'][0]
-        self.assertEqual(head['status'],'BLOCKED')
-        self.assertIn('Derived',head['reason'])
-
     def test_signal_evaluation_refuses_nested_external_and_symlink_inputs(self):
         from axiom_research import ArtifactRef,to_dict,load_stock_signal_evaluation
         from axiom_research.stock_artifacts import write_json,file_digest

@@ -55,15 +55,20 @@ def load_stock_ml_batch_manifest(path):
     return StockSavedProjection(value, value["batch_ref"], value["content_digest"])
 
 
-def load_stock_prediction_bindings(path):
+def load_stock_prediction_bindings(path, *, research_root=None):
     """Verify original frame descriptors and the existing Engine logical input identity."""
-    value = read_json(path)
+    value = read_json(_local(path, research_root) if research_root is not None else path)
     _require(type(value) is list and bool(value), "original prediction bindings required")
     from axiom_engine.runtime.stock_stream_contracts import validate_raw_binding, logical_ref
     seen = set()
     for frame in value:
-        _require(frame.get("kind") == "raw", "this projection admits original raw folds")
-        validate_raw_binding(frame, modern=True)
+        if frame.get("kind") == "derived":
+            from .stock_derived_signal import load_stock_derived_signal
+            saved = load_stock_derived_signal(frame["signal_artifact"]["manifest_uri"],
+                                             research_root=research_root)
+            _require(saved.engine_input_binding() == frame, "original Derived binding mismatch")
+        else:
+            validate_raw_binding(frame, modern=True)
         _require(frame["signal_run_ref"] not in seen, "duplicate prediction frame")
         seen.add(frame["signal_run_ref"])
     logical = {"contract_version": "stock_prediction_input_refs_v2", "frames": value}
@@ -163,13 +168,20 @@ def load_stock_sequential_result(path, *, research_root=None):
     _local(path, root)
     value = read_json(path)
     batch = load_stock_ml_batch_manifest(_local(path.parent / "batch.json", root))
-    bindings = load_stock_prediction_bindings(_local(path.parent / "prediction-bindings.json", root))
+    bindings = load_stock_prediction_bindings(_local(path.parent / "prediction-bindings.json", root), research_root=root)
     _require(value["batch_manifest"] == batch.wire and
              value["prediction_bindings"] == bindings.wire["frames"] and
              len(value["folds"]) == len(batch.wire["folds"]) == len(bindings.wire["frames"]),
              "sequential result/batch/frame mismatch")
-    _require(not value["derived_signals"], "Derived sequential projection is not admitted by this profile")
+    declared = {i["signal_run_ref"] for i in value["derived_signals"]}
+    _require(len(declared) == len(value["derived_signals"]) and declared ==
+             {f["signal_run_ref"] for f in bindings.wire["frames"] if f.get("kind") == "derived"},
+             "sequential Derived declarations differ from original bindings")
     for saved, item, binding in zip(value["folds"], batch.wire["folds"], bindings.wire["frames"]):
+        if binding.get("kind") == "derived":
+            parents = [p for p in binding["parent_inputs"].values() if p["fold_ref"] == saved["fold_ref"]]
+            _require(len(parents) == 1, "sequential Derived original fold missing")
+            binding = parents[0]
         fold = load_stock_fold_projection(_local(saved["path"], root), research_root=root,
                                           batch_item=item, binding=binding)
         _require(saved["fold_ref"] == fold.identity and saved["signal_run_ref"] ==
@@ -184,6 +196,13 @@ def load_stock_sequential_result(path, *, research_root=None):
         "prediction_input": bindings.wire, "signal_evaluation_input": value["signal_evaluation_input"],
         "limitations": ["Saved output integrity and linkage; training/native-price ancestors not expanded.",
                         "No Data, feature calculation, fit, predict, evaluation or account execution."]}
+    if value["derived_signals"]:
+        from .stock_derived_signal import load_stock_derived_signal
+        for item in value["derived_signals"]:
+            obj = load_stock_derived_signal(item["path"], research_root=root)
+            _require(obj.identity == item["signal_run_ref"] and obj.engine_input_binding() in
+                     bindings.wire["frames"], "sequential Derived identity/binding mismatch")
+        projection["derived_signals"] = value["derived_signals"]
     return StockSavedProjection(projection, identity, identity)
 
 
@@ -211,7 +230,7 @@ def load_stock_result_configuration(path):
         "version_ref": value["version_ref"], "attempt_id": value["attempt_id"]}), "stable result identity mismatch")
     _require(type(value["required_stages"]) is list and
              set(value["required_stages"]) <= {"training", "signal_evaluation", "accounts", "account_evaluation"} and
-             "training" in value["required_stages"] and
+             ("training" in value["required_stages"] or "signal" in definition["specs"]) and
              type(value["required_strategy_refs"]) is list and
              len(set(value["required_strategy_refs"])) == len(value["required_strategy_refs"]) and
              ("accounts" not in value["required_stages"] or bool(value["required_strategy_refs"])),
@@ -296,6 +315,8 @@ def _verify_manifest_lineage(manifest, artifacts, verified, sequential, batch, f
     by_signal = {folds[f["fold_ref"]]["signal_run_ref"]: folds[f["fold_ref"]]
                  for f in sequential["folds"]}
     for signal in manifest["signals"]:
+        if artifacts[signal["prediction_artifact_key"]]["artifact_type"] == "StockDerivedSignal":
+            continue
         _require(signal["signal_run_ref"] in by_signal, "Signal original fold missing")
         fold = by_signal[signal["signal_run_ref"]]
         check(signal["lineage_artifact_keys"], fold)
@@ -319,17 +340,22 @@ def _saved_account_status(wire):
 
 def verify_result_artifacts(manifest, artifacts, paths, roots):
     """Fixed owner loaders; no loader names or code are read from manifests."""
-    verified = {}
+    verified = {}; derived_bindings = {}
     for key, ref in artifacts.items():
         path = paths[key]; kind = ref["artifact_type"]
         if ref["owner"] == "Research":
             if kind == "StockResultConfiguration": saved = load_stock_result_configuration(path)
             elif kind == "StockSequentialResult": saved = load_stock_sequential_result(path, research_root=roots["research"])
             elif kind == "StockMLBatchManifest": saved = load_stock_ml_batch_manifest(path)
-            elif kind == "StockPredictionBindings": saved = load_stock_prediction_bindings(path)
+            elif kind == "StockPredictionBindings": saved = load_stock_prediction_bindings(path, research_root=roots["research"])
             elif kind == "StockMLFoldProjection": saved = load_stock_fold_projection(path, research_root=roots["research"])
             elif kind == "StockPredictionRun":
                 saved = load_stock_prediction_projection(path, research_root=roots["research"])
+            elif kind == "StockDerivedSignal":
+                from .stock_derived_signal import load_stock_derived_signal
+                obj = load_stock_derived_signal(path, research_root=roots["research"])
+                derived_bindings[key] = obj.engine_input_binding()
+                saved = StockSavedProjection(obj.to_dict(), obj.identity, obj.content_digest)
             elif kind == "StockSignalEvaluation":
                 from .stock_signal_evaluation import load_stock_signal_evaluation
                 obj = load_stock_signal_evaluation(path, research_root=roots["research"]); value = obj.to_dict()
@@ -365,8 +391,8 @@ def verify_result_artifacts(manifest, artifacts, paths, roots):
     sequential = [v for k, v in verified.items() if artifacts[k]["artifact_type"] == "StockSequentialResult"]
     folds = {v["fold_ref"]: v for k, v in verified.items()
              if artifacts[k]["artifact_type"] == "StockMLFoldProjection"}
-    _require(len(sequential) <= 1 and (sequential or not (manifest["folds"] or manifest["signals"])),
-             "one saved sequential result required for fold/Signal declarations")
+    _require(len(sequential) <= 1 and (sequential or not manifest["folds"]),
+             "one saved sequential result required for training fold declarations")
     for value in sequential:
         batches = [v for k, v in verified.items() if artifacts[k]["artifact_type"] == "StockMLBatchManifest" and
                    v["batch_ref"] == value["batch_ref"] and v["content_digest"] == value["batch_content_digest"]]
@@ -374,11 +400,41 @@ def verify_result_artifacts(manifest, artifacts, paths, roots):
         _verify_configuration_outputs(configuration, value, batches[0], folds, roots["research"])
         _require({f["fold_ref"] for f in value["folds"]} == {f["fold_ref"] for f in manifest["folds"]} and
                  {f["signal_run_ref"] for f in value["folds"]} ==
-                 {s["signal_run_ref"] for s in manifest["signals"]}, "result fold/Signal declaration mismatch")
+                 {s["signal_run_ref"] for s in manifest["signals"] if
+                  artifacts[s["prediction_artifact_key"]]["artifact_type"] == "StockPredictionRun"},
+                 "result fold/Signal declaration mismatch")
         _verify_manifest_lineage(manifest, artifacts, verified, value, batches[0], folds)
+        _require({i["signal_run_ref"] for i in value.get("derived_signals", [])} <=
+                 {s["signal_run_ref"] for s in manifest["signals"] if
+                  artifacts[s["prediction_artifact_key"]]["artifact_type"] == "StockDerivedSignal"},
+                 "sequential Derived Signal registration missing")
+    from .stock_signal_evaluation_inputs import _scope
+    scope = _scope(configuration["configuration"]["dataset"]["scope"]) if derived_bindings else None
+    for signal in manifest["signals"]:
+        key = signal["prediction_artifact_key"]; kind = artifacts[key]["artifact_type"]
+        if kind == "StockPredictionRun":
+            _require(bool(sequential), "Raw Signal requires its original sequential result")
+            continue
+        _require(kind == "StockDerivedSignal", "unsupported Signal output type")
+        wire = verified[key]; binding = derived_bindings[key]
+        _require(wire["signal_plan_ref"] == configuration["configuration"]["spec_refs"].get("signal") and
+                 wire["universe"] == scope["universe"] and
+                 wire["context"]["calendar_ref"] == digest(scope["calendar"]) and
+                 set(wire["context"]["cutoff_by_session"]) <= set(scope["sessions"]) and
+                 {r["session"] for r in wire["rows"]} == set(wire["context"]["cutoff_by_session"]),
+                 "Derived differs from frozen SignalPlan/Dataset scope")
+        _require(bool(signal["lineage_artifact_keys"]), "Derived lineage required")
+        for lineage_key in signal["lineage_artifact_keys"]:
+            lineage = artifacts[lineage_key]
+            _require(lineage_key == manifest["configuration_ref"] or
+                     (lineage["artifact_type"] == "StockMLFoldProjection" and
+                      verified[lineage_key]["fold_ref"] in
+                      {p["fold_ref"] for p in binding["parent_inputs"].values()}),
+                     "Derived lineage differs from original parents/configuration")
     if manifest["status"] == "COMPLETE":
-        _require(len(sequential) == 1 and
-                 len(manifest["folds"]) == len(configuration["configuration"]["dataset"]["fold_specs"]),
+        _require(bool(manifest["signals"]), "complete result requires a saved Signal")
+        _require("training" not in configuration["required_stages"] or (len(sequential) == 1 and
+                 len(manifest["folds"]) == len(configuration["configuration"]["dataset"]["fold_specs"])),
                  "declared training stage is incomplete")
         if "signal_evaluation" in configuration["required_stages"]:
             _require(all(s["evaluation_artifact_keys"] for s in manifest["signals"]),
@@ -401,7 +457,13 @@ def verify_result_artifacts(manifest, artifacts, paths, roots):
                  run["signal_ref"] == account["signal_run_ref"], "account run/signal binding mismatch")
         _require(digest(run["request_manifest"]["portfolio_policy"]) == account["strategy_ref"],
                  "strategy policy reference mismatch")
-        _require(any(run["request_manifest"]["prediction_input"] == frames for frames in frame_sets),
+        inputs = run["request_manifest"]["prediction_input"]
+        declared_bindings = [derived_bindings[s["prediction_artifact_key"]] for s in manifest["signals"]
+                             if s["prediction_artifact_key"] in derived_bindings]
+        admitted = [*declared_bindings, *(f for group in frame_sets for f in group["frames"] if f.get("kind") == "raw")]
+        _require(any(inputs == frames for frames in frame_sets) or
+                 (inputs["contract_version"] == "stock_prediction_input_refs_v2" and bool(inputs["frames"]) and
+                  all(frame in admitted for frame in inputs["frames"])),
                  "account must consume the original saved prediction frames")
         for evaluation in account["evaluation_refs"]:
             report = verified[evaluation["artifact_key"]]

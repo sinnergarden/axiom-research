@@ -137,7 +137,7 @@ def _begin_stock_result_registration(configuration, *, index_path, roots, reques
         input_refs=[], explicit_changes=[])
     v = writer.create_version(question_id=q["question_id"], **version)
     _require(set(required_stages) <= {"training", "signal_evaluation", "accounts", "account_evaluation"} and
-             "training" in required_stages and
+             ("training" in required_stages or "signal" in specs) and
              ("accounts" in required_stages or not strategy_refs), "unsupported required stages")
     attempt = uuid.uuid4().hex
     frozen = _seal({"contract_version": "stock_result_configuration_v1",
@@ -159,7 +159,7 @@ def _begin_stock_result_registration(configuration, *, index_path, roots, reques
 
 
 def publish_stock_result(request_path, *, index_path, roots, experiment_result=None,
-        signal_evaluation=None, engine_handoff=None, failure=None):
+        derived_signals=(), signal_evaluation=None, engine_handoff=None, failure=None):
     """Append a manifest revision referencing verified outputs in place.
 
     No fixed producer directory is scanned. All supplied paths are owner save
@@ -168,17 +168,7 @@ def publish_stock_result(request_path, *, index_path, roots, experiment_result=N
     from .result_discovery import read_json
     from .stock_result_projection import load_stock_ml_batch_manifest
     frozen = load_stock_result_configuration(request_path).wire
-    discovery_blocked = None
-    if experiment_result is not None:
-        path = Path(experiment_result).resolve(strict=True)
-        _require(path.is_relative_to(Path(roots["research"]).resolve(strict=True)),
-                 "saved artifact outside configured root")
-        if read_json(path).get("derived_signals"):
-            # Preserve the existing configured Derived builder. This discovery
-            # profile validates original raw fold bindings only; its limitation
-            # must not turn an otherwise successful owner build into a failure.
-            discovery_blocked = "Saved Derived outputs are outside the raw-fold result discovery profile"
-            experiment_result = signal_evaluation = engine_handoff = None
+    derived_signals = list(derived_signals)
     store = ExperimentStore(index_path); reader = ExperimentReader(index_path)
     previous = None
     if Path(index_path).exists():
@@ -214,7 +204,7 @@ def publish_stock_result(request_path, *, index_path, roots, experiment_result=N
         batch = load_stock_ml_batch_manifest(base / "batch.json")
         artifact("batch", "Research", "StockMLBatchManifest", batch.identity,
             batch.wire["contract_version"], batch.content_digest, base / "batch.json")
-        frames = load_stock_prediction_bindings(base / "prediction-bindings.json")
+        frames = load_stock_prediction_bindings(base / "prediction-bindings.json", research_root=roots["research"])
         artifact("bindings", "Research", "StockPredictionBindings", frames.identity,
             "stock_prediction_input_refs_v2", frames.content_digest, base / "prediction-bindings.json")
         manifest["folds"], manifest["signals"] = [], []
@@ -225,6 +215,10 @@ def publish_stock_result(request_path, *, index_path, roots, experiment_result=N
                 fold.wire["contract_version"], fold.content_digest, Path(item["path"]) / "fold.json")
             manifest["folds"].append(dict(fold_ref=fold.identity, status="COMPLETE", reason=None,
                                           artifact_keys=[key, "batch", "bindings"]))
+            if frame.get("kind") == "derived":
+                parents = [p for p in frame["parent_inputs"].values() if p["fold_ref"] == item["fold_ref"]]
+                _require(len(parents) == 1, "sequential Derived original fold missing")
+                frame = parents[0]
             prediction = frame["prediction_artifact"]; signal_key = "signal-" + frame["signal_run_ref"][7:]
             artifact(signal_key, "Research", "StockPredictionRun", frame["signal_run_ref"],
                 prediction["contract_version"], prediction["content_digest"], prediction["manifest_uri"])
@@ -233,6 +227,26 @@ def publish_stock_result(request_path, *, index_path, roots, experiment_result=N
             manifest["signals"].append(dict(signal_run_ref=frame["signal_run_ref"], status="COMPLETE",
                 reason=None, prediction_artifact_key=signal_key, lineage_artifact_keys=[key, "bindings"],
                 evaluation_artifact_keys=[] if old is None else old["evaluation_artifact_keys"]))
+        derived_signals.extend(item["path"] for item in result.get("derived_signals", []))
+    for path in derived_signals:
+        from .stock_derived_signal import load_stock_derived_signal
+        saved = load_stock_derived_signal(path, research_root=roots["research"])
+        wire = saved.to_dict(); key = "signal-" + saved.identity[7:]
+        artifact(key, "Research", "StockDerivedSignal", saved.identity,
+                 wire["contract_version"], saved.content_digest, saved.path / "signal.json")
+        old = next((s for s in manifest["signals"] if s["signal_run_ref"] == saved.identity), None)
+        if old is None:
+            old = next((s for s in (previous or {}).get("signals", []) if s["signal_run_ref"] == saved.identity), None)
+        parent_folds = {p["fold_ref"] for p in saved.engine_input_binding()["parent_inputs"].values()}
+        lineage = ["configuration"] + ["fold-" + f["fold_ref"][7:] for f in manifest["folds"]
+                                      if f["fold_ref"] in parent_folds]
+        signal = dict(signal_run_ref=saved.identity, status="COMPLETE", reason=None,
+            prediction_artifact_key=key, lineage_artifact_keys=lineage,
+            evaluation_artifact_keys=[] if old is None else old["evaluation_artifact_keys"])
+        if any(s["signal_run_ref"] == saved.identity for s in manifest["signals"]):
+            manifest["signals"] = [signal if s["signal_run_ref"] == saved.identity else s for s in manifest["signals"]]
+        else:
+            manifest["signals"].append(signal)
     if signal_evaluation is not None:
         from .stock_signal_evaluation import load_stock_signal_evaluation
         result = read_json(signal_evaluation)
@@ -281,7 +295,8 @@ def publish_stock_result(request_path, *, index_path, roots, experiment_result=N
                         input_run_ref=evaluation["input_run_ref"]))
             manifest["accounts"] = [a for a in manifest["accounts"] if
                 (a["strategy_ref"], a["signal_run_ref"]) != (strategy_ref, wire["signal_ref"])] + [account]
-    complete = bool(manifest["folds"] and manifest["signals"]) and all(
+    complete = bool(manifest["signals"]) and ("training" not in frozen["required_stages"] or
+        bool(manifest["folds"])) and all(
         row["status"] == "COMPLETE" for table in ("folds", "signals", "accounts") for row in manifest[table])
     if "signal_evaluation" in frozen["required_stages"]:
         complete &= all(s["evaluation_artifact_keys"] for s in manifest["signals"])
@@ -291,13 +306,11 @@ def publish_stock_result(request_path, *, index_path, roots, experiment_result=N
         complete &= bool(manifest["accounts"]) and all(a["evaluation_refs"] for a in manifest["accounts"])
     if complete:
         manifest.update(status="COMPLETE", reason=None)
-    elif manifest["folds"]:
+    elif manifest["folds"] or manifest["signals"]:
         manifest.update(status="PARTIAL", reason="Required owner stages are not all saved")
     blocked = next((a for a in manifest["accounts"] if a["status"] == "BLOCKED"), None)
     if blocked is not None:
         manifest.update(status="BLOCKED", reason="Saved Engine account is BLOCKED: " + blocked["reason"])
-    if discovery_blocked is not None:
-        manifest.update(status="BLOCKED", reason=discovery_blocked)
     if failure is not None:
         manifest.update(status="FAILED", reason=str(failure))
     manifest["artifacts"].sort(key=lambda a: a["artifact_key"])
