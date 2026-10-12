@@ -6,6 +6,7 @@ and budgets, and owns authorization and the public Data/market/source contexts.
 """
 from copy import deepcopy
 from pathlib import Path
+import time
 
 from .stock_fold_inputs import require
 from .stock_artifacts import digest
@@ -92,10 +93,13 @@ def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
         with open_stock_signal_evaluation_freeze(owner.batch,scope=scope,destination=root/'oos',signal_name='model') as writer:
             while True:
                 with owner.operation():
+                    preparation_begin=time.perf_counter()
                     item=owner.next_fold()
                     if item is None:break
+                    preparation_seconds=time.perf_counter()-preparation_begin
+                    fold_metrics={}
                     run=build_stock_ml_fold_from_saved_inputs(item['input_manifest'],fold_spec=item['fold_spec'],
-                        destination=root/'folds',batch=owner.batch,training_spec=specs['model'])
+                        destination=root/'folds',batch=owner.batch,training_spec=specs['model'],metrics=fold_metrics)
                     # Read the builder's actual saved outputs. No fabricated model or
                     # synthetic combined prediction replaces the original fold refs.
                     prediction,binding,_=_parent(run)
@@ -107,6 +111,9 @@ def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
                     else:bindings.append(binding)
                     folds.append({'path':str(run.path),'fold_ref':run.identity,
                         'signal_run_ref':prediction['signal_run_ref'],'fold_spec_ref':digest(item['fold_spec'])})
+                    if progress:progress({'stage':'sequential_fold','completed':len(folds),'total':len(fold_specs),
+                        'preparation_seconds':preparation_seconds,'fold_metrics':fold_metrics,
+                        'fold_path':str(run.path)})
                     run=prediction=binding=None
             batch=owner.finish();frozen=writer.finish()
     evaluation_input=frozen

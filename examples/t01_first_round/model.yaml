@@ -1,0 +1,43 @@
+contract_version: stock_experiment_config_v1
+specs:
+  model:
+    contract_type: TrainingSpec
+    contract_version: '1'
+    metadata: {}
+    name: T01-88-H40-504mature-weekly-2019-2025-v1
+    dataset_name: T01-CSI300-2019-2025-OOS
+    backend: lightgbm
+    backend_version: 4.6.0
+    objective: regression
+    parameters:
+      bagging_fraction: 1.0
+      boosting_type: gbdt
+      deterministic: true
+      feature_fraction: 1.0
+      force_col_wise: true
+      learning_rate: 0.05
+      max_depth: 5
+      min_data_in_leaf: 20
+      num_leaves: 31
+      num_threads: 4
+      objective: regression
+      seed: 42
+      verbosity: -1
+      n_estimators: 100
+    seed: 42
+    preprocessing: none
+    fit_scope: train_only
+    fit_range:
+      contract_type: SessionRange
+      contract_version: '1'
+      metadata: {}
+      start: '2016-10-13'
+      end: '2025-12-30'
+    selection_protocol: fixed_parameters_no_validation_no_early_stopping
+    resources:
+      contract_type: ResourceSpec
+      contract_version: '1'
+      metadata: {}
+      threads: 4
+      concurrent_folds: 1
+      memory_limit_mb: 12288

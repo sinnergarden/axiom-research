@@ -1,0 +1,26 @@
+contract_version: stock_dataset_schedule_v2
+axes_input:
+  path: <absolute_path_to_genuine_training_projection_feature_axes.json>
+  file_digest: <actual_sha256_digest_of_axes_file>
+weekly_schedule:
+  trade_start: '2019-01-02'
+  trade_end_exclusive: '2026-01-01'
+  training_window:
+    unit: feature_sessions
+    length: 543
+    end: previous_fit_session
+  timezone: Asia/Shanghai
+  fit_time: '20:30'
+  model_time: '20:45'
+  inference_time: '21:00'
+  evaluation_cutoff: '2026-03-09T20:30:00+08:00'
+preparation_options:
+  row_block_sessions: 8
+  column_block: 32
+  maximum_resident_bytes: 12884901888
+  maximum_source_bytes: 34359738368
+  maximum_parent_bytes: 67108864
+  normalization_backend: core_cs_batch_v1
+  control_layout: fold_controls_v2
+model_feature_selection: null
+signal_contexts: null

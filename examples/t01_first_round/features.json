@@ -1,0 +1,1016 @@
+{
+  "catalog_ref": "sha256:d45348375b02da2bc05213b7dcd6f634ecd0bd9afc22b860a7cec2ad5cd84c5c",
+  "normalization": "existing daily CSI300 member cs_zscore; ddof=0; missing preserved",
+  "features": [
+    {
+      "id": "ALP001",
+      "semantic_version": "1.0.0",
+      "name": "KMID",
+      "formula": "($close-$open)/$open",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.open",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1
+    },
+    {
+      "id": "ALP002",
+      "semantic_version": "1.0.0",
+      "name": "KLEN",
+      "formula": "($high-$low)/$open",
+      "dependencies": [
+        "market_daily.high",
+        "market_daily.low",
+        "market_daily.open",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1
+    },
+    {
+      "id": "ALP003",
+      "semantic_version": "1.0.0",
+      "name": "KMID2",
+      "formula": "($close-$open)/($high-$low+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "market_daily.low",
+        "market_daily.open",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1
+    },
+    {
+      "id": "ALP004",
+      "semantic_version": "1.0.0",
+      "name": "KUP",
+      "formula": "($high-Greater($open, $close))/$open",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "market_daily.open",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1
+    },
+    {
+      "id": "ALP005",
+      "semantic_version": "1.0.0",
+      "name": "KUP2",
+      "formula": "($high-Greater($open, $close))/($high-$low+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "market_daily.low",
+        "market_daily.open",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1
+    },
+    {
+      "id": "ALP006",
+      "semantic_version": "1.0.0",
+      "name": "KLOW",
+      "formula": "(Less($open, $close)-$low)/$open",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.low",
+        "market_daily.open",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1
+    },
+    {
+      "id": "ALP007",
+      "semantic_version": "1.0.0",
+      "name": "KLOW2",
+      "formula": "(Less($open, $close)-$low)/($high-$low+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "market_daily.low",
+        "market_daily.open",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1
+    },
+    {
+      "id": "ALP008",
+      "semantic_version": "1.0.0",
+      "name": "KSFT",
+      "formula": "(2*$close-$high-$low)/$open",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "market_daily.low",
+        "market_daily.open",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1
+    },
+    {
+      "id": "ALP009",
+      "semantic_version": "1.0.0",
+      "name": "KSFT2",
+      "formula": "(2*$close-$high-$low)/($high-$low+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "market_daily.low",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1
+    },
+    {
+      "id": "ALP010",
+      "semantic_version": "1.0.0",
+      "name": "OPEN0",
+      "formula": "$open/$close",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.open",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1
+    },
+    {
+      "id": "ALP011",
+      "semantic_version": "1.0.0",
+      "name": "HIGH0",
+      "formula": "$high/$close",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1
+    },
+    {
+      "id": "ALP012",
+      "semantic_version": "1.0.0",
+      "name": "LOW0",
+      "formula": "$low/$close",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.low",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1
+    },
+    {
+      "id": "ALP014",
+      "semantic_version": "1.0.0",
+      "name": "ROC5",
+      "formula": "Ref($close, 5)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 6
+    },
+    {
+      "id": "ALP015",
+      "semantic_version": "1.0.0",
+      "name": "ROC10",
+      "formula": "Ref($close, 10)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 11
+    },
+    {
+      "id": "ALP016",
+      "semantic_version": "1.0.0",
+      "name": "ROC20",
+      "formula": "Ref($close, 20)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 21
+    },
+    {
+      "id": "ALP017",
+      "semantic_version": "1.0.0",
+      "name": "ROC30",
+      "formula": "Ref($close, 30)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 31
+    },
+    {
+      "id": "ALP018",
+      "semantic_version": "1.0.0",
+      "name": "ROC60",
+      "formula": "Ref($close, 60)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 61
+    },
+    {
+      "id": "ALP019",
+      "semantic_version": "1.0.0",
+      "name": "MA5",
+      "formula": "Mean($close, 5)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 5
+    },
+    {
+      "id": "ALP020",
+      "semantic_version": "1.0.0",
+      "name": "MA10",
+      "formula": "Mean($close, 10)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 10
+    },
+    {
+      "id": "ALP021",
+      "semantic_version": "1.0.0",
+      "name": "MA20",
+      "formula": "Mean($close, 20)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 20
+    },
+    {
+      "id": "ALP022",
+      "semantic_version": "1.0.0",
+      "name": "MA30",
+      "formula": "Mean($close, 30)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 30
+    },
+    {
+      "id": "ALP023",
+      "semantic_version": "1.0.0",
+      "name": "MA60",
+      "formula": "Mean($close, 60)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 60
+    },
+    {
+      "id": "ALP024",
+      "semantic_version": "1.0.0",
+      "name": "STD5",
+      "formula": "Std($close, 5)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 5
+    },
+    {
+      "id": "ALP025",
+      "semantic_version": "1.0.0",
+      "name": "STD10",
+      "formula": "Std($close, 10)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 10
+    },
+    {
+      "id": "ALP026",
+      "semantic_version": "1.0.0",
+      "name": "STD20",
+      "formula": "Std($close, 20)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 20
+    },
+    {
+      "id": "ALP027",
+      "semantic_version": "1.0.0",
+      "name": "STD30",
+      "formula": "Std($close, 30)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 30
+    },
+    {
+      "id": "ALP028",
+      "semantic_version": "1.0.0",
+      "name": "STD60",
+      "formula": "Std($close, 60)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 60
+    },
+    {
+      "id": "ALP044",
+      "semantic_version": "1.0.0",
+      "name": "MAX5",
+      "formula": "Max($high, 5)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 5
+    },
+    {
+      "id": "ALP045",
+      "semantic_version": "1.0.0",
+      "name": "MAX10",
+      "formula": "Max($high, 10)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 10
+    },
+    {
+      "id": "ALP046",
+      "semantic_version": "1.0.0",
+      "name": "MAX20",
+      "formula": "Max($high, 20)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 20
+    },
+    {
+      "id": "ALP047",
+      "semantic_version": "1.0.0",
+      "name": "MAX30",
+      "formula": "Max($high, 30)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 30
+    },
+    {
+      "id": "ALP048",
+      "semantic_version": "1.0.0",
+      "name": "MAX60",
+      "formula": "Max($high, 60)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 60
+    },
+    {
+      "id": "ALP049",
+      "semantic_version": "1.0.0",
+      "name": "MIN5",
+      "formula": "Min($low, 5)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.low",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 5
+    },
+    {
+      "id": "ALP050",
+      "semantic_version": "1.0.0",
+      "name": "MIN10",
+      "formula": "Min($low, 10)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.low",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 10
+    },
+    {
+      "id": "ALP051",
+      "semantic_version": "1.0.0",
+      "name": "MIN20",
+      "formula": "Min($low, 20)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.low",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 20
+    },
+    {
+      "id": "ALP052",
+      "semantic_version": "1.0.0",
+      "name": "MIN30",
+      "formula": "Min($low, 30)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.low",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 30
+    },
+    {
+      "id": "ALP053",
+      "semantic_version": "1.0.0",
+      "name": "MIN60",
+      "formula": "Min($low, 60)/$close",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.low",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 60
+    },
+    {
+      "id": "ALP064",
+      "semantic_version": "1.0.0",
+      "name": "RANK5",
+      "formula": "Rank($close, 5)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 5
+    },
+    {
+      "id": "ALP065",
+      "semantic_version": "1.0.0",
+      "name": "RANK10",
+      "formula": "Rank($close, 10)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 10
+    },
+    {
+      "id": "ALP066",
+      "semantic_version": "1.0.0",
+      "name": "RANK20",
+      "formula": "Rank($close, 20)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 20
+    },
+    {
+      "id": "ALP067",
+      "semantic_version": "1.0.0",
+      "name": "RANK30",
+      "formula": "Rank($close, 30)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 30
+    },
+    {
+      "id": "ALP068",
+      "semantic_version": "1.0.0",
+      "name": "RANK60",
+      "formula": "Rank($close, 60)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 60
+    },
+    {
+      "id": "ALP069",
+      "semantic_version": "1.0.0",
+      "name": "RSV5",
+      "formula": "($close-Min($low, 5))/(Max($high, 5)-Min($low, 5)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "market_daily.low",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 5
+    },
+    {
+      "id": "ALP070",
+      "semantic_version": "1.0.0",
+      "name": "RSV10",
+      "formula": "($close-Min($low, 10))/(Max($high, 10)-Min($low, 10)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "market_daily.low",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 10
+    },
+    {
+      "id": "ALP071",
+      "semantic_version": "1.0.0",
+      "name": "RSV20",
+      "formula": "($close-Min($low, 20))/(Max($high, 20)-Min($low, 20)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "market_daily.low",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 20
+    },
+    {
+      "id": "ALP072",
+      "semantic_version": "1.0.0",
+      "name": "RSV30",
+      "formula": "($close-Min($low, 30))/(Max($high, 30)-Min($low, 30)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "market_daily.low",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 30
+    },
+    {
+      "id": "ALP073",
+      "semantic_version": "1.0.0",
+      "name": "RSV60",
+      "formula": "($close-Min($low, 60))/(Max($high, 60)-Min($low, 60)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "market_daily.low",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 60
+    },
+    {
+      "id": "ALP099",
+      "semantic_version": "1.0.0",
+      "name": "CNTP5",
+      "formula": "Mean($close>Ref($close, 1), 5)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 6
+    },
+    {
+      "id": "ALP100",
+      "semantic_version": "1.0.0",
+      "name": "CNTP10",
+      "formula": "Mean($close>Ref($close, 1), 10)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 11
+    },
+    {
+      "id": "ALP101",
+      "semantic_version": "1.0.0",
+      "name": "CNTP20",
+      "formula": "Mean($close>Ref($close, 1), 20)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 21
+    },
+    {
+      "id": "ALP102",
+      "semantic_version": "1.0.0",
+      "name": "CNTP30",
+      "formula": "Mean($close>Ref($close, 1), 30)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 31
+    },
+    {
+      "id": "ALP103",
+      "semantic_version": "1.0.0",
+      "name": "CNTP60",
+      "formula": "Mean($close>Ref($close, 1), 60)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 61
+    },
+    {
+      "id": "ALP104",
+      "semantic_version": "1.0.0",
+      "name": "CNTN5",
+      "formula": "Mean($close<Ref($close, 1), 5)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 6
+    },
+    {
+      "id": "ALP105",
+      "semantic_version": "1.0.0",
+      "name": "CNTN10",
+      "formula": "Mean($close<Ref($close, 1), 10)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 11
+    },
+    {
+      "id": "ALP106",
+      "semantic_version": "1.0.0",
+      "name": "CNTN20",
+      "formula": "Mean($close<Ref($close, 1), 20)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 21
+    },
+    {
+      "id": "ALP107",
+      "semantic_version": "1.0.0",
+      "name": "CNTN30",
+      "formula": "Mean($close<Ref($close, 1), 30)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 31
+    },
+    {
+      "id": "ALP108",
+      "semantic_version": "1.0.0",
+      "name": "CNTN60",
+      "formula": "Mean($close<Ref($close, 1), 60)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 61
+    },
+    {
+      "id": "ALP109",
+      "semantic_version": "1.0.0",
+      "name": "CNTD5",
+      "formula": "Mean($close>Ref($close, 1), 5)-Mean($close<Ref($close, 1), 5)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 6
+    },
+    {
+      "id": "ALP110",
+      "semantic_version": "1.0.0",
+      "name": "CNTD10",
+      "formula": "Mean($close>Ref($close, 1), 10)-Mean($close<Ref($close, 1), 10)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 11
+    },
+    {
+      "id": "ALP111",
+      "semantic_version": "1.0.0",
+      "name": "CNTD20",
+      "formula": "Mean($close>Ref($close, 1), 20)-Mean($close<Ref($close, 1), 20)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 21
+    },
+    {
+      "id": "ALP112",
+      "semantic_version": "1.0.0",
+      "name": "CNTD30",
+      "formula": "Mean($close>Ref($close, 1), 30)-Mean($close<Ref($close, 1), 30)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 31
+    },
+    {
+      "id": "ALP113",
+      "semantic_version": "1.0.0",
+      "name": "CNTD60",
+      "formula": "Mean($close>Ref($close, 1), 60)-Mean($close<Ref($close, 1), 60)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 61
+    },
+    {
+      "id": "ALP114",
+      "semantic_version": "1.0.0",
+      "name": "SUMP5",
+      "formula": "Sum(Greater($close-Ref($close, 1), 0), 5)/(Sum(Abs($close-Ref($close, 1)), 5)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 6
+    },
+    {
+      "id": "ALP115",
+      "semantic_version": "1.0.0",
+      "name": "SUMP10",
+      "formula": "Sum(Greater($close-Ref($close, 1), 0), 10)/(Sum(Abs($close-Ref($close, 1)), 10)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 11
+    },
+    {
+      "id": "ALP116",
+      "semantic_version": "1.0.0",
+      "name": "SUMP20",
+      "formula": "Sum(Greater($close-Ref($close, 1), 0), 20)/(Sum(Abs($close-Ref($close, 1)), 20)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 21
+    },
+    {
+      "id": "ALP117",
+      "semantic_version": "1.0.0",
+      "name": "SUMP30",
+      "formula": "Sum(Greater($close-Ref($close, 1), 0), 30)/(Sum(Abs($close-Ref($close, 1)), 30)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 31
+    },
+    {
+      "id": "ALP118",
+      "semantic_version": "1.0.0",
+      "name": "SUMP60",
+      "formula": "Sum(Greater($close-Ref($close, 1), 0), 60)/(Sum(Abs($close-Ref($close, 1)), 60)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 61
+    },
+    {
+      "id": "ALP119",
+      "semantic_version": "1.0.0",
+      "name": "SUMN5",
+      "formula": "Sum(Greater(Ref($close, 1)-$close, 0), 5)/(Sum(Abs($close-Ref($close, 1)), 5)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 6
+    },
+    {
+      "id": "ALP120",
+      "semantic_version": "1.0.0",
+      "name": "SUMN10",
+      "formula": "Sum(Greater(Ref($close, 1)-$close, 0), 10)/(Sum(Abs($close-Ref($close, 1)), 10)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 11
+    },
+    {
+      "id": "ALP121",
+      "semantic_version": "1.0.0",
+      "name": "SUMN20",
+      "formula": "Sum(Greater(Ref($close, 1)-$close, 0), 20)/(Sum(Abs($close-Ref($close, 1)), 20)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 21
+    },
+    {
+      "id": "ALP122",
+      "semantic_version": "1.0.0",
+      "name": "SUMN30",
+      "formula": "Sum(Greater(Ref($close, 1)-$close, 0), 30)/(Sum(Abs($close-Ref($close, 1)), 30)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 31
+    },
+    {
+      "id": "ALP123",
+      "semantic_version": "1.0.0",
+      "name": "SUMN60",
+      "formula": "Sum(Greater(Ref($close, 1)-$close, 0), 60)/(Sum(Abs($close-Ref($close, 1)), 60)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 61
+    },
+    {
+      "id": "ALP124",
+      "semantic_version": "1.0.0",
+      "name": "SUMD5",
+      "formula": "(Sum(Greater($close-Ref($close, 1), 0), 5)-Sum(Greater(Ref($close, 1)-$close, 0), 5))/(Sum(Abs($close-Ref($close, 1)), 5)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 6
+    },
+    {
+      "id": "ALP125",
+      "semantic_version": "1.0.0",
+      "name": "SUMD10",
+      "formula": "(Sum(Greater($close-Ref($close, 1), 0), 10)-Sum(Greater(Ref($close, 1)-$close, 0), 10))/(Sum(Abs($close-Ref($close, 1)), 10)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 11
+    },
+    {
+      "id": "ALP126",
+      "semantic_version": "1.0.0",
+      "name": "SUMD20",
+      "formula": "(Sum(Greater($close-Ref($close, 1), 0), 20)-Sum(Greater(Ref($close, 1)-$close, 0), 20))/(Sum(Abs($close-Ref($close, 1)), 20)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 21
+    },
+    {
+      "id": "ALP127",
+      "semantic_version": "1.0.0",
+      "name": "SUMD30",
+      "formula": "(Sum(Greater($close-Ref($close, 1), 0), 30)-Sum(Greater(Ref($close, 1)-$close, 0), 30))/(Sum(Abs($close-Ref($close, 1)), 30)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 31
+    },
+    {
+      "id": "ALP128",
+      "semantic_version": "1.0.0",
+      "name": "SUMD60",
+      "formula": "(Sum(Greater($close-Ref($close, 1), 0), 60)-Sum(Greater(Ref($close, 1)-$close, 0), 60))/(Sum(Abs($close-Ref($close, 1)), 60)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 61
+    },
+    {
+      "id": "TRN001",
+      "semantic_version": "1.0.0",
+      "name": "RET120",
+      "formula": "close[t]/close[t-120]-1",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 121
+    },
+    {
+      "id": "TRN002",
+      "semantic_version": "1.0.0",
+      "name": "UP120",
+      "formula": "mean(close[t]>close[t-1],120)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 121
+    },
+    {
+      "id": "TRN003",
+      "semantic_version": "1.0.0",
+      "name": "SMOOTH120",
+      "formula": "abs(close[t]-close[t-120])/(sum(abs(close[t]-close[t-1]),120)+1e-12 CNY/share)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 121
+    },
+    {
+      "id": "TRN004",
+      "semantic_version": "1.0.0",
+      "name": "VOLADJRET120",
+      "formula": "(close[t]/close[t-120]-1)/(std(close[t]/close[t-1]-1,120,ddof=1)+1e-12)",
+      "dependencies": [
+        "market_daily.close",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 121
+    },
+    {
+      "id": "TRN005",
+      "semantic_version": "1.0.0",
+      "name": "PRICEPOS252",
+      "formula": "(close[t]-min(low,252))/(max(high,252)-min(low,252)+1e-12 CNY/share)",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.high",
+        "market_daily.low",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 252
+    },
+    {
+      "id": "LQD001",
+      "semantic_version": "1.0.0",
+      "name": "LOG_AMOUNT",
+      "formula": "log1p(amount_cny/(1 CNY))",
+      "dependencies": [
+        "market_daily.amount_cny"
+      ],
+      "lookback": 1
+    },
+    {
+      "id": "LQD002",
+      "semantic_version": "1.0.0",
+      "name": "AMOUNT_REL20",
+      "formula": "amount_cny[t]/mean(amount_cny,20)",
+      "dependencies": [
+        "market_daily.amount_cny"
+      ],
+      "lookback": 20
+    },
+    {
+      "id": "LQD003",
+      "semantic_version": "1.0.0",
+      "name": "AMOUNT_REL60",
+      "formula": "amount_cny[t]/mean(amount_cny,60)",
+      "dependencies": [
+        "market_daily.amount_cny"
+      ],
+      "lookback": 60
+    },
+    {
+      "id": "LQD004",
+      "semantic_version": "1.0.0",
+      "name": "AMOUNT_Z20",
+      "formula": "(amount_cny[t]-mean(amount_cny,20))/(std(amount_cny,20,ddof=0)+1e-12 CNY)",
+      "dependencies": [
+        "market_daily.amount_cny"
+      ],
+      "lookback": 20
+    },
+    {
+      "id": "LQD005",
+      "semantic_version": "1.0.0",
+      "name": "ILLIQ20",
+      "formula": "mean(abs(close[t]/close[t-1]-1)/amount_cny[t],20); unit 1/CNY",
+      "dependencies": [
+        "market_daily.close",
+        "market_daily.amount_cny",
+        "adjustment_factors.factor"
+      ],
+      "lookback": 21
+    },
+    {
+      "id": "LQD006",
+      "semantic_version": "1.0.0",
+      "name": "AMOUNT_CV20",
+      "formula": "std(amount_cny,20,ddof=1)/mean(amount_cny,20)",
+      "dependencies": [
+        "market_daily.amount_cny"
+      ],
+      "lookback": 20
+    }
+  ]
+}

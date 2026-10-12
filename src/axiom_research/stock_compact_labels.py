@@ -1371,7 +1371,9 @@ class _IncrementalPreparation:
         self.state._release_window(keep_feature=True)
         fold,training,inference=self.plans[index];rows=[];nrows=cohort=chunk=raw_rows=raw_value=record=selectors=window=joined_rows=None
         try:
+            raw_begin=time.perf_counter()
             self._ensure_raw(index)
+            raw_label_prepare_seconds=time.perf_counter()-raw_begin
             window=[self.positions[d]*self.width+j for d in training+inference for j in range(self.width)]
             _producer_feature_window(self.feature,window,self.stats);parts=self.raw_outputs[index]['raw_parts']
             for desc in parts:
@@ -1423,7 +1425,8 @@ class _IncrementalPreparation:
             nrows=None
             value=_data(self.batch);value['fold_keys'].add((digest(item['input_manifest']),digest(item['fold_spec'])))
             self._charge_controls();self._persist();self.cursor+=1
-            if self.progress:self.progress({'stage':'compact_labels','completed':len(self.ready),'total':len(self.plans)})
+            if self.progress:self.progress({'stage':'compact_labels','completed':len(self.ready),'total':len(self.plans),
+                'raw_label_prepare_seconds':raw_label_prepare_seconds})
             return deepcopy(item)
         finally:
             rows=nrows=cohort=chunk=raw_rows=raw_value=record=selectors=window=joined_rows=parts=offsets=norm=descriptor=inputs=item=security_positions=None

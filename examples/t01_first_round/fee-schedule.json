@@ -1,0 +1,83 @@
+{
+  "contract_version": "stock_fee_schedule_v1",
+  "currency": "CNY",
+  "money_unit": "CNY_fen",
+  "intervals": [
+    {
+      "effective_from": "2015-08-01",
+      "effective_to": "2022-04-29",
+      "sell_stamp_tax_rate": "0.001",
+      "transfer_fee_rate": "0.00002",
+      "source_keys": [
+        "mof_stamp_single_20080919",
+        "sse_transfer_uniform_20150801"
+      ]
+    },
+    {
+      "effective_from": "2022-04-29",
+      "effective_to": "2023-08-28",
+      "sell_stamp_tax_rate": "0.001",
+      "transfer_fee_rate": "0.00001",
+      "source_keys": [
+        "mof_stamp_single_20080919",
+        "chinaclear_transfer_half_20220429"
+      ]
+    },
+    {
+      "effective_from": "2023-08-28",
+      "effective_to": null,
+      "sell_stamp_tax_rate": "0.0005",
+      "transfer_fee_rate": "0.00001",
+      "source_keys": [
+        "sse_stamp_half_20230828",
+        "chinaclear_transfer_half_20220429",
+        "chinaclear_shanghai_boundary_20251231",
+        "chinaclear_shenzhen_boundary_20251231"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "source_key": "mof_stamp_single_20080919",
+      "url": "https://www.mof.gov.cn/zhengwuxinxi/caizhengxinwen/200809/t20080919_76432.htm",
+      "content_sha256": "sha256:4edaa053cbc7c2727e183a27f2e974aabb3534e4485522e3675f40ca7a6d8263",
+      "clause": "2008-09-19起A/B股卖出方按成交额0.001单向缴纳证券交易印花税。"
+    },
+    {
+      "source_key": "sse_transfer_uniform_20150801",
+      "url": "https://www.sse.com.cn/aboutus/mediacenter/hotandd/c/c_20150912_3988866.shtml",
+      "content_sha256": "sha256:68d86fbded6d151eac74501ed285ce7c24a0746cd09a791ea927d81172266796",
+      "clause": "2015-07-01所司联合问答，2015-08-01起沪深A股过户费统一成交额0.02‰双向；URL中的20150912不是经济生效日。"
+    },
+    {
+      "source_key": "chinaclear_transfer_half_20220429",
+      "url": "https://www.chinaclear.cn/zdjs/gszb/202204/837e3c5031104aa099d6597ba381342a.shtml",
+      "content_sha256": "sha256:df193394f3e06b6adad9e01ceea796be470e59b41b718eaf129b6644b0977703",
+      "clause": "中国结算原始通知：2022-04-29起沪深A股过户费由0.02‰降至0.01‰双向。"
+    },
+    {
+      "source_key": "sse_stamp_half_20230828",
+      "url": "https://www.sse.com.cn/aboutus/mediacenter/hotandd/c/c_20230827_5725662.shtml",
+      "content_sha256": "sha256:e172b3255c8acb65bf8c68753db01e24561049be22fe20fbb6eac63e1ee46d73",
+      "clause": "2023-08-28起证券交易印花税减半，卖出额税率从0.001变为0.0005。"
+    },
+    {
+      "source_key": "chinaclear_shanghai_boundary_20251231",
+      "url": "https://www.chinaclear.cn/zdjs/fbzyls/202512/922adc26c2ff4865930c7fb77688bb8a/files/上海市场证券登记结算业务收费及代收税费一览表.pdf",
+      "content_sha256": "sha256:84a99e563cb8e84e264c88e3bea2df5f4ac50b1e95330417ec30e2b2566d862f",
+      "clause": "官网索引日期2025-12-31；PDF标明2026-01-01更新：A股过户费0.01‰双向、印花税1‰减半。尾注10限定本次更新为B股/存托凭证发行人分红、ETF/货币基金申赎项目。作为年末边界交叉核对，不作为2022生效日证据。"
+    },
+    {
+      "source_key": "chinaclear_shenzhen_boundary_20251231",
+      "url": "https://www.chinaclear.cn/zdjs/fbzyls/202512/a59388fbfa714c5fa546784891a42e30/files/深圳市场证券登记结算业务收费及代收税费一览表.pdf",
+      "content_sha256": "sha256:dff4a06ce20e180f4a85ddae138211dcf7dd3246fb84775453cfd21cbaec6573",
+      "clause": "官网索引日期2025-12-31；PDF标明2026-01-01更新：A股过户费0.01‰双向、印花税1‰减半。尾注9限定本次更新为B股/存托凭证发行人分红、ETF申赎及H股全流通项目。作为年末边界交叉核对，不作为2022生效日证据。"
+    }
+  ],
+  "verified_from": "2018-12-28",
+  "verified_through": "2025-12-31",
+  "limitations": [
+    "Fees apply only within the explicit source-verified window; an open effective interval does not verify the future.",
+    "Broker commission and its minimum are separate declared model assumptions."
+  ]
+}

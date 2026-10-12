@@ -1,0 +1,32 @@
+contract_version: stock_experiment_config_v1
+specs:
+  label:
+    contract_type: LabelSpec
+    contract_version: '2'
+    metadata: {}
+    name: 40d_adjusted_open_close_return
+    key:
+    - security_id
+    - session
+    horizon_sessions: 40
+    feature_session: f
+    formula: close(f+h) / open(f+1) - 1
+    return_start_rule: next_session_open
+    return_end_rule: horizon_session_close
+    return_start_offset_sessions: 1
+    return_end_offset_sessions: 40
+    price_basis: common_anchor_adjusted_v1
+    benchmark_semantics: absolute_return
+    corporate_action_semantics: factor_ratio_no_separate_cashflow
+    # Raw return definition only. dataset.yaml core_cs_batch_v1 applies the
+    # existing forward_label_cs_zscore_v1 to mature training cross-sections.
+    normalization_policy: none
+    maturity:
+      contract_type: MaturitySpec
+      contract_version: '1'
+      metadata: {}
+      lag_sessions: 40
+      rule: all_outcome_dependencies_strictly_before_fit_cutoff
+      calendar_policy: actual_exchange_sessions
+      availability_rule: max_endpoint_price_factor_anchor_usable_from
+    missing_delisting_policy: invalid_null_preserve_grid
