@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
+import weakref
 from unittest.mock import patch
 
 from axiom_research import (ExperimentReader, ExperimentRecordError, ExperimentStore,
@@ -13,6 +14,31 @@ from axiom_research.stock_artifacts import digest, write_json
 from axiom_research import stock_result_projection as projection
 from axiom_research.stock_matrix_folds import _predictions
 from test_result_metadata_budget import saved_output_fixture
+
+
+def multi_fold_fixture(root, count):
+    results = []
+    for minute in range(count):
+        part = root/str(minute); part.mkdir()
+        cfg, result = saved_output_fixture(part, padding_bytes=32, cutoff_minute=minute)
+        results.append(result)
+    cfg = deepcopy(cfg)
+    specs = [result['batch_manifest']['definition']['fold_specs'][0] for result in results]
+    cfg['dataset']['fold_specs'] = specs
+    cfg['dataset_ref'] = digest(cfg['dataset'])
+    cfg['configuration_ref'] = digest(dict(contract_version='stock_sequential_effective_configuration_v1',
+        specification_ref=cfg['specification']['configuration_ref'], dataset_ref=cfg['dataset_ref']))
+    result = deepcopy(results[0]); batch = result['batch_manifest']
+    batch['definition']['fold_specs'] = specs
+    batch['definition_ref'] = digest(batch['definition'])
+    batch['folds'] = [item['batch_manifest']['folds'][0] for item in results]
+    batch['batch_ref'] = digest({key: value for key, value in batch.items()
+                                if key not in ('batch_ref', 'content_digest')})
+    batch['content_digest'] = digest({key: value for key, value in batch.items() if key != 'content_digest'})
+    result.update(configuration_ref=cfg['configuration_ref'], dataset_configuration_ref=cfg['dataset_ref'],
+        folds=[item['folds'][0] for item in results],
+        prediction_bindings=[item['prediction_bindings'][0] for item in results])
+    return cfg, result
 
 
 class ResultProjectionReuseTests(unittest.TestCase):
@@ -149,6 +175,55 @@ class ResultProjectionReuseTests(unittest.TestCase):
             target = derived/'a'/'model.json'; target.write_bytes(target.read_bytes() + b' ')
             with self.assertRaises(ValueError):
                 projection.load_stock_prediction_bindings(path, research_root=self.root)
+
+    def test_multi_fold_registration_releases_rows_before_the_next_fold(self):
+        root = self.root/'multiple'; root.mkdir()
+        cfg, result = multi_fold_fixture(root, 4)
+        receipt = _save_stock_sequential_receipt(result, destination=root)
+        context = dict(request_path=root/'request.json', index_path=root/'index.json', roots={'research':root})
+        begin_stock_result_registration(cfg, **context, required_stages=['training'])
+        row_arrays = []; rows = []; alive_at_ingress = []; alive_after_fold = []
+        class TrackedRows(list):
+            pass
+        class TrackedRow(dict):
+            pass
+        checked = projection._checked; fold_outputs = projection._fold_outputs
+        def track(path, *args, **kwargs):
+            value = checked(path, *args, **kwargs)
+            if Path(path).name == 'predictions.json':
+                value['rows'] = TrackedRows(TrackedRow(row) for row in value['rows'])
+                row_arrays.append(weakref.ref(value['rows']))
+                rows.extend(weakref.ref(row) for row in value['rows'])
+                alive_at_ingress.append(sum(ref() is not None for ref in row_arrays))
+            return value
+        def after_fold(*args, **kwargs):
+            saved = fold_outputs(*args, **kwargs)
+            alive_after_fold.append((sum(ref() is not None for ref in row_arrays),
+                                     sum(ref() is not None for ref in rows)))
+            return saved
+        with patch.object(projection, '_checked', track), patch.object(projection, '_fold_outputs', after_fold), \
+             patch.object(projection, 'load_stock_prediction_projection',
+                          side_effect=AssertionError('registration requested complete rows')):
+            head = publish_stock_result(**context, experiment_result=receipt)
+        self.assertEqual(head['status'], 'COMPLETE')
+        self.assertEqual(alive_at_ingress, [1]*4)
+        self.assertEqual(alive_after_fold, [(0, 0)]*4)
+        self.assertTrue(all(ref() is None for ref in [*row_arrays, *rows]))
+
+    def test_public_prediction_read_returns_all_rows_with_only_one_extra_leaf_read(self):
+        calls = Counter(); checked = projection._checked
+        def count(path, *args, **kwargs):
+            calls[Path(path).name] += 1
+            return checked(path, *args, **kwargs)
+        with patch.object(projection, '_checked', count), patch(
+            'axiom_research.stock_matrix_folds._predictions', wraps=_predictions) as validate:
+            saved = projection.load_stock_prediction_projection(self.folder/'predictions.json', research_root=self.root)
+        self.assertEqual(validate.call_count, 1)
+        self.assertEqual(calls['predictions.json'], 2)
+        self.assertEqual(saved.wire['rows'][0]['score'], .25)
+        for name, count in calls.items():
+            if name != 'predictions.json':
+                self.assertEqual(count, 1, name)
 
 
 if __name__ == '__main__':

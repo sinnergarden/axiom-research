@@ -199,7 +199,7 @@ def load_stock_prediction_bindings(path, *, research_root=None):
 
 
 def _fold_outputs(base, root):
-    """Retain only navigation/prediction snapshots; release large training slices."""
+    """Retain narrow admitted headers; release every fold's decoded row arrays."""
     manifest = _metadata(_local(base / "manifest.json", root))
     from .stock_matrix_folds import OUTPUTS, _predictions
     expected = set(OUTPUTS) | {"fold.json", "booster.txt"}
@@ -254,8 +254,11 @@ def _fold_outputs(base, root):
         common["target_spec"] = definition["target_spec"]
     _predictions(predictions, features, common, definition["fold_spec"], model)
     _require(all(mark(p) == m for p, m in marks.items()), "fold changed during projection")
-    return {"fold.json": fold, "predictions.json": predictions}, {
-        name: digest_stream(documents[name]) for name in ("model.json", "predictions.json")}
+    header = {key: predictions[key] for key in
+              ("contract_version", "signal_run_ref", "model_ref", "feature_ref", "fold_spec_ref")}
+    return {"fold.json": fold, "prediction_header": header}, {
+        **{name: digest_stream(documents[name]) for name in ("model.json", "predictions.json")},
+        "prediction_file_digest": manifest["files"]["predictions.json"]}
 
 
 def _saved_fold_outputs(path, root):
@@ -375,14 +378,27 @@ def load_stock_result_configuration(path):
     return StockSavedProjection(value, definition["configuration_ref"], value["content_digest"])
 
 
-def load_stock_prediction_projection(path, *, research_root=None):
-    """Original saved prediction after output-only fold integrity/clock validation."""
+def _load_stock_prediction_registration_projection(path, *, research_root=None):
+    """Internal identity/lineage snapshot from the exact admitted prediction bytes."""
     with _projection_session():
-        # A PredictionRun is the exact leaf admitted by its original fold.
         base, root, (documents, content_refs) = _saved_fold_outputs(Path(path).parent, research_root)
         _require(_local(path, root) == base / "predictions.json", "original prediction locator required")
-        value = documents["predictions.json"]
+        value = documents["prediction_header"]
         return StockSavedProjection(deepcopy(value), value["signal_run_ref"], content_refs["predictions.json"])
+
+
+def load_stock_prediction_projection(path, *, research_root=None):
+    """Return the complete original prediction after output/clock validation.
+
+    Registration needs only the admitted header. An explicit full-object read
+    decodes and hashes this prediction leaf again, retaining no rows in the
+    session; it never repeats the other fold leaf or clock validations.
+    """
+    with _projection_session():
+        base, root, (_, content_refs) = _saved_fold_outputs(Path(path).parent, research_root)
+        _require(_local(path, root) == base / "predictions.json", "original prediction locator required")
+        value = _checked(base / "predictions.json", content_refs["prediction_file_digest"])
+        return StockSavedProjection(value, value["signal_run_ref"], content_refs["predictions.json"])
 
 
 def _verify_configuration_outputs(configuration, sequential, batch, folds, root):
@@ -491,7 +507,7 @@ def verify_result_artifacts(manifest, artifacts, paths, roots):
             elif kind == "StockPredictionBindings": saved = load_stock_prediction_bindings(path, research_root=roots["research"])
             elif kind == "StockMLFoldProjection": saved = load_stock_fold_projection(path, research_root=roots["research"])
             elif kind == "StockPredictionRun":
-                saved = load_stock_prediction_projection(path, research_root=roots["research"])
+                saved = _load_stock_prediction_registration_projection(path, research_root=roots["research"])
             elif kind == "StockDerivedSignal":
                 from .stock_derived_signal import load_stock_derived_signal
                 obj = load_stock_derived_signal(path, research_root=roots["research"])

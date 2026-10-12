@@ -19,11 +19,11 @@ from axiom_research.stock_training import resolve_stock_training_spec
 from test_stock_target_config_blocks import label, training
 
 
-def saved_output_fixture(root, *, padding_bytes=3*1024**2):
+def saved_output_fixture(root, *, padding_bytes=3*1024**2, cutoff_minute=0):
     """Declare small frozen values and headers; these are not fitted-model evidence."""
     specs={'label':label(), 'model':training()}; refs={k:semantic_identity(v) for k,v in specs.items()}
     target=resolve_stock_label_spec(specs['label']); parameters,rounds,model_binding=resolve_stock_training_spec(specs['model'])
-    day='2024-01-03'; calendar=['2024-01-02',day]; cutoff=day+'T13:00:00Z'
+    day='2024-01-03'; calendar=['2024-01-02',day]; cutoff=f'{day}T13:{cutoff_minute:02d}:00Z'
     scope=dict(calendar=calendar,sessions=[day],universe=['A'],evaluation_cutoff='2024-02-01T00:00:00Z')
     spec=dict(inference_cutoff_by_session={day:cutoff})
     inputs={'contract_version':'stock_ml_saved_inputs_v5','ancestor':str(root/'unopened-ancestors.json')}
