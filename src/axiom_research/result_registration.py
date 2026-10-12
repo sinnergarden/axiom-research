@@ -7,7 +7,7 @@ from .experiments import ExperimentStore, ExperimentReader, _require, _now
 from .stock_artifacts import digest, write_json
 from .stock_result_projection import (load_stock_result_configuration,
     load_stock_sequential_result, load_stock_fold_projection, load_stock_prediction_bindings,
-    _saved_account_status)
+    _saved_account_status, _with_projection_session)
 
 STOCK_LIMITS = dict(max_folds=10, max_prediction_rows=20000, max_market_rows=25000,
     max_input_bytes=64*1024*1024, max_read_bytes=64*1024, max_block_bytes=64*1024*1024,
@@ -158,6 +158,7 @@ def _begin_stock_result_registration(configuration, *, index_path, roots, reques
     return frozen
 
 
+@_with_projection_session(check_on_exit=False)
 def publish_stock_result(request_path, *, index_path, roots, experiment_result=None,
         derived_signals=(), signal_evaluation=None, engine_handoff=None, failure=None):
     """Append a manifest revision referencing verified outputs in place.

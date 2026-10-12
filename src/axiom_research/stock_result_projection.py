@@ -2,11 +2,126 @@
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 import json
+import os
 
 from .stock_artifacts import digest, digest_stream, file_digest
 from .result_discovery import read_json, mark
 from .experiments import _require, _pairs
+
+
+_SESSION = ContextVar("stock_result_projection_session", default=None)
+
+
+class _ProjectionSession:
+    """One owner read transaction, retaining snapshots rather than trust flags."""
+    def __init__(self):
+        self.pid = os.getpid()
+        self.marks = {}
+        self.locators = {}
+        self.cache = {}
+        self.collectors = []
+
+    def observe(self, path):
+        path = Path(path).absolute()
+        current = mark(path)
+        _require(self.marks.setdefault(path, current) == current,
+                 "artifact changed during projection session")
+        for files, _ in self.collectors:
+            files.add(path)
+        return current
+
+    def locate(self, path, root):
+        key = Path(path).absolute(), Path(root).resolve(strict=True)
+        resolved = key[0].resolve(strict=True)
+        _require(resolved.is_relative_to(key[1]), "nested output escapes Research root")
+        _require(self.locators.setdefault(key, resolved) == resolved,
+                 "artifact locator changed during projection session")
+        for _, locators in self.collectors:
+            locators.add(key)
+        return resolved
+
+    def check(self, files=None, locators=None):
+        _require(self.pid == os.getpid(), "projection session belongs to another process")
+        for path in self.marks if files is None else files:
+            self.observe(path)
+        for path, root in self.locators if locators is None else locators:
+            self.locate(path, root)
+
+    def saved(self, key, loader):
+        _require(self.pid == os.getpid(), "projection session belongs to another process")
+        if key in self.cache:
+            value, files, locators = self.cache[key]
+            self.check(files, locators)
+            return value
+        dependencies = set(), set()
+        self.collectors.append(dependencies)
+        try:
+            value = loader()
+            self.check(*dependencies)
+            # Derived owns a different parent-byte closure. Until that owner
+            # participates in this transaction, keep its public loader checks.
+            wire = value.wire if isinstance(value, StockSavedProjection) else {}
+            frames = wire.get("prediction_input", wire).get("frames", [])
+            if not wire.get("derived_signals") and not any(f.get("kind") == "derived" for f in frames):
+                self.cache[key] = value, *dependencies
+            return value
+        finally:
+            self.collectors.pop()
+
+
+@contextmanager
+def _projection_session(*, check_on_exit=True):
+    """Nested public loaders share this call's admission; cold calls start empty."""
+    active = _SESSION.get()
+    if active is not None:
+        _require(active.pid == os.getpid(), "projection session belongs to another process")
+        yield active
+        return
+    session = _ProjectionSession()
+    token = _SESSION.set(session)
+    try:
+        yield session
+        if check_on_exit:
+            session.check()
+    finally:
+        _SESSION.reset(token)
+
+
+def _cached_projection(loader):
+    @wraps(loader)
+    def load(path, **options):
+        with _projection_session() as session:
+            root = options.get("research_root")
+            root = None if root is None else Path(root).resolve(strict=True)
+            resolved = Path(path).resolve(strict=True)
+            if root is not None:
+                _local(path, root)
+            # Type/loader and trusted root are part of admission, never path alone.
+            key = loader.__name__, resolved, root
+            return deepcopy(session.saved(key, lambda: loader(resolved, **options)))
+    return load
+
+
+def _with_projection_session(operation=None, *, check_on_exit=True):
+    if operation is None:
+        return lambda function: _with_projection_session(function, check_on_exit=check_on_exit)
+    @wraps(operation)
+    def call(*args, **kwargs):
+        with _projection_session(check_on_exit=check_on_exit):
+            return operation(*args, **kwargs)
+    return call
+
+
+def _metadata(path):
+    session = _SESSION.get()
+    before = session.observe(path) if session is not None else mark(path)
+    value = read_json(path)
+    _require(mark(path) == before, "saved metadata changed during projection")
+    return value
 
 
 @dataclass(frozen=True)
@@ -25,6 +140,9 @@ def _sealed(value, field):
 
 
 def _local(path, root):
+    session = _SESSION.get()
+    if session is not None:
+        return session.locate(path, root)
     resolved = Path(path).resolve(strict=True)
     _require(resolved.is_relative_to(Path(root).resolve(strict=True)), "nested output escapes Research root")
     return resolved
@@ -32,19 +150,21 @@ def _local(path, root):
 
 def _checked(path, expected=None):
     path = Path(path)
-    before = mark(path)
+    session = _SESSION.get()
+    before = session.observe(path) if session is not None else mark(path)
     _require(before[2] <= 256 * 1024 * 1024, "saved output exceeds projection read budget")
     payload = path.read_bytes()
     from hashlib import sha256
-    _require(mark(path) == before and (expected is None or
+    _require(len(payload) == before[2] and mark(path) == before and (expected is None or
              "sha256:" + sha256(payload).hexdigest() == expected), "saved output changed or hash mismatch")
     return json.loads(payload, object_pairs_hook=_pairs, parse_constant=lambda _: (
         _ for _ in ()).throw(ValueError("nonfinite saved output")))
 
 
+@_cached_projection
 def load_stock_ml_batch_manifest(path):
     """Verify just the saved batch document; never expand its prepared-view parents."""
-    value = read_json(path)
+    value = _metadata(path)
     _require(value["contract_version"] in ("stock_ml_batch_inputs_v3",
         "stock_ml_batch_inputs_v4", "stock_ml_batch_inputs_v5") and
         value["status"] == "COMPLETE", "unsupported saved batch")
@@ -55,9 +175,10 @@ def load_stock_ml_batch_manifest(path):
     return StockSavedProjection(value, value["batch_ref"], value["content_digest"])
 
 
+@_cached_projection
 def load_stock_prediction_bindings(path, *, research_root=None):
     """Verify original frame descriptors and the existing Engine logical input identity."""
-    value = read_json(_local(path, research_root) if research_root is not None else path)
+    value = _metadata(_local(path, research_root) if research_root is not None else path)
     _require(type(value) is list and bool(value), "original prediction bindings required")
     from axiom_engine.runtime.stock_stream_contracts import validate_raw_binding, logical_ref
     seen = set()
@@ -77,17 +198,9 @@ def load_stock_prediction_bindings(path, *, research_root=None):
     return StockSavedProjection(logical, reference, digest(value))
 
 
-def load_stock_fold_projection(path, *, research_root=None, batch_item=None, binding=None):
-    """Verify saved fold outputs, not their large training/Feature ancestors.
-
-    This output integrity/clock projection complements the full fold loader; it
-    does not re-establish training-input or native-price numerical validity.
-    """
-    path = Path(path)
-    base = path.parent if path.is_file() else path
-    root = research_root or base
-    base = _local(base, root)
-    manifest = read_json(_local(base / "manifest.json", root))
+def _fold_outputs(base, root):
+    """Retain only navigation/prediction snapshots; release large training slices."""
+    manifest = _metadata(_local(base / "manifest.json", root))
     from .stock_matrix_folds import OUTPUTS, _predictions
     expected = set(OUTPUTS) | {"fold.json", "booster.txt"}
     _require(manifest["contract_version"] == "stock_ml_fold_manifest_v2" and
@@ -95,7 +208,7 @@ def load_stock_fold_projection(path, *, research_root=None, batch_item=None, bin
     documents = {}
     marks = {}
     for name, expected_digest in manifest["files"].items():
-        target = _local(base / name, root); marks[target] = mark(target)
+        target = _local(base / name, root); marks[target] = _SESSION.get().observe(target)
         if name == "booster.txt":
             _require(file_digest(target) == expected_digest, "booster file mismatch")
         else:
@@ -140,33 +253,56 @@ def load_stock_fold_projection(path, *, research_root=None, batch_item=None, bin
     if "target_spec" in definition:
         common["target_spec"] = definition["target_spec"]
     _predictions(predictions, features, common, definition["fold_spec"], model)
-    if batch_item is not None:
-        _require(batch_item["fold_spec"] == definition["fold_spec"] and
-                 batch_item["input_manifest"] == definition["input_manifest"], "fold/batch mismatch")
-    if binding is not None:
-        _require(all(binding[k] == fold[k] for k in
-            ("fold_ref", "model_ref", "feature_ref", "signal_run_ref")) and
-            binding["fold_spec_ref"] == definition["fold_spec_ref"], "original frame/fold mismatch")
-        for key, name in (("model_metadata_artifact", "model.json"),
-                          ("prediction_artifact", "predictions.json")):
-            ref = binding[key]
-            _require(_local(ref["manifest_uri"], root) == base / name and
-                     ref["content_digest"] == digest_stream(documents[name]) and
-                     ref["artifact_id"] == fold["model_ref" if name == "model.json" else "signal_run_ref"],
-                     "frame output artifact mismatch")
-        ref = binding["fold_spec_artifact"]
-        _require(ref["manifest_uri"] == str(base / "fold.json") + "#definition/fold_spec" and
-                 ref["artifact_id"] == definition["fold_spec_ref"] ==
-                 ref["content_digest"], "frame fold-spec mismatch")
     _require(all(mark(p) == m for p, m in marks.items()), "fold changed during projection")
-    return StockSavedProjection(fold, fold["fold_ref"], fold["content_digest"])
+    return {"fold.json": fold, "predictions.json": predictions}, {
+        name: digest_stream(documents[name]) for name in ("model.json", "predictions.json")}
 
 
+def _saved_fold_outputs(path, root):
+    path = Path(path)
+    base = path.parent if path.is_file() else path
+    root = Path(root or base).resolve(strict=True)
+    base = _local(base, root)
+    session = _SESSION.get()
+    return base, root, session.saved(("fold_outputs", base, root), lambda: _fold_outputs(base, root))
+
+
+def load_stock_fold_projection(path, *, research_root=None, batch_item=None, binding=None):
+    """Verify saved output integrity/clocks; always check requested batch/binding.
+
+    Training/Feature ancestors are not expanded. Only this read transaction's
+    exact admitted output snapshots can serve the other result projections.
+    """
+    with _projection_session():
+        base, root, (documents, content_refs) = _saved_fold_outputs(path, research_root)
+        fold = documents["fold.json"]; definition = fold["definition"]
+        if batch_item is not None:
+            _require(batch_item["fold_spec"] == definition["fold_spec"] and
+                     batch_item["input_manifest"] == definition["input_manifest"], "fold/batch mismatch")
+        if binding is not None:
+            _require(all(binding[k] == fold[k] for k in
+                ("fold_ref", "model_ref", "feature_ref", "signal_run_ref")) and
+                binding["fold_spec_ref"] == definition["fold_spec_ref"], "original frame/fold mismatch")
+            for key, name in (("model_metadata_artifact", "model.json"),
+                              ("prediction_artifact", "predictions.json")):
+                ref = binding[key]
+                _require(_local(ref["manifest_uri"], root) == base / name and
+                         ref["content_digest"] == content_refs[name] and
+                         ref["artifact_id"] == fold["model_ref" if name == "model.json" else "signal_run_ref"],
+                         "frame output artifact mismatch")
+            ref = binding["fold_spec_artifact"]
+            _require(ref["manifest_uri"] == str(base / "fold.json") + "#definition/fold_spec" and
+                     ref["artifact_id"] == definition["fold_spec_ref"] ==
+                     ref["content_digest"], "frame fold-spec mismatch")
+        return StockSavedProjection(deepcopy(fold), fold["fold_ref"], fold["content_digest"])
+
+
+@_cached_projection
 def load_stock_sequential_result(path, *, research_root=None):
     """Public lightweight A01 saved-result projection bound to batch and frames."""
     path = Path(path).resolve(strict=True); root = research_root or path.parent
     _local(path, root)
-    value = read_json(path)
+    value = _metadata(path)
     batch = load_stock_ml_batch_manifest(_local(path.parent / "batch.json", root))
     bindings = load_stock_prediction_bindings(_local(path.parent / "prediction-bindings.json", root), research_root=root)
     _require(value["batch_manifest"] == batch.wire and
@@ -206,8 +342,9 @@ def load_stock_sequential_result(path, *, research_root=None):
     return StockSavedProjection(projection, identity, identity)
 
 
+@_cached_projection
 def load_stock_result_configuration(path):
-    value = read_json(path); _sealed(value, "content_digest")
+    value = _metadata(path); _sealed(value, "content_digest")
     _require(value["contract_version"] == "stock_result_configuration_v1", "unsupported result configuration")
     definition = value["configuration"]
     from .api import from_dict, semantic_identity
@@ -240,9 +377,12 @@ def load_stock_result_configuration(path):
 
 def load_stock_prediction_projection(path, *, research_root=None):
     """Original saved prediction after output-only fold integrity/clock validation."""
-    load_stock_fold_projection(Path(path).parent, research_root=research_root)
-    value = _checked(path)
-    return StockSavedProjection(value, value["signal_run_ref"], digest_stream(value))
+    with _projection_session():
+        # A PredictionRun is the exact leaf admitted by its original fold.
+        base, root, (documents, content_refs) = _saved_fold_outputs(Path(path).parent, research_root)
+        _require(_local(path, root) == base / "predictions.json", "original prediction locator required")
+        value = documents["predictions.json"]
+        return StockSavedProjection(deepcopy(value), value["signal_run_ref"], content_refs["predictions.json"])
 
 
 def _verify_configuration_outputs(configuration, sequential, batch, folds, root):
@@ -338,6 +478,7 @@ def _saved_account_status(wire):
     return state, stopped["reason"]
 
 
+@_with_projection_session
 def verify_result_artifacts(manifest, artifacts, paths, roots):
     """Fixed owner loaders; no loader names or code are read from manifests."""
     verified = {}; derived_bindings = {}
