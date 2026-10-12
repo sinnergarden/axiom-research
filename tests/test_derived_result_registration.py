@@ -166,6 +166,10 @@ class DerivedResultRegistrationTests(unittest.TestCase):
                 return original_open(path,*args,**kwargs)
             with patch.object(Path,'open',guarded),self.assertRaisesRegex(ValueError,'escapes research_root'):
                 publish_stock_result(**self.context,derived_signals=[self.second])
+            from axiom_research.saved_read_root import saved_read_root
+            with saved_read_root(self.root), patch.object(Path,'open',guarded), \
+                    self.assertRaisesRegex(ValueError,'escapes research_root'):
+                load_stock_derived_signal(self.second)
         self.assertEqual(old,(self.index.read_bytes(),self.index.stat().st_mtime_ns))
 
     def test_derived_account_original_binding_and_blocked_state(self):

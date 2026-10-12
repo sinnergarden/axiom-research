@@ -125,8 +125,11 @@ def build_stock_derived_signal(signal_plan,*,prediction_inputs,context,destinati
 
 def load_stock_derived_signal(path,*,limits=None,_shared_bytes=0,research_root=None):
     """Read a saved directory or its signal.json under an optional trusted root."""
+    from contextlib import nullcontext
     from .saved_read_root import saved_read_root, checked_saved_path
-    with saved_read_root(research_root):
+    # Existing nested callers inherit their outer saved-read guard. An omitted
+    # root must not disable the guard previously applied by SignalEval.
+    with saved_read_root(research_root) if research_root is not None else nullcontext():
         path=checked_saved_path(path)
         if path.is_file():
             require(path.name=='signal.json','saved Derived signal.json locator required')
