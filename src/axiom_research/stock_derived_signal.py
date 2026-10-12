@@ -25,6 +25,8 @@ class StockDerivedSignal:
     @property
     def identity(self):return self.to_dict()['signal_run_ref']
     @property
+    def content_digest(self):return digest(self.to_dict())
+    @property
     def artifact(self):
         sealed(self._manifest,'content_digest');self.to_dict()
         return deepcopy(self._manifest['signal_artifact'])
@@ -59,7 +61,14 @@ def _parent(run):
     return prediction,binding,files
 
 
-def build_stock_derived_signal(signal_plan,*,prediction_inputs,context,destination,batch=None):
+def _register_saved(saved, registration):
+    if registration is not None:
+        from .result_registration import publish_stock_result
+        publish_stock_result(**registration, derived_signals=[saved.path])
+    return saved
+
+
+def build_stock_derived_signal(signal_plan,*,prediction_inputs,context,destination,batch=None,registration=None):
     """One actual Core SignalPlan call over original fully admitted raw folds.
 
     prediction_inputs maps each declared alias to a saved fold directory. Use
@@ -86,7 +95,7 @@ def build_stock_derived_signal(signal_plan,*,prediction_inputs,context,destinati
     if target.exists():
         saved=load_stock_derived_signal(target)
         require(saved._manifest['definition']==definition,'saved DerivedSignal request mismatch')
-        return StockDerivedSignal(saved.path,saved.to_dict(),deepcopy(saved._manifest),True)
+        return _register_saved(StockDerivedSignal(saved.path,saved.to_dict(),deepcopy(saved._manifest),True),registration)
     # Core owns CS normalization, weighted multiplication/addition order,
     # stage, validity, clocks and the actual resulting frame identities.
     signal=execute_signal_plan(wire,inputs=parents,context=deepcopy(context)).to_dict()
@@ -110,11 +119,22 @@ def build_stock_derived_signal(signal_plan,*,prediction_inputs,context,destinati
             if exc.errno not in (errno.EEXIST,errno.ENOTEMPTY):raise
             saved=load_stock_derived_signal(target)
             require(saved.to_dict()==signal and saved._manifest==manifest,'concurrent DerivedSignal conflict')
-            return saved
-    return load_stock_derived_signal(target)
+            return _register_saved(saved,registration)
+    return _register_saved(load_stock_derived_signal(target),registration)
 
 
-def load_stock_derived_signal(path,*,limits=None,_shared_bytes=0):
+def load_stock_derived_signal(path,*,limits=None,_shared_bytes=0,research_root=None):
+    """Read a saved directory or its signal.json under an optional trusted root."""
+    from .saved_read_root import saved_read_root, checked_saved_path
+    with saved_read_root(research_root):
+        path=checked_saved_path(path)
+        if path.is_file():
+            require(path.name=='signal.json','saved Derived signal.json locator required')
+            path=path.parent
+        return _load_stock_derived_signal(path,limits=limits,_shared_bytes=_shared_bytes)
+
+
+def _load_stock_derived_signal(path,*,limits=None,_shared_bytes=0):
     """Hash/ref-load frozen Core output and saved parents; never import Core.
 
     Original raw folds were fully admitted during build. This loader checks

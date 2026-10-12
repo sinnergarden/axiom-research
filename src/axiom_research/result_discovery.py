@@ -162,7 +162,7 @@ def validate_manifest(value):
                      ref["artifact_id"] == evaluation["evaluation_ref"] and
                      ref["content_digest"] == evaluation["content_digest"], "Evaluation artifact mismatch")
     if value["status"] == "COMPLETE":
-        _require(value["folds"] and value["signals"] and
+        _require(value["signals"] and
                  all(item["status"] == "COMPLETE" for table in ("folds", "signals", "accounts")
                      for item in value[table]), "COMPLETE requires all declared outputs")
     return artifacts
