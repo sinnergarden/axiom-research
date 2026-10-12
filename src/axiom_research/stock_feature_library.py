@@ -1,8 +1,8 @@
 """Research definitions and thin adapters for Engine's incremental Feature store.
 
-Saved source admission stays with its existing Research owner. This adapter
-supports the proved CSI300/vendor profile only. It uses original Data adjustment
-and Core DAG/CS arithmetic; no Feature formula is implemented here.
+Saved source admission stays with its existing Research owner. The configured
+universe uses the admitted daily membership and vendor selection policy. This
+adapter uses original Data adjustment and Core DAG/CS arithmetic.
 """
 from copy import deepcopy
 from contextlib import nullcontext
@@ -41,7 +41,8 @@ class SavedColumnFeatureSource:
         self.metrics={'physical_field_day_hashes':0,'physical_hash_bytes':0}
         manifest,_=verify_feature_column_source(descriptor,store=self.store,
             _dependency_receipts=self._capture_leaf_refs)
-        require(manifest['qlib_view']['universe_name']=='csi300', 'unproved source universe profile')
+        universe_name=manifest['qlib_view']['universe_name']
+        require(type(universe_name) is str and bool(universe_name), 'explicit saved source universe required')
         self.descriptor=deepcopy(descriptor)
         arrays={name:self.store.buffer(desc) for name,desc in manifest['buffers'].items()}
         for name, value in arrays.items():
@@ -68,7 +69,8 @@ class SavedColumnFeatureSource:
 
     def capabilities(self):
         return {'contract_version':'feature_source_capabilities_v1','source_ref':self.source.identity,
-            'universe_profile':'csi300','pit_policies':['best_effort_vendor_v1'],
+            'universe_profile':self.source.manifest['qlib_view']['universe_name'],
+            'pit_policies':[self.source.manifest['spec']['pit_policy']],
             'physical_security_ids':list(self.source.manifest['spec']['universe']),
             'reference_security_ids':list(self.reference_security_ids),
             'sessions':list(self.source.manifest['spec']['read_sessions']), 'daily_anchor':True}

@@ -28,7 +28,6 @@ def _hash_array(value):
 def _source_config(spec):
     from .stock_feature_inputs import _spec
     universe_id=_spec(spec)
-    require(universe_id=='csi300','column source currently supports only the fixed CSI300 profile')
     return {'snapshot':spec['snapshot'],'pit_policy':spec['pit_policy'],
         'symbols':spec['universe'],'universe_id':universe_id,'calendar':spec['calendar'],
         'read_sessions':spec['read_sessions'],'feature_sessions':spec['feature_sessions'],

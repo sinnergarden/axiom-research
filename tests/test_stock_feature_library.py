@@ -14,7 +14,8 @@ from axiom_research.stock_feature_columns import REASONS, feature_column_plan
 from axiom_research.stock_matrix_storage import write_buffer, write_part, instant_us
 
 
-def saved_source(root, *, day_count=6, generation=0, value_shift=0, snapshot='synthetic_only'):
+def saved_source(root, *, day_count=6, generation=0, value_shift=0, snapshot='synthetic_only',
+                 universe_name='csi300', members_by_session=None):
     """Synthetic selected vendor-shaped cells; never used as real data evidence."""
     days=[(date(2020,1,1)+timedelta(days=i)).isoformat() for i in range(day_count)]
     securities=['A','B','C']; shape=(day_count,3,6)
@@ -28,6 +29,9 @@ def saved_source(root, *, day_count=6, generation=0, value_shift=0, snapshot='sy
         'available':np.broadcast_to(available[:,:,None],shape).copy(),'available_validity':np.ones(shape,dtype=bool),
         'reasons':np.zeros(shape,dtype='u1'),'member':np.ones(shape[:2],dtype=bool),
         'member_available':available.copy(),'member_available_validity':np.ones(shape[:2],dtype=bool)}
+    if members_by_session is not None:
+        for day,members in members_by_session.items():
+            arrays['member'][days.index(day)]=[s in members for s in securities]
     buffers={}
     for name,array in arrays.items():
         dtype='bool_u8' if array.dtype.kind=='b' else 'uint8' if array.dtype==np.dtype('u1') else 'int64_le' if array.dtype.kind=='i' else 'float64_le'
@@ -55,7 +59,7 @@ def saved_source(root, *, day_count=6, generation=0, value_shift=0, snapshot='sy
         'cutoff_by_session':{day:day+'T13:00:00Z' for day in days},'snapshot':snapshot,
         'pit_policy':'best_effort_vendor_v1','catalog_ref':catalog.identity,'feature_selection':selection}
     impl={'fixture':digest(['explicit synthetic source'])}
-    manifest=seal({'contract_version':'research_feature_column_source_v1','spec':spec,'qlib_view':{'universe_name':'csi300'},
+    manifest=seal({'contract_version':'research_feature_column_source_v1','spec':spec,'qlib_view':{'universe_name':universe_name},
         'buffers':buffers,'chunks':[{'sessions':days,'evidence':evidence}],'reason_codes':list(REASONS),
         'source_profiles':profiles,'selection_invariance':'declared_vendor_release_visible_at_each_historical_row_cutoff',
         'implementation_sources':impl,'implementation_ref':digest(impl),
