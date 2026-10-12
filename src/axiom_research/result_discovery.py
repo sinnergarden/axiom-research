@@ -49,7 +49,7 @@ def resolve(root_id, relative, roots, *, exists=True):
     return target
 
 
-def read_json(path, maximum=2 * 1024 * 1024):
+def read_json(path, maximum=64 * 1024 * 1024):
     import json
     path = Path(path)
     _require(path.stat().st_size <= maximum, "saved metadata exceeds byte budget")
