@@ -21,16 +21,30 @@
     }
   },
   "result_discovery": {
-    "research_root": "<local_research_result_index_root>",
+    "research_root": "<existing_Research_root_containing_output_root>",
     "engine_root": "<local_Engine_result_root>",
-    "question": "T01 M1通用使用验收：2019–2025周训/每日推理与H40评价",
-    "version": "2019-2025-weekly-H40-v1",
+    "question": {
+      "question_id": "t01-csi300-trend-continuation-2019-2025",
+      "title": "T01 M1通用使用验收：2019–2025周训/每日推理与H40评价",
+      "description": "One fixed 88-feature model with seven-year daily predictions and weekly rolling fits.",
+      "hypothesis": "Medium-term trend continuation while avoiding short-term overheating."
+    },
+    "version": {
+      "label": "2019-2025-weekly-H40-v1",
+      "explanation": "Frozen first-round configuration with two strategies sharing the same saved predictions.",
+      "parameters": {},
+      "input_refs": [],
+      "explicit_changes": []
+    },
     "required_stages": [
       "training",
       "signal_evaluation",
       "accounts"
     ],
-    "strategy_refs": []
+    "strategy_refs": [
+      "sha256:20cb774a768e30be3094b09139b2de795ee012ff965184242c33fc89d8876981",
+      "sha256:e42daba0a367c8de2e267a52c5eca38a9d5d09f6def7856b5c6e19165bc59c28"
+    ]
   },
   "feature_library_training_view": "<absolute_path_to_verified_training_projection_descriptor.json>"
 }

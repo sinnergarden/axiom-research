@@ -76,7 +76,39 @@ do not pass the old profile as complete seven-year coverage. Report the
 actually admitted profile identity and fee values beside
 both local account results. Gross dividends exclude personal dividend taxes.
 
-After replacing the placeholders, use the formal Research CLI:
+Result registration expects an existing Research root containing both
+`output_root` and its `.result-request.json`; the CLI places `index.json` in
+that root. Create the Research and Engine result directories before training.
+`question` and `version` use the existing `create_question` and
+`create_version` object schemas. Because this result declares an accounts
+stage, it must freeze both actual strategy references before its first run.
+The supplied references are the existing factory identities for `primary`
+and `control` in `strategies.json`. A changed strategy requires its own
+factory identity and a new frozen request.
+
+After replacing the placeholders, prepare those directories and confirm the
+references without reading Data, computing Features or executing accounts:
+
+```python
+import json
+from pathlib import Path
+from axiom_engine.core.contracts import Document
+from axiom_engine.core.stock_strategy import stock_strategy_spec
+
+options = json.loads(Path("/absolute/path/options.json").read_text())
+strategies = json.loads(Path("/absolute/path/strategies.json").read_text())
+discovery = options["result_discovery"]
+root = Path(discovery["research_root"]).resolve()
+assert Path(options["output_root"]).resolve().is_relative_to(root)
+root.mkdir(parents=True, exist_ok=True)
+Path(discovery["engine_root"]).mkdir(parents=True, exist_ok=True)
+assert discovery["strategy_refs"] == [
+    Document.from_dict(stock_strategy_spec(**strategies[name])).identity
+    for name in ("primary", "control")
+]
+```
+
+Then use the formal Research CLI:
 
 ```sh
 python examples/a01_one_year.py --options /absolute/path/options.json --stage validate
