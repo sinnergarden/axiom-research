@@ -5,15 +5,23 @@ implementation. The caller declares frozen folds, scopes, original market input
 and budgets, and owns authorization and the public Data/market/source contexts.
 """
 from copy import deepcopy
+from contextlib import nullcontext
 from pathlib import Path
 
 from .stock_fold_inputs import require
 from .stock_artifacts import digest
 
 
-def build_configured_stock_sequential_experiment(data,*,configuration_path,feature_inputs,
-    column_source,destination,reuse_raw_from_batch=None,metrics=None,progress=None,registration=None):
-    """Notebook/worker entry; all schedule and model values come from YAML."""
+def build_configured_stock_sequential_experiment(data=None,*,configuration_path,feature_inputs,
+    column_source=None,destination,reuse_raw_from_batch=None,metrics=None,progress=None,registration=None,
+    prepared_destination=None,prepared_batch=None):
+    """Configured entry with independent prepared inputs and model output location.
+
+    Supply public Feature and COMPLETE batch owners for an unchanged Label,
+    schedule and Feature selection; Data/ColumnSource are then unnecessary.
+    A changed subset/cohort uses preparation with the
+    existing reuse_raw_from_batch path; saved normalized targets are not relabeled.
+    """
     from .stock_experiment_config import load_stock_sequential_configuration
     configuration=load_stock_sequential_configuration(configuration_path);dataset=configuration['dataset']
     from .result_registration import (begin_stock_result_registration, publish_stock_result,
@@ -34,7 +42,8 @@ def build_configured_stock_sequential_experiment(data,*,configuration_path,featu
             feature_inputs=feature_inputs,fold_specs=dataset['fold_specs'],column_source=column_source,
             preparation_options=dataset['preparation_options'],scope=dataset['scope'],destination=destination,
             model_feature_selection=dataset['model_feature_selection'],signal_contexts=dataset['signal_contexts'],
-            reuse_raw_from_batch=reuse_raw_from_batch,metrics=metrics,progress=progress)
+            reuse_raw_from_batch=reuse_raw_from_batch,metrics=metrics,progress=progress,
+            prepared_destination=prepared_destination,prepared_batch=prepared_batch)
         result.update(configuration_ref=configuration['configuration_ref'],dataset_configuration_ref=configuration['dataset_ref'],
             configuration_files=configuration['configuration_files'])
         saved_path=_save_stock_sequential_receipt(result,destination=root,metrics=metrics)
@@ -47,19 +56,22 @@ def build_configured_stock_sequential_experiment(data,*,configuration_path,featu
 
 def build_stock_sequential_experiment(data, *, configuration_paths, feature_inputs,
     fold_specs, column_source, preparation_options, scope, destination,
-    model_feature_selection=None, signal_contexts=None, reuse_raw_from_batch=None,metrics=None, progress=None):
+    model_feature_selection=None, signal_contexts=None, reuse_raw_from_batch=None,metrics=None, progress=None,
+    prepared_destination=None,prepared_batch=None):
     """Load typed specs once and run the concrete shared preparation sequence."""
     from .stock_experiment_config import load_stock_experiment_specs
     return _build_stock_sequential_experiment(data,configuration=load_stock_experiment_specs(configuration_paths),
         feature_inputs=feature_inputs,fold_specs=fold_specs,column_source=column_source,
         preparation_options=preparation_options,scope=scope,destination=destination,
         model_feature_selection=model_feature_selection,signal_contexts=signal_contexts,
-        reuse_raw_from_batch=reuse_raw_from_batch,metrics=metrics,progress=progress)
+        reuse_raw_from_batch=reuse_raw_from_batch,metrics=metrics,progress=progress,
+        prepared_destination=prepared_destination,prepared_batch=prepared_batch)
 
 
 def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
     fold_specs, column_source, preparation_options, scope, destination,
-    model_feature_selection=None, signal_contexts=None, reuse_raw_from_batch=None,metrics=None, progress=None):
+    model_feature_selection=None, signal_contexts=None, reuse_raw_from_batch=None,metrics=None, progress=None,
+    prepared_destination=None,prepared_batch=None):
     """Prepare/build/freeze a sequence through one shared Feature/source owner.
 
     The executable configuration roles here are label/model and optional signal.
@@ -77,7 +89,8 @@ def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
     config=configuration;specs=config['specs']
     require({'label','model'}<=set(specs)<= {'label','model','signal'},
         'this stock entry executes label/model/signal only; Dataset/Feature/strategy drafts require explicit owner contracts')
-    require(column_source is not None,'caller-owned public ColumnSource required')
+    require(prepared_batch is not None or column_source is not None,'caller-owned public ColumnSource required for preparation')
+    require(prepared_batch is None or reuse_raw_from_batch is None,'choose COMPLETE prepared inputs or Raw reuse preparation')
     plan=specs.get('signal')
     require((plan is None and signal_contexts is None) or
         (plan is not None and len(plan.inputs)==1 and type(signal_contexts) is dict and
@@ -85,30 +98,45 @@ def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
          semantic_identity(plan.inputs[0].label)==config['spec_refs']['label']),
         'one original raw parent and complete declared Signal contexts required for this entry')
     root=Path(destination).resolve();folds=[];bindings=[];derived=[]
-    with open_stock_ml_batch_preparation(data,feature_inputs=feature_inputs,fold_specs=fold_specs,
-        destination=root/'prepared',preparation_options=preparation_options,label_spec=specs['label'],
-        column_source=column_source,model_feature_selection=model_feature_selection,metrics=metrics,
-        reuse_raw_from_batch=reuse_raw_from_batch,progress=progress) as owner:
-        with open_stock_signal_evaluation_freeze(owner.batch,scope=scope,destination=root/'oos',signal_name='model') as writer:
-            while True:
-                with owner.operation():
-                    item=owner.next_fold()
-                    if item is None:break
+    prepared=None
+    if prepared_batch is not None:
+        prepared=_compatible_prepared_batch(prepared_batch,feature_inputs,fold_specs,preparation_options,
+            specs['label'],model_feature_selection)
+        if metrics is not None:
+            metrics.update(prepared_batch_reused=True,prepared_batch_ref=prepared['batch_ref'],
+                data_read_calls=0,supplier_calls=0,feature_core_calls=0,label_core_calls=0,core_calls=0,
+                raw_operator_calls=0,raw_cache_hits=0,normalized_cache_hits=0,account_calls=0)
+    preparation=(open_stock_ml_batch_preparation(data,feature_inputs=feature_inputs,fold_specs=fold_specs,
+        destination=prepared_destination if prepared_destination is not None else root/'prepared',
+        preparation_options=preparation_options,label_spec=specs['label'],column_source=column_source,
+        model_feature_selection=model_feature_selection,metrics=metrics,reuse_raw_from_batch=reuse_raw_from_batch,
+        progress=progress) if prepared_batch is None else nullcontext(None))
+    with preparation as owner:
+        inputs=owner.batch if owner is not None else prepared_batch
+        with open_stock_signal_evaluation_freeze(inputs,scope=scope,destination=root/'oos',signal_name='model') as writer:
+            for ordinal in range(len(fold_specs)):
+                with owner.operation() if owner is not None else inputs.operation():
+                    item=owner.next_fold() if owner is not None else prepared['folds'][ordinal]
+                    require(item is not None,'prepared fold coverage is incomplete')
                     run=build_stock_ml_fold_from_saved_inputs(item['input_manifest'],fold_spec=item['fold_spec'],
-                        destination=root/'folds',batch=owner.batch,training_spec=specs['model'])
+                        destination=root/'folds',batch=inputs,training_spec=specs['model'],
+                        model_feature_selection=model_feature_selection)
                     # Read the builder's actual saved outputs. No fabricated model or
                     # synthetic combined prediction replaces the original fold refs.
                     prediction,binding,_=_parent(run)
                     if plan is not None:
                         saved=build_stock_derived_signal(plan,prediction_inputs={plan.inputs[0].alias:run.path},
-                            context=signal_contexts[digest(item['fold_spec'])],destination=root/'derived',batch=owner.batch)
+                            context=signal_contexts[digest(item['fold_spec'])],destination=root/'derived',batch=inputs)
                         bindings.append(saved.engine_input_binding())
                         derived.append({'path':str(saved.path),'signal_run_ref':saved.identity})
                     else:bindings.append(binding)
                     folds.append({'path':str(run.path),'fold_ref':run.identity,
                         'signal_run_ref':prediction['signal_run_ref'],'fold_spec_ref':digest(item['fold_spec'])})
                     run=prediction=binding=None
-            batch=owner.finish();frozen=writer.finish()
+            if owner is not None:
+                require(owner.next_fold() is None,'prepared fold coverage exceeds requested schedule')
+            batch=owner.finish() if owner is not None else prepared
+            frozen=writer.finish()
     evaluation_input=frozen
     if derived:
         from .stock_signal_evaluation_derived import save_stock_derived_signal_evaluation_inputs
@@ -118,6 +146,27 @@ def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
     return {'configuration_ref':config['configuration_ref'],'spec_refs':config['spec_refs'],
         'batch_manifest':batch,'folds':folds,'derived_signals':derived,
         'prediction_bindings':bindings,'raw_signal_evaluation_input':frozen,'signal_evaluation_input':evaluation_input}
+
+
+def _compatible_prepared_batch(batch, feature, folds, options, label, selection):
+    """Validate the original prepared definition before any new fit is started."""
+    from .stock_batch import StockMLBatchInputs
+    from .stock_compact_store import StockFeatureView, model_feature_binding
+    from .stock_target_spec import resolve_stock_label_spec
+    require(type(batch) is StockMLBatchInputs,'publicly admitted prepared batch required')
+    require(type(feature) is StockFeatureView,'publicly admitted Feature owner required for prepared reuse')
+    batch._check_sources(); manifest=batch.to_dict(); definition=manifest['definition']
+    require(manifest['contract_version']=='stock_ml_batch_inputs_v5' and manifest['status']=='COMPLETE',
+            'COMPLETE column prepared inputs required')
+    require(definition['fold_specs']==folds and [f['fold_spec'] for f in manifest['folds']]==folds,
+            'prepared fold schedule differs from requested inputs')
+    require(definition['feature_view']==feature.to_dict(),'prepared Feature identity differs from requested inputs')
+    require(definition.get('model_feature_selection')==model_feature_binding(feature,selection),
+            'prepared Feature selection/cohort differs; prepare the new selection using original Raw targets')
+    require(definition['target_spec']==resolve_stock_label_spec(label),'prepared Label definition differs from requested inputs')
+    require(definition['preparation_options']=={**options,'control_layout':options.get('control_layout','fold_controls_v2')},
+            'prepared options differ from requested inputs')
+    return manifest
 
 
 def evaluate_stock_sequential_signals(experiment, *, scope, destination,registration=None):

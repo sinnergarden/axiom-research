@@ -6,6 +6,7 @@ parents. This loader neither reads Data nor creates a second numerical executor.
 """
 from copy import deepcopy
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
 from weakref import WeakKeyDictionary
 import os
@@ -102,6 +103,17 @@ class StockMLBatchInputs:
             return
         require(all(_fingerprint(path) == mark for path, mark in value['fingerprints'].items()),
                 'saved batch source changed; initialize a fresh batch')
+
+    @contextmanager
+    def operation(self):
+        """Borrow the existing input owner and check consumed files at its boundary."""
+        value=_data(self); state=value.get('matrix_state')
+        if state is not None and hasattr(state,'operation'):
+            with state.operation(): yield self
+        else:
+            self._check_sources()
+            try: yield self
+            finally: self._check_sources()
 
     def _project(self, inputs, spec):
         value = _data(self)
