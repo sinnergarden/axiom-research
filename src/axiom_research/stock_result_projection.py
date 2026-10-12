@@ -494,6 +494,97 @@ def _saved_account_status(wire):
     return state, stopped["reason"]
 
 
+def _project_registered_account(basis, roots, *, run_path, evaluation_paths):
+    """Validate new owner bytes against fixed, previously admitted Research identities.
+
+    This deliberately does not call the full binding loader: Derived and fold
+    parents were admitted when this exact basis was registered. Cold full audit
+    remains available through verify_result_artifacts and the public owner loaders.
+    """
+    from .result_discovery import resolve
+    from axiom_engine.runtime import load_stock_backtest_projection, load_backtest_evaluation
+    from axiom_engine.runtime.stock_stream_contracts import logical_ref
+    from .result_registration import STOCK_LIMITS
+    session = _SESSION.get()
+    _require(session is not None, "registered account requires a projection transaction")
+    artifacts = {a["artifact_key"]: a for a in basis["artifacts"]}
+    cfgref = artifacts[basis["configuration_ref"]]
+    _require(cfgref["artifact_type"] == "StockResultConfiguration", "basis configuration required")
+    cfgpath = resolve(cfgref["root_id"], cfgref["relative_path"], roots)
+    cfg = load_stock_result_configuration(_local(cfgpath, roots["research"]))
+    _require((cfg.identity, cfg.content_digest, cfg.wire["contract_version"]) ==
+             (cfgref["artifact_id"], cfgref["content_digest"], cfgref["artifact_contract_version"]) and
+             all(cfg.wire[k] == basis[k] for k in ("result_id", "question_id", "version_ref")),
+             "basis configuration identity mismatch")
+    _require(basis["signals"] and all(s["status"] == "COMPLETE" for s in basis["signals"]) and
+             all(f["status"] == "COMPLETE" for f in basis["folds"]),
+             "basis Research stages are incomplete")
+    if "training" in cfg.wire["required_stages"]:
+        _require(len(basis["folds"]) == len(cfg.wire["configuration"]["dataset"]["fold_specs"]),
+                 "basis training declarations are incomplete")
+    if "signal_evaluation" in cfg.wire["required_stages"]:
+        _require(all(s["evaluation_artifact_keys"] for s in basis["signals"]),
+                 "basis Signal evaluations are incomplete")
+    refs = [a for a in basis["artifacts"] if a["artifact_type"] == "StockPredictionBindings"]
+    _require(len(refs) == 1, "one registered prediction-bindings document required")
+    ref = refs[0]
+    path = resolve(ref["root_id"], ref["relative_path"], roots)
+    frames = _metadata(_local(path, roots["research"]))
+    _require(type(frames) is list and bool(frames) and
+             digest(frames) == ref["content_digest"] and
+             ref["artifact_contract_version"] == "stock_prediction_input_refs_v2",
+             "basis prediction-bindings content identity mismatch")
+    bindings = dict(contract_version="stock_prediction_input_refs_v2", frames=frames)
+    bindings["prediction_ref"] = logical_ref(bindings, "prediction_ref")
+    declared_signals = {s["signal_run_ref"] for s in basis["signals"]}
+    _require(bindings["prediction_ref"] == ref["artifact_id"] and
+             all(f["signal_run_ref"] in declared_signals for f in frames),
+             "basis prediction-bindings identity/declaration mismatch")
+    def owner_path(path):
+        resolved = _local(path, roots["engine"])
+        session.observe(resolved)
+        return resolved
+    def nested(ref):
+        return owner_path(ref["manifest_uri"])
+    run_path = owner_path(run_path)
+    run = load_stock_backtest_projection(run_path, artifact_reader=nested, limits=STOCK_LIMITS)
+    wire = run.verify().wire
+    run_ref = run.input_run_ref
+    inputs = wire["request_manifest"]["prediction_input"]
+    _require(inputs["contract_version"] == "stock_prediction_input_refs_v2" and
+             inputs["prediction_ref"] == logical_ref(inputs, "prediction_ref") == wire["signal_ref"] and
+             bool(inputs["frames"]) and (inputs == bindings or all(f in frames for f in inputs["frames"])),
+             "new account must consume the basis original prediction frames")
+    strategy_ref = digest(wire["request_manifest"]["portfolio_policy"])
+    state, reason = _saved_account_status(wire)
+    additions = []
+    def artifact(key, kind, identity, version, content, path):
+        additions.append(dict(artifact_key=key, owner="Engine", artifact_type=kind,
+            artifact_id=identity, artifact_contract_version=version, content_digest=content,
+            root_id="engine", relative_path=path.relative_to(Path(roots["engine"]).resolve(strict=True)).as_posix()))
+    key = "account-" + run_ref["run_id"][7:]
+    artifact(key, "BacktestRun", run_ref["run_id"], wire["contract_version"], run_ref["content_digest"], run_path)
+    account = dict(strategy_ref=strategy_ref, signal_run_ref=wire["signal_ref"], status=state, reason=reason,
+                   backtest_ref={"artifact_key": key, **run_ref}, evaluation_refs=[])
+    # Release the decoded account rows before reading the evaluation reports.
+    del run, wire
+    evaluation_paths = list(evaluation_paths)
+    _require(bool(evaluation_paths), "new account requires saved evaluations")
+    for path in evaluation_paths:
+        path = owner_path(path)
+        report = load_backtest_evaluation(path).to_dict()
+        _require(report["input_run_ref"] == run_ref, "new account evaluation run binding mismatch")
+        ekey = "account-evaluation-" + report["evaluation_ref"][7:]
+        _require(not any(e["artifact_key"] == ekey for e in account["evaluation_refs"]),
+                 "duplicate new account evaluation")
+        artifact(ekey, "BacktestEvaluation", report["evaluation_ref"], report["contract_version"],
+                 report["content_digest"], path)
+        account["evaluation_refs"].append(dict(artifact_key=ekey, evaluation_ref=report["evaluation_ref"],
+            content_digest=report["content_digest"], input_run_ref=report["input_run_ref"]))
+    account["evaluation_refs"].sort(key=lambda e: e["evaluation_ref"])
+    return account, additions, cfg.wire
+
+
 @_with_projection_session
 def verify_result_artifacts(manifest, artifacts, paths, roots):
     """Fixed owner loaders; no loader names or code are read from manifests."""
