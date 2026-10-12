@@ -42,8 +42,8 @@
       "accounts"
     ],
     "strategy_refs": [
-      "sha256:20cb774a768e30be3094b09139b2de795ee012ff965184242c33fc89d8876981",
-      "sha256:e42daba0a367c8de2e267a52c5eca38a9d5d09f6def7856b5c6e19165bc59c28"
+      "<actual_primary_stock_portfolio_policy_ref>",
+      "<actual_control_stock_portfolio_policy_ref>"
     ]
   },
   "feature_library_training_view": "<absolute_path_to_verified_training_projection_descriptor.json>"

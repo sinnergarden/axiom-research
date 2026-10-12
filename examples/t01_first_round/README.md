@@ -82,9 +82,11 @@ that root. Create the Research and Engine result directories before training.
 `question` and `version` use the existing `create_question` and
 `create_version` object schemas. Because this result declares an accounts
 stage, it must freeze both actual strategy references before its first run.
-The supplied references are the existing factory identities for `primary`
-and `control` in `strategies.json`. A changed strategy requires its own
-factory identity and a new frozen request.
+These references identify the complete `stock_portfolio_policy`, including
+the actual execution universe and execution-rules binding. They differ from
+the pure `stock_strategy_spec` identities. Derive them after freezing the
+profile, using `primary` and `control` in `strategies.json`. A changed policy
+requires its own identity and a new frozen request.
 
 After replacing the placeholders, prepare those directories and confirm the
 references without reading Data, computing Features or executing accounts:
@@ -94,16 +96,23 @@ import json
 from pathlib import Path
 from axiom_engine.core.contracts import Document
 from axiom_engine.core.stock_strategy import stock_strategy_spec
+from axiom_engine.runtime import stock_portfolio_policy
 
 options = json.loads(Path("/absolute/path/options.json").read_text())
 strategies = json.loads(Path("/absolute/path/strategies.json").read_text())
+profile = json.loads(Path("/absolute/path/equity-profile.json").read_text())
+axes = json.loads(Path(options["feature_spec"]).read_text())
 discovery = options["result_discovery"]
 root = Path(discovery["research_root"]).resolve()
 assert Path(options["output_root"]).resolve().is_relative_to(root)
 root.mkdir(parents=True, exist_ok=True)
 Path(discovery["engine_root"]).mkdir(parents=True, exist_ok=True)
 assert discovery["strategy_refs"] == [
-    Document.from_dict(stock_strategy_spec(**strategies[name])).identity
+    Document.from_dict(stock_portfolio_policy(
+        strategy_spec=stock_strategy_spec(**strategies[name]),
+        universe_id="csi300", execution_universe=axes["universe"],
+        execution_rules=profile["stock_execution_rules"],
+    )).identity
     for name in ("primary", "control")
 ]
 ```
