@@ -1,5 +1,6 @@
 """Versioned structural training proof over existing admitted vector blocks."""
 from copy import deepcopy
+from pathlib import Path
 import sys
 from contextlib import contextmanager
 
@@ -67,14 +68,7 @@ def _training_block_binding(feature, offsets, *, normalized, cohort_ref, selecto
         ordered_features=(_view_data(feature)['definition']['spec']['ordered_features']
                           if model_binding is None else model_binding['ordered_features'])
         store.reserve(2*sys.getsizeof(blocks)+4096 if _view_data(feature,check=False)['store']._operation_depth else 2*_size(blocks)+4096)
-        written_marks={}
-        descriptors=[write_part(destination,body,'feature_block_ref',_verified_marks=written_marks) for body in blocks]
-        if _view_data(feature,check=False)['store']._operation_depth:
-            for descriptor,body in zip(descriptors,blocks):
-                if descriptor['path'] in store.json:
-                    store.check_path(descriptor['path'])
-                    require(store.hashes[descriptor['path']]==descriptor['file_digest'],'written Feature proof descriptor changed')
-                else:store.adopt_written(descriptor,body,{},marks=written_marks)
+        descriptors=[_training_block_descriptor(feature,body,store,destination) for body in blocks]
         header=store.read_json(normalized,key='target_ref')
         require(header['target_ref']==normalized['target_ref'] and reference(cohort_ref),
                 'training target/cohort binding mismatch')
@@ -91,6 +85,43 @@ def _training_block_binding(feature, offsets, *, normalized, cohort_ref, selecto
                 'target_ref':normalized['target_ref'],'cohort_ref':cohort_ref})},'binding_ref')
     finally:
         blocks=actual=saved=body=descriptor=feature=offsets=normalized=selector=store=binding=None
+
+
+def _training_block_descriptor(feature, body, store, destination):
+    """Keep the first verified descriptor in the existing charged Feature window."""
+    value=_view_data(feature,check=False); fstore=value['store']
+    width=len(value['definition']['spec']['universe'])
+    block=value['blocks'][value['day_blocks'][body['first_row']//width]]
+    require((block['start'],block['count'])==(body['first_row'],body['row_count']),
+            'training proof differs from its Feature block')
+    key=(str(Path(destination).absolute()),body['feature_block_ref'])
+    cache=block.get('training_block_proof_descriptors',{})
+    descriptor=cache.get(key)
+    if descriptor is None:
+        written_marks={}
+        descriptor=write_part(destination,body,'feature_block_ref',_verified_marks=written_marks)
+        if fstore._operation_depth and descriptor['path'] not in store.hashes:
+            store.adopt_written(descriptor,body,{},marks=written_marks)
+        else:
+            require(store.read_json(descriptor,key='feature_block_ref')==body,'written Feature proof differs from admitted bytes')
+        charge=_size(descriptor)+1024
+        fstore.reserve(charge); fstore.resident_bytes+=charge
+        block['training_block_proof_charge']=block.get('training_block_proof_charge',0)+charge
+        block.setdefault('training_block_proof_descriptors',{})[key]=deepcopy(descriptor)
+        fstore.metrics['training_block_descriptor_writes']=fstore.metrics.get('training_block_descriptor_writes',0)+1
+    else:
+        require(descriptor['feature_block_ref']==body['feature_block_ref'],'cached Feature proof identity changed')
+        if descriptor['path'] in store.hashes:
+            store.check_path(descriptor['path'])
+            require(store.hashes[descriptor['path']]==descriptor['file_digest'],'cached Feature proof descriptor changed')
+            if descriptor['path'] not in store.json:
+                # The payload may have left the target window. Its original
+                # verified epoch and digest still belong to this live owner.
+                store.adopt_written(descriptor,body,{},marks={descriptor['path']:store.marks[descriptor['path']]})
+        else:
+            require(store.read_json(descriptor,key='feature_block_ref')==body,'cached Feature proof differs from admitted bytes')
+        fstore.metrics['training_block_descriptor_reuses']=fstore.metrics.get('training_block_descriptor_reuses',0)+1
+    return deepcopy(descriptor)
 
 
 def validate_training_block_binding(binding, feature, offsets, *, normalized, cohort_ref,

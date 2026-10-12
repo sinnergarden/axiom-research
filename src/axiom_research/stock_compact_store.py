@@ -830,6 +830,7 @@ def _trim_feature_window(value, wanted):
         if ordinal not in wanted and 'training_block_proofs' in block:
             store.resident_bytes-=block.pop('training_block_proof_charge',0)
             block.pop('training_block_proofs',None)
+            block.pop('training_block_proof_descriptors',None)
         if ordinal in wanted:
             for part in block['descriptors']:
                 keep.add(part['metadata']['path']); keep.update(v['path'] for v in part['buffers'].values())
