@@ -12,8 +12,9 @@ views remain readable but are rejected before fitting this model profile.
 consume v3 through complete saved-fold admission; a live batch shares its owner,
 and a cold call requires the original saved parents. No saved identity is rewritten.
 
-The 2026-10-13 closeout is a review candidate until its PR is merged. Validation
-and compatibility details are in [the closeout record](reports/m1-public-entry-closeout.md).
+The 2026-10-13 implementation is described in [the closeout record](reports/m1-public-entry-closeout.md),
+including validation and compatibility boundaries. Applicable fixed source versions
+and delivery status are recorded in [Docs versions.json](https://github.com/sinnergarden/axiom-docs/blob/main/versions.json).
 
 ## Earlier releases and contracts
 

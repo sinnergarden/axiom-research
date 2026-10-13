@@ -1,6 +1,6 @@
 # M1 public entry closeout — 2026-10-13
 
-This review candidate closes A05 public entry gaps, rejects the A08 falsely declared raw training path, exposes A01 existing stage measurements and updates A07 navigation in the companion Docs change. It does not complete general M1.
+This implementation closes A05 public entry gaps, rejects the A08 falsely declared raw training path, exposes A01 existing stage measurements and updates A07 navigation in the companion Docs change. It does not complete general M1.
 
 ## Change and compatibility
 
@@ -27,4 +27,4 @@ Runtime: Python 3.12.12, NumPy 2.4.1, pandas 2.3.3, LightGBM 4.6.0, PyArrow 22.0
 
 Private small receipts are retained in the task's `.artifacts/m1-closeout/verification.json`, `prepared/acceptance.json` and `shared/acceptance.json`; they are not committed production data. The library loader read and configured two-fold run use separate existing fixtures, not a new long Feature-library-to-account run. No full suite, production dataset, supplier collection, seven-year training, account replay or UI deployment was performed. Existing T01 account/UI and basis-registration evidence remains the evidence for those unchanged paths; this change does not revalidate or improve their measured performance.
 
-The remaining critical path is parent review of the fixed Research and Docs commits. Broader M1 scope remains in the canonical Docs manual; these four fixes do not settle the deferred findings.
+Applicable fixed source versions and delivery status are recorded in [Docs versions.json](https://github.com/sinnergarden/axiom-docs/blob/main/versions.json) and the associated PRs. Broader M1 scope remains in the canonical Docs manual; these four fixes do not settle the deferred findings.
