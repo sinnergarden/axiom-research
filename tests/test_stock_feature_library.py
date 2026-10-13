@@ -15,16 +15,18 @@ from axiom_research.stock_matrix_storage import write_buffer, write_part, instan
 
 
 def saved_source(root, *, day_count=6, generation=0, value_shift=0, snapshot='synthetic_only',
-                 universe_name='csi300', members_by_session=None):
+                 universe_name='csi300', members_by_session=None, securities=None,
+                 mutate_arrays=None, mutate_evidence=None):
     """Synthetic selected vendor-shaped cells; never used as real data evidence."""
     days=[(date(2020,1,1)+timedelta(days=i)).isoformat() for i in range(day_count)]
-    securities=['A','B','C']; shape=(day_count,3,6)
+    securities=list(['A','B','C'] if securities is None else securities); count=len(securities)
+    shape=(day_count,count,6)
     values=np.empty(shape,dtype='<f8')
     for t in range(day_count):
-        for j in range(3):
+        for j in range(count):
             opening=10*(j+1)+t+value_shift
             values[t,j]=[opening,opening+3+j+t,opening-2,opening+1+j+t,1000*(j+1)+t,2**t]
-    available=np.array([[instant_us(day+'T12:00:00Z')]*3 for day in days],dtype='<i8')
+    available=np.array([[instant_us(day+'T12:00:00Z')]*count for day in days],dtype='<i8')
     arrays={'values':values,'original_values':values.copy(),'validity':np.ones(shape,dtype=bool),
         'available':np.broadcast_to(available[:,:,None],shape).copy(),'available_validity':np.ones(shape,dtype=bool),
         'reasons':np.zeros(shape,dtype='u1'),'member':np.ones(shape[:2],dtype=bool),
@@ -32,6 +34,7 @@ def saved_source(root, *, day_count=6, generation=0, value_shift=0, snapshot='sy
     if members_by_session is not None:
         for day,members in members_by_session.items():
             arrays['member'][days.index(day)]=[s in members for s in securities]
+    if mutate_arrays is not None: mutate_arrays(arrays)
     buffers={}
     for name,array in arrays.items():
         dtype='bool_u8' if array.dtype.kind=='b' else 'uint8' if array.dtype==np.dtype('u1') else 'int64_le' if array.dtype.kind=='i' else 'float64_le'
@@ -48,6 +51,7 @@ def saved_source(root, *, day_count=6, generation=0, value_shift=0, snapshot='sy
                     'revision_sequence':0,'raw_batch_id':'synthetic','first_observed_at':day+'T12:00:00Z',
                     'usable_from':day+'T12:00:00Z','availability_basis':'declared_vendor_assumption',
                     'evidence_ref':None,'missing_reason':None} for day in days for s in securities]}
+        if mutate_evidence is not None: mutate_evidence(metadata)
         child=seal({'contract_version':'reader_column_evidence_v1','context':{'domain':domain},
             'field_meta':metadata,'fields':fields,'sessions':days},'evidence_ref')
         evidence.append(write_part(root,child,'evidence_ref'))
