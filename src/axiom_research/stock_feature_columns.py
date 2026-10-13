@@ -216,7 +216,8 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
     require(spec['read_sessions']==sorted(set(spec['read_sessions'])) and
         all(instant_us(spec['cutoff_by_session'][b])>=instant_us(spec['cutoff_by_session'][a])
             for a,b in zip(spec['read_sessions'],spec['read_sessions'][1:])),'monotone historical cutoffs required')
-    snapshot=data.store.load_snapshot(spec['snapshot'])
+    snapshot=data.describe_snapshot(snapshot=spec['snapshot'],
+        domains=('market_daily','adjustment_factors','universe_membership'))
     from axiom_data.reader import _release_time
     profiles={}
     for name in ('market_daily','adjustment_factors','universe_membership'):
@@ -360,16 +361,24 @@ def extend_feature_column_source(data, *, source, daily_fields, destination, blo
     previous=manifest.get('daily_fields',{})
     require(not (set(daily_fields)&set(source.physical_fields())) and 'vwap' not in daily_fields,
             'daily extension cannot replace existing or derived fields')
+    for field,meta in daily_fields.items():
+        require(type(field) is str and field.isidentifier() and type(meta) is dict and
+                set(meta)=={'domain','dtype','unit'},'typed daily field declaration required')
     original_snapshot=spec['snapshot']
-    source_snapshot=data.store.load_snapshot(original_snapshot)
-    candidate=source_snapshot if snapshot is None or snapshot==original_snapshot else data.store.load_snapshot(snapshot)
-    if snapshot is not None and snapshot!=original_snapshot:
-        require(all(candidate['domains'].get(domain)==source_snapshot['domains'].get(domain)
-                    for domain in manifest['source_profiles']),
+    advancing=snapshot is not None and snapshot!=original_snapshot
+    requested=sorted({meta['domain'] for meta in daily_fields.values()} |
+                     (set(manifest['source_profiles']) if advancing else set()))
+    if advancing:
+        prior=data.describe_snapshot(snapshot=original_snapshot,
+            domains=sorted(manifest['source_profiles']),include_domain_refs=True)
+    candidate=data.describe_snapshot(snapshot=snapshot if advancing else original_snapshot,
+        domains=requested,include_domain_refs=advancing)
+    if advancing:
+        reused={domain:metadata['domain_ref'] for domain,metadata in prior['domains'].items()}
+        require(all(candidate['domains'][domain]['domain_ref']==ref for domain,ref in reused.items()),
                 'candidate snapshot changes reused source domains')
         manifest.setdefault('snapshot_extensions',[]).append({'from_snapshot':original_snapshot,
-            'to_snapshot':snapshot,'reused_domains':{domain:digest(source_snapshot['domains'][domain])
-                for domain in manifest['source_profiles']}})
+            'to_snapshot':snapshot,'reused_domains':reused})
         spec['snapshot']=snapshot
     snapshot=candidate; domains={}
     for field,meta in daily_fields.items():

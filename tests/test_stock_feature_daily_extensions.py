@@ -11,7 +11,7 @@ import pandas as pd
 
 from axiom_research.stock_feature_columns import extend_feature_column_source, REASONS
 from axiom_research.stock_feature_library import SavedColumnFeatureSource, CatalogFeatureLibrary
-from axiom_research.stock_artifacts import file_digest
+from axiom_research.stock_artifacts import file_digest, digest
 from axiom_research import load_a01_feature_catalog
 from axiom_engine.feature_library import FeatureLibrary
 from test_stock_feature_library import saved_source
@@ -33,8 +33,12 @@ class DailyExtensionTests(unittest.TestCase):
                 {'dtype':'int64','unit':unit,'by_key':meta}},context={'domain':'market_daily'})
         candidate=deepcopy(profiles)
         if change_old: candidate['adjustment_factors']['source_profile']['changed']=True
-        data=SimpleNamespace(store=SimpleNamespace(load_snapshot=lambda identity:
-            {'domains':candidate if identity=='candidate' else profiles}),read=read)
+        def describe_snapshot(*,snapshot,domains,include_domain_refs=False):
+            manifest=candidate if snapshot=='candidate' else profiles
+            return {'snapshot_id':snapshot,'domains':{name:{**deepcopy(manifest[name]),
+                **({'domain_ref':digest(manifest[name])} if include_domain_refs else {})} for name in domains}}
+        data=SimpleNamespace(describe_snapshot=describe_snapshot,read=read)
+
         with patch('axiom_data.reader._release_time',side_effect=lambda p,d:pd.Timestamp(d+'T12:00:00Z')):
             result,metrics=extend_feature_column_source(data,source=source,
                 daily_fields={'volume_shares':{'domain':'market_daily','dtype':'int64','unit':'shares'}},
