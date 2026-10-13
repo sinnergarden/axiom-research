@@ -8608,12 +8608,12 @@
       },
       "candidate_id": "GRC001",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "GRC001",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 selects latest cutoff-visible announcement, ties by report period, with Data revision selection; future forecast report periods are allowed. Native categories use stable codes, scoring remains Core (2,1,1.5,0.5,-1,-1,-2,-2; unknown supplied category 0). Absent/unknown announcement remains missing, not fabricated 0/999. Presence is 1 only for a visible supplied announcement."
     },
     {
       "feature_key": "forecast_stale_days",
@@ -8645,12 +8645,12 @@
       },
       "candidate_id": "GRC002",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "GRC002",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 selects latest cutoff-visible announcement, ties by report period, with Data revision selection; future forecast report periods are allowed. Native categories use stable codes, scoring remains Core (2,1,1.5,0.5,-1,-1,-2,-2; unknown supplied category 0). Absent/unknown announcement remains missing, not fabricated 0/999. Presence is 1 only for a visible supplied announcement."
     },
     {
       "feature_key": "has_forecast",
@@ -8682,12 +8682,12 @@
       },
       "candidate_id": "GRC003",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "GRC003",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 selects latest cutoff-visible announcement, ties by report period, with Data revision selection; future forecast report periods are allowed. Native categories use stable codes, scoring remains Core (2,1,1.5,0.5,-1,-1,-2,-2; unknown supplied category 0). Absent/unknown announcement remains missing, not fabricated 0/999. Presence is 1 only for a visible supplied announcement."
     },
     {
       "feature_key": "ttm_revenue_yoy",
@@ -10118,12 +10118,12 @@
       },
       "candidate_id": "TRD006",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "limit_price_binding",
-        "reason": "Historical upper/lower price limits with same price basis and cutoff are not yet bound."
+      "status": "executable",
+      "selection": {
+        "id": "TRD006",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 uses native historical suspension state and native-price limit flags. Boolean suspension is exactly 0/1; absent status remains missing, not assumed trading. Preserve unknown limits/status instead of source implicit fill-zero."
     },
     {
       "feature_key": "opened_from_limit_up",
@@ -13042,12 +13042,12 @@
       },
       "candidate_id": "FND003",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "ambiguous_valuation_name",
-        "reason": "QSYS TTM-named feature reads non-TTM pe/ps. Supplier fields are distinct; no silent replacement or misleading name admitted."
+      "status": "executable",
+      "selection": {
+        "id": "FND003",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Explicit v2 migration: TTM-named valuation features use their distinct native supplier TTM fields, not pe/ps aliases. Raw factor exposes the native supplier adjustment multiplier with its profile lineage, not an adjusted price or output-day normalized factor."
     },
     {
       "feature_key": "pb_raw",
@@ -13110,12 +13110,12 @@
       },
       "candidate_id": "FND005",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "ambiguous_valuation_name",
-        "reason": "QSYS TTM-named feature reads non-TTM pe/ps. Supplier fields are distinct; no silent replacement or misleading name admitted."
+      "status": "executable",
+      "selection": {
+        "id": "FND005",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Explicit v2 migration: TTM-named valuation features use their distinct native supplier TTM fields, not pe/ps aliases. Raw factor exposes the native supplier adjustment multiplier with its profile lineage, not an adjusted price or output-day normalized factor."
     },
     {
       "feature_key": "roe",
@@ -14961,12 +14961,12 @@
       },
       "candidate_id": "SHR001",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "SHR001",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 uses latest visible distinct report periods, with current cutoff-selected revisions, not trading shifts or corrections counted as new reports. Report lags mean previous observed report, not a guaranteed contiguous calendar quarter. Data preserves top10 completeness. Source composite fills are explicit; all three concentration components are required in the declared recipe."
     },
     {
       "feature_key": "holder_num_chg_2q",
@@ -14997,12 +14997,12 @@
       },
       "candidate_id": "SHR002",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "SHR002",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 uses latest visible distinct report periods, with current cutoff-selected revisions, not trading shifts or corrections counted as new reports. Report lags mean previous observed report, not a guaranteed contiguous calendar quarter. Data preserves top10 completeness. Source composite fills are explicit; all three concentration components are required in the declared recipe."
     },
     {
       "feature_key": "avg_shares_per_holder_chg_qoq",
@@ -15033,12 +15033,12 @@
       },
       "candidate_id": "SHR003",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "SHR003",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 uses latest visible distinct report periods, with current cutoff-selected revisions, not trading shifts or corrections counted as new reports. Report lags mean previous observed report, not a guaranteed contiguous calendar quarter. Data preserves top10 completeness. Source composite fills are explicit; all three concentration components are required in the declared recipe."
     },
     {
       "feature_key": "top10_holder_ratio_chg_qoq",
@@ -15069,12 +15069,12 @@
       },
       "candidate_id": "SHR004",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "SHR004",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 uses latest visible distinct report periods, with current cutoff-selected revisions, not trading shifts or corrections counted as new reports. Report lags mean previous observed report, not a guaranteed contiguous calendar quarter. Data preserves top10 completeness. Source composite fills are explicit; all three concentration components are required in the declared recipe."
     },
     {
       "feature_key": "holder_concentration_score",
@@ -15118,12 +15118,12 @@
       },
       "candidate_id": "SHR005",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "SHR005",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 uses latest visible distinct report periods, with current cutoff-selected revisions, not trading shifts or corrections counted as new reports. Report lags mean previous observed report, not a guaranteed contiguous calendar quarter. Data preserves top10 completeness. Source composite fills are explicit; all three concentration components are required in the declared recipe."
     },
     {
       "feature_key": "holder_squeeze_score",
@@ -15176,12 +15176,12 @@
       },
       "candidate_id": "SHR006",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "SHR006",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 uses latest visible distinct report periods, with current cutoff-selected revisions, not trading shifts or corrections counted as new reports. Report lags mean previous observed report, not a guaranteed contiguous calendar quarter. Data preserves top10 completeness. Source composite fills are explicit; all three concentration components are required in the declared recipe."
     },
     {
       "feature_key": "holder_price_confirm_score",
@@ -15247,12 +15247,12 @@
       },
       "candidate_id": "SHR007",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "SHR007",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 uses latest visible distinct report periods, with current cutoff-selected revisions, not trading shifts or corrections counted as new reports. Report lags mean previous observed report, not a guaranteed contiguous calendar quarter. Data preserves top10 completeness. Source composite fills are explicit; all three concentration components are required in the declared recipe."
     },
     {
       "feature_key": "holder_num_stale_days",
@@ -15283,12 +15283,12 @@
       },
       "candidate_id": "SHR008",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "SHR008",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Calendar-day age of the selected visible latest distinct report announcement; native date encoded as Gregorian ordinal, subtraction remains in Core. Missing announcement remains missing; report corrections retain their selected announcement date."
     },
     {
       "feature_key": "top10_holder_stale_days",
@@ -15319,12 +15319,12 @@
       },
       "candidate_id": "SHR009",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "SHR009",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Calendar-day age of the selected visible latest distinct report announcement; native date encoded as Gregorian ordinal, subtraction remains in Core. Missing announcement remains missing; report corrections retain their selected announcement date."
     },
     {
       "feature_key": "top10_holder_ratio",
@@ -15355,12 +15355,12 @@
       },
       "candidate_id": "SHR010",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "SHR010",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 uses latest visible distinct report periods, with current cutoff-selected revisions, not trading shifts or corrections counted as new reports. Report lags mean previous observed report, not a guaranteed contiguous calendar quarter. Data preserves top10 completeness. Source composite fills are explicit; all three concentration components are required in the declared recipe."
     },
     {
       "feature_key": "trend_consistency_60d",
@@ -16100,12 +16100,12 @@
       },
       "candidate_id": "INT001",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "INT001",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 uses latest visible distinct report periods, with current cutoff-selected revisions, not trading shifts or corrections counted as new reports. Report lags mean previous observed report, not a guaranteed contiguous calendar quarter. Data preserves top10 completeness. Source composite fills are explicit; all three concentration components are required in the declared recipe."
     },
     {
       "feature_key": "holder_concentration_low_vol_uptrend",
@@ -16171,12 +16171,12 @@
       },
       "candidate_id": "INT002",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "INT002",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 uses latest visible distinct report periods, with current cutoff-selected revisions, not trading shifts or corrections counted as new reports. Report lags mean previous observed report, not a guaranteed contiguous calendar quarter. Data preserves top10 completeness. Source composite fills are explicit; all three concentration components are required in the declared recipe."
     },
     {
       "feature_key": "holder_concentration_volume_contract",
@@ -16335,12 +16335,12 @@
       },
       "candidate_id": "INT004",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+      "status": "executable",
+      "selection": {
+        "id": "INT004",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 uses latest visible distinct report periods, with current cutoff-selected revisions, not trading shifts or corrections counted as new reports. Report lags mean previous observed report, not a guaranteed contiguous calendar quarter. Data preserves top10 completeness. Source composite fills are explicit; all three concentration components are required in the declared recipe."
     },
     {
       "feature_key": "margin_pullback_recovery_confirm",
@@ -17909,12 +17909,12 @@
       },
       "candidate_id": "CFG005",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "adjustment_anchor_identity",
-        "reason": "Raw factor requires explicit source/anchor interpretation; not a substitute for adjusted-price lineage."
+      "status": "executable",
+      "selection": {
+        "id": "CFG005",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Explicit v2 migration: TTM-named valuation features use their distinct native supplier TTM fields, not pe/ps aliases. Raw factor exposes the native supplier adjustment multiplier with its profile lineage, not an adjusted price or output-day normalized factor."
     },
     {
       "feature_key": "$vwap",

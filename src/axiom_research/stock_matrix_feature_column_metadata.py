@@ -127,7 +127,7 @@ def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts
         validate_financial_materializations(manifest)
     extra=manifest.get('daily_fields',{})
     require(type(extra) is dict and all(type(f) is str and f.isidentifier() and
-        set(m)=={'domain','dtype','unit'} and m['dtype'] in ('float64','int64') for f,m in extra.items()),
+        set(m)=={'domain','dtype','unit'} and m['dtype'] in ('float64','int64','bool') for f,m in extra.items()),
         'typed daily fields required')
     buffer_types=dict(SOURCE_BUFFERS)
     for field in extra:

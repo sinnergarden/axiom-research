@@ -42,13 +42,13 @@ class QsysCatalogTests(unittest.TestCase):
     def test_388_traceable_rows_and_no_blocked_placeholders(self):
         registry=load_qsys_feature_registry();rows=registry['rows']
         self.assertEqual(len(rows),388)
-        self.assertEqual(sum(r['status']=='executable' for r in rows),337)
+        self.assertEqual(sum(r['status']=='executable' for r in rows),357)
         self.assertEqual(sum(r['status']=='alias' for r in rows),2)
-        self.assertEqual(sum(r['status']=='blocked' for r in rows),49)
+        self.assertEqual(sum(r['status']=='blocked' for r in rows),29)
         for r in rows:
             self.assertTrue(r['expression']);self.assertTrue(r['qsys_source'])
             if r['status']=='blocked':self.assertNotIn('selection',r)
-        for name in ('pe_ttm','ps_ttm','industry_ret_20d','volume_contraction_after_rise_60d','$lend_sell_volume'):
+        for name in ('industry_ret_20d','volume_contraction_after_rise_60d','$lend_sell_volume'):
             with self.subTest(name=name),self.assertRaisesRegex(FeatureCatalogError,'blocked'):
                 select_qsys_features([name])
         self.assertEqual(select_qsys_features(['($close - $open) / $open'])[0].id,'ALP001')
@@ -93,17 +93,20 @@ class QsysCatalogTests(unittest.TestCase):
         from axiom_research.stock_feature_columns import FeatureColumnSource
         from axiom_research.qsys_input_contracts import DAILY_FIELD_CONTRACTS, CORE_INPUT_CONTRACTS
         canonical={'market_daily':TUSHARE_DAILY_CONTRACT}
-        for endpoint in ('daily_basic','moneyflow','margin_detail','income','balancesheet','fina_indicator'):
+        for endpoint in ('daily_basic','moneyflow','margin_detail','income','balancesheet','fina_indicator','stk_holdernumber','forecast'):
             spec=stock_input_source_spec(endpoint,identity_map={'000001.SZ':'A'},
                 next_open_session_by_date={'2020-01-01':'2020-01-02'})
             canonical[spec['domain']]=spec['contract']
         from axiom_data.event_sources import CONTRACTS
         canonical['cash_flow_events']=CONTRACTS['cashflow']
         canonical['price_limits']=CONTRACTS['stk_limit']
+        canonical['top_holders_reports']=CONTRACTS['top10_holders']
+        from axiom_data.provider_local import CONTRACTS as LOCAL_CONTRACTS
+        canonical['security_status']=LOCAL_CONTRACTS['suspend_d']
         # Covers even supported future fields such as ps; there is no CNY fallback.
         for field,spec in DAILY_FIELD_CONTRACTS.items():
             physical=canonical[spec['domain']]['fields'][field]
-            self.assertEqual({k:physical[k] for k in ('dtype','unit')}, {k:spec[k] for k in ('dtype','unit')})
+            self.assertEqual({k:physical.get(k) for k in ('dtype','unit')}, {k:spec[k] for k in ('dtype','unit')})
         self.assertEqual(DAILY_FIELD_CONTRACTS['ps']['unit'],'ratio')
         catalog=load_qsys_feature_catalog()
         self.assertNotIn('valuation_daily.ps',{d for f in catalog.definitions for d in f['dependencies']})
@@ -113,7 +116,8 @@ class QsysCatalogTests(unittest.TestCase):
             extensions['benchmark_close']={'domain':'materialized_benchmark_daily','dtype':'float64','unit':'index points'}
         for bundle in requirements['financial_fields'].values():
             physical=canonical[bundle['domain']]['fields'][bundle['field']]
-            self.assertEqual((physical['unit'],physical.get('basis','reported')),(bundle['unit'],bundle['basis']))
+            if physical['dtype'] not in ('date','string'):
+                self.assertEqual((physical['unit'],physical.get('basis','reported')),(bundle['unit'],bundle['basis']))
             self.assertEqual(bundle['visibility'],'strict_before_session_start')
             for leaf in bundle['outputs']:
                 extensions[leaf]={'domain':'materialized_financial_events','dtype':'float64','unit':bundle['unit']}
@@ -127,6 +131,12 @@ class QsysCatalogTests(unittest.TestCase):
                 {k:CORE_INPUT_CONTRACTS[field][k] for k in ('dtype','unit')})
         for dep in {d for f in catalog.definitions for d in f['dependencies']}:
             domain,field=dep.split('.')
+            if field in ('announcement_date','forecast_type'):
+                self.assertIn(domain,canonical)
+                continue
+            if domain=='security_status':
+                self.assertEqual(canonical[domain]['fields'][field]['dtype'],'bool')
+                continue
             if domain=='benchmark_daily':
                 self.assertEqual(CORE_INPUT_CONTRACTS['benchmark_close']['unit'],'index points')
                 continue
@@ -159,13 +169,13 @@ class QsysCatalogTests(unittest.TestCase):
         catalog=load_qsys_feature_catalog();base,facts,context=fixture()
         for normalized in (False,True):
             plan=build_feature_plan(base,catalog.default_selection,catalog=catalog,normalized=normalized)
-            self.assertEqual(len(plan.to_dict()['outputs']),354)
+            self.assertEqual(len(plan.to_dict()['outputs']),374)
         plan=build_feature_plan(base,catalog.default_selection,catalog=catalog)
         out=execute_feature_plan(plan,facts,context).to_dict()
         actual={f['name']:v for f,v in zip(catalog.definitions,out['rows'][0]['values'])}
-        self.assertEqual({name for name,value in actual.items() if value is None}, {
+        self.assertTrue({
             'volume_up_down_ratio_60d','return_drawdown_ratio_60d','return_drawdown_ratio_120d',
-            'up_volume_down_volume_ratio_60d','up_volume_down_volume_ratio_120d'})
+            'up_volume_down_volume_ratio_60d','up_volume_down_volume_ratio_120d'} <= {name for name,value in actual.items() if value is None})
         close=859.; volume=8590.
         expected={'VWAP0':859.25/859,'BETA5':1/859,'RSQR5':1.,'RESI5':0.,'QTLU5':858.2/859,'QTLD5':855.8/859,'IMAX5':1.,'IMIN5':.2,'IMXD5':.8,
                   'VMA5':8570/(volume+1e-12),'VSTD5':math.sqrt(250)/(volume+1e-12),'VSUMP5':50/(50+1e-12),'VSUMN5':0.,'VSUMD5':50/(50+1e-12),

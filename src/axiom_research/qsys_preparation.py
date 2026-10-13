@@ -43,7 +43,7 @@ def prepare_qsys_inputs(data, *, source, names, destination, event_snapshots,
         metrics['reused_fields'].extend(sorted(reused))
         if not outputs:
             continue
-        filters={'endpoint':bundle['endpoint']}
+        filters={'endpoint':bundle['endpoint']} if bundle['endpoint'] is not None else {}
         if bundle['report_type'] is not None:
             filters['report_type']=bundle['report_type']
         query=EventQuery(bundle['domain'],(bundle['field'],),tuple(symbols),

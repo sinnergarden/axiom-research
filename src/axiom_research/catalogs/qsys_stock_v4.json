@@ -96,6 +96,11 @@
       "id": "REG",
       "name": "regime",
       "numbering_policy": "sparse_reserved_never_renumber"
+    },
+    {
+      "id": "SHR",
+      "name": "v3a_shareholder",
+      "numbering_policy": "sparse_reserved_never_renumber"
     }
   ],
   "input_contract": {
@@ -16931,6 +16936,1183 @@
         "stage": "base",
         "missing": "preserve"
       }
+    },
+    {
+      "name": "_qsys_0639",
+      "op": "divide",
+      "version": "1",
+      "inputs": [
+        "holder_count",
+        "holder_count_previous1"
+      ],
+      "params": {
+        "zero": "missing"
+      },
+      "column": {
+        "name": "_qsys_0639",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0640",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_qsys_0639",
+        "_qsys_0098"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0640",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0641",
+      "op": "divide",
+      "version": "1",
+      "inputs": [
+        "holder_count",
+        "holder_count_previous2"
+      ],
+      "params": {
+        "zero": "missing"
+      },
+      "column": {
+        "name": "_qsys_0641",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0642",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_qsys_0641",
+        "_qsys_0098"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0642",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0643",
+      "op": "divide",
+      "version": "1",
+      "inputs": [
+        "holder_count_previous1",
+        "holder_count"
+      ],
+      "params": {
+        "zero": "missing"
+      },
+      "column": {
+        "name": "_qsys_0643",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0644",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_qsys_0643",
+        "_qsys_0098"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0644",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0645",
+      "op": "divide",
+      "version": "1",
+      "inputs": [
+        "top10_ratio",
+        "top10_ratio_previous1"
+      ],
+      "params": {
+        "zero": "missing"
+      },
+      "column": {
+        "name": "_qsys_0645",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0646",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_qsys_0645",
+        "_qsys_0098"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0646",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0647",
+      "op": "cs_zscore",
+      "version": "1",
+      "inputs": [
+        "_qsys_0640"
+      ],
+      "params": {
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "fill_zero",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "zero",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0647",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0648",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0647",
+        "_qsys_0235"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0648",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0649",
+      "op": "cs_zscore",
+      "version": "1",
+      "inputs": [
+        "_qsys_0644"
+      ],
+      "params": {
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "fill_zero",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "zero",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0649",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0650",
+      "op": "add",
+      "version": "1",
+      "inputs": [
+        "_qsys_0648",
+        "_qsys_0649"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0650",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0651",
+      "op": "cs_zscore",
+      "version": "1",
+      "inputs": [
+        "_qsys_0646"
+      ],
+      "params": {
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "fill_zero",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "zero",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0651",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0652",
+      "op": "add",
+      "version": "1",
+      "inputs": [
+        "_qsys_0650",
+        "_qsys_0651"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0652",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0653",
+      "op": "divide",
+      "version": "1",
+      "inputs": [
+        "_qsys_0652",
+        "_qsys_0522"
+      ],
+      "params": {
+        "zero": "missing"
+      },
+      "column": {
+        "name": "_qsys_0653",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0654",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0648",
+        "_qsys_0531"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0654",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0655",
+      "op": "cs_zscore",
+      "version": "1",
+      "inputs": [
+        "_qsys_0653"
+      ],
+      "params": {
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "fill_zero",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "zero",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0655",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0656",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0655",
+        "_qsys_0535"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0656",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0657",
+      "op": "cs_zscore",
+      "version": "1",
+      "inputs": [
+        "_qsys_0280"
+      ],
+      "params": {
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "fill_zero",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "zero",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0657",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0658",
+      "op": "clip",
+      "version": "1",
+      "inputs": [
+        "_qsys_0657"
+      ],
+      "params": {
+        "lower": 0,
+        "upper": null
+      },
+      "column": {
+        "name": "_qsys_0658",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0659",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0653",
+        "_qsys_0658"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0659",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0660",
+      "op": "cs_zscore",
+      "version": "1",
+      "inputs": [
+        "_qsys_0362"
+      ],
+      "params": {
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "fill_zero",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "zero",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0660",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0661",
+      "op": "clip",
+      "version": "1",
+      "inputs": [
+        "_qsys_0660"
+      ],
+      "params": {
+        "lower": 0,
+        "upper": null
+      },
+      "column": {
+        "name": "_qsys_0661",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0662",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0653",
+        "_qsys_0661"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0662",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0663",
+      "op": "clip",
+      "version": "1",
+      "inputs": [
+        "_qsys_0655"
+      ],
+      "params": {
+        "lower": 0,
+        "upper": null
+      },
+      "column": {
+        "name": "_qsys_0663",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0664",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0532",
+        "_qsys_0663"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0664",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0665",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "session_ordinal",
+        "holder_announcement_ordinal"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0665",
+        "dtype": "float64",
+        "unit": "days",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0666",
+      "op": "clip",
+      "version": "1",
+      "inputs": [
+        "_qsys_0665"
+      ],
+      "params": {
+        "lower": 0,
+        "upper": null
+      },
+      "column": {
+        "name": "_qsys_0666",
+        "dtype": "float64",
+        "unit": "days",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0667",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "session_ordinal",
+        "top10_announcement_ordinal"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0667",
+        "dtype": "float64",
+        "unit": "days",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0668",
+      "op": "clip",
+      "version": "1",
+      "inputs": [
+        "_qsys_0667"
+      ],
+      "params": {
+        "lower": 0,
+        "upper": null
+      },
+      "column": {
+        "name": "_qsys_0668",
+        "dtype": "float64",
+        "unit": "days",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0669",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_qsys_0098",
+        "is_suspended"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0669",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0670",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0589",
+        "_qsys_0391"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0670",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0671",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_qsys_0669",
+        "_qsys_0670"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0671",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0672",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0593",
+        "_qsys_0391"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0672",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0673",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_qsys_0671",
+        "_qsys_0672"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0673",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0674",
+      "op": "clip",
+      "version": "1",
+      "inputs": [
+        "_qsys_0673"
+      ],
+      "params": {
+        "lower": 0,
+        "upper": 1
+      },
+      "column": {
+        "name": "_qsys_0674",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0675",
+      "op": "eq",
+      "version": "1",
+      "inputs": [
+        "forecast_category_code",
+        "_qsys_0098"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0675",
+        "dtype": "bool",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0676",
+      "op": "constant",
+      "version": "1",
+      "inputs": [],
+      "params": {
+        "value": 2
+      },
+      "column": {
+        "name": "_qsys_0676",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0677",
+      "op": "where",
+      "version": "1",
+      "inputs": [
+        "_qsys_0675",
+        "_qsys_0676",
+        "_qsys_0212"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0677",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0678",
+      "op": "eq",
+      "version": "1",
+      "inputs": [
+        "forecast_category_code",
+        "_qsys_0676"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0678",
+        "dtype": "bool",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0679",
+      "op": "where",
+      "version": "1",
+      "inputs": [
+        "_qsys_0678",
+        "_qsys_0098",
+        "_qsys_0677"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0679",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0680",
+      "op": "eq",
+      "version": "1",
+      "inputs": [
+        "forecast_category_code",
+        "_qsys_0522"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0680",
+        "dtype": "bool",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0681",
+      "op": "where",
+      "version": "1",
+      "inputs": [
+        "_qsys_0680",
+        "_qsys_0393",
+        "_qsys_0679"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0681",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0682",
+      "op": "constant",
+      "version": "1",
+      "inputs": [],
+      "params": {
+        "value": 4
+      },
+      "column": {
+        "name": "_qsys_0682",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0683",
+      "op": "eq",
+      "version": "1",
+      "inputs": [
+        "forecast_category_code",
+        "_qsys_0682"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0683",
+        "dtype": "bool",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0684",
+      "op": "where",
+      "version": "1",
+      "inputs": [
+        "_qsys_0683",
+        "_qsys_0391",
+        "_qsys_0681"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0684",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0685",
+      "op": "eq",
+      "version": "1",
+      "inputs": [
+        "forecast_category_code",
+        "_qsys_0061"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0685",
+        "dtype": "bool",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0686",
+      "op": "where",
+      "version": "1",
+      "inputs": [
+        "_qsys_0685",
+        "_qsys_0235",
+        "_qsys_0684"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0686",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0687",
+      "op": "constant",
+      "version": "1",
+      "inputs": [],
+      "params": {
+        "value": 6
+      },
+      "column": {
+        "name": "_qsys_0687",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0688",
+      "op": "eq",
+      "version": "1",
+      "inputs": [
+        "forecast_category_code",
+        "_qsys_0687"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0688",
+        "dtype": "bool",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0689",
+      "op": "where",
+      "version": "1",
+      "inputs": [
+        "_qsys_0688",
+        "_qsys_0235",
+        "_qsys_0686"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0689",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0690",
+      "op": "constant",
+      "version": "1",
+      "inputs": [],
+      "params": {
+        "value": 7
+      },
+      "column": {
+        "name": "_qsys_0690",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0691",
+      "op": "eq",
+      "version": "1",
+      "inputs": [
+        "forecast_category_code",
+        "_qsys_0690"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0691",
+        "dtype": "bool",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0692",
+      "op": "constant",
+      "version": "1",
+      "inputs": [],
+      "params": {
+        "value": -2
+      },
+      "column": {
+        "name": "_qsys_0692",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0693",
+      "op": "where",
+      "version": "1",
+      "inputs": [
+        "_qsys_0691",
+        "_qsys_0692",
+        "_qsys_0689"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0693",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0694",
+      "op": "constant",
+      "version": "1",
+      "inputs": [],
+      "params": {
+        "value": 8
+      },
+      "column": {
+        "name": "_qsys_0694",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0695",
+      "op": "eq",
+      "version": "1",
+      "inputs": [
+        "forecast_category_code",
+        "_qsys_0694"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0695",
+        "dtype": "bool",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0696",
+      "op": "where",
+      "version": "1",
+      "inputs": [
+        "_qsys_0695",
+        "_qsys_0692",
+        "_qsys_0693"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0696",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0697",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "session_ordinal",
+        "forecast_announcement_ordinal"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0697",
+        "dtype": "float64",
+        "unit": "days",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0698",
+      "op": "clip",
+      "version": "1",
+      "inputs": [
+        "_qsys_0697"
+      ],
+      "params": {
+        "lower": 0,
+        "upper": null
+      },
+      "column": {
+        "name": "_qsys_0698",
+        "dtype": "float64",
+        "unit": "days",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0699",
+      "op": "constant",
+      "version": "1",
+      "inputs": [],
+      "params": {
+        "value": 0
+      },
+      "column": {
+        "name": "_qsys_0699",
+        "dtype": "float64",
+        "unit": "days",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0700",
+      "op": "gt",
+      "version": "1",
+      "inputs": [
+        "forecast_announcement_ordinal",
+        "_qsys_0699"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0700",
+        "dtype": "bool",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0701",
+      "op": "to_float",
+      "version": "1",
+      "inputs": [
+        "_qsys_0700"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0701",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
     }
   ],
   "features": [
@@ -32451,6 +33633,866 @@
           "params": {},
           "column": {
             "name": "LIQ003",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "SHR",
+      "id": "SHR001",
+      "name": "holder_num_chg_qoq",
+      "formula": "_clip_inf(_safe_div(out['holder_num'], out['holder_num_prev_ann']) - 1)",
+      "dependencies": [
+        "shareholder_count_events.holder_num"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "SHR001",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0640"
+          ],
+          "params": {},
+          "column": {
+            "name": "SHR001",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "SHR",
+      "id": "SHR002",
+      "name": "holder_num_chg_2q",
+      "formula": "_clip_inf(_safe_div(out['holder_num'], out['holder_num_prev2_ann']) - 1)",
+      "dependencies": [
+        "shareholder_count_events.holder_num"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "SHR002",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0642"
+          ],
+          "params": {},
+          "column": {
+            "name": "SHR002",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "SHR",
+      "id": "SHR003",
+      "name": "avg_shares_per_holder_chg_qoq",
+      "formula": "_clip_inf(_safe_div(out['holder_num_prev_ann'], out['holder_num']) - 1)",
+      "dependencies": [
+        "shareholder_count_events.holder_num"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "SHR003",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0644"
+          ],
+          "params": {},
+          "column": {
+            "name": "SHR003",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "SHR",
+      "id": "SHR004",
+      "name": "top10_holder_ratio_chg_qoq",
+      "formula": "_clip_inf(_safe_div(out['top10_holder_ratio'], out['top10_holder_ratio_prev_ann']) - 1)",
+      "dependencies": [
+        "top_holders_reports.top10_ratio"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "SHR004",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0646"
+          ],
+          "params": {},
+          "column": {
+            "name": "SHR004",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "SHR",
+      "id": "SHR005",
+      "name": "holder_concentration_score",
+      "formula": "sum(_parts) / len(_parts)",
+      "dependencies": [
+        "shareholder_count_events.holder_num",
+        "top_holders_reports.top10_ratio"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "raw report operands preserve missing; source-explicit intermediate CS fill-zero and constant-group-zero; score validity is not complete report coverage",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "SHR005",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0653"
+          ],
+          "params": {},
+          "column": {
+            "name": "SHR005",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "SHR",
+      "id": "SHR006",
+      "name": "holder_squeeze_score",
+      "formula": "_zhn * _zr60.clip(lower=0)",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "market_daily.close",
+        "shareholder_count_events.holder_num"
+      ],
+      "lookback": 61,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "raw report operands preserve missing; source-explicit intermediate CS fill-zero and constant-group-zero; score validity is not complete report coverage",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "SHR006",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0654"
+          ],
+          "params": {},
+          "column": {
+            "name": "SHR006",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "SHR",
+      "id": "SHR007",
+      "name": "holder_price_confirm_score",
+      "formula": "_zhc * _zr120.clip(lower=0)",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "market_daily.close",
+        "shareholder_count_events.holder_num",
+        "top_holders_reports.top10_ratio"
+      ],
+      "lookback": 121,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "raw report operands preserve missing; source-explicit intermediate CS fill-zero and constant-group-zero; score validity is not complete report coverage",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "SHR007",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0656"
+          ],
+          "params": {},
+          "column": {
+            "name": "SHR007",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "SHR",
+      "id": "SHR010",
+      "name": "top10_holder_ratio",
+      "formula": "result['top10_ratio']",
+      "dependencies": [
+        "top_holders_reports.top10_ratio"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "SHR010",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "top10_ratio"
+          ],
+          "params": {},
+          "column": {
+            "name": "SHR010",
+            "dtype": "float64",
+            "unit": "percent of total shares",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INT",
+      "id": "INT001",
+      "name": "holder_concentration_trend_confirm",
+      "formula": "hc * out.groupby('trade_date')['trend_consistency_120d'].transform(lambda s: _zscore(s.fillna(0))).clip(lower=0)",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "market_daily.close",
+        "shareholder_count_events.holder_num",
+        "top_holders_reports.top10_ratio"
+      ],
+      "lookback": 121,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "raw report operands preserve missing; source-explicit intermediate CS fill-zero and constant-group-zero; score validity is not complete report coverage",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INT001",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0659"
+          ],
+          "params": {},
+          "column": {
+            "name": "INT001",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INT",
+      "id": "INT002",
+      "name": "holder_concentration_low_vol_uptrend",
+      "formula": "hc * out.groupby('trade_date')['low_vol_uptrend_120d'].transform(lambda s: _zscore(s.fillna(0))).clip(lower=0)",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "market_daily.close",
+        "shareholder_count_events.holder_num",
+        "top_holders_reports.top10_ratio"
+      ],
+      "lookback": 121,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "raw report operands preserve missing; source-explicit intermediate CS fill-zero and constant-group-zero; score validity is not complete report coverage",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INT002",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0662"
+          ],
+          "params": {},
+          "column": {
+            "name": "INT002",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INT",
+      "id": "INT004",
+      "name": "margin_holder_trend_confirm",
+      "formula": "mt * out.groupby('trade_date')['holder_concentration_score'].transform(lambda s: _zscore(s.fillna(0))).clip(lower=0)",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "margin_daily.margin_balance",
+        "market_daily.close",
+        "shareholder_count_events.holder_num",
+        "top_holders_reports.top10_ratio"
+      ],
+      "lookback": 61,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "raw report operands preserve missing; source-explicit intermediate CS fill-zero and constant-group-zero; score validity is not complete report coverage",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INT004",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0664"
+          ],
+          "params": {},
+          "column": {
+            "name": "INT004",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "SHR",
+      "id": "SHR008",
+      "name": "holder_num_stale_days",
+      "formula": "(_td - _ha).dt.days.clip(lower=0)",
+      "dependencies": [
+        "shareholder_count_events.announcement_date"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "SHR008",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0666"
+          ],
+          "params": {},
+          "column": {
+            "name": "SHR008",
+            "dtype": "float64",
+            "unit": "days",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "SHR",
+      "id": "SHR009",
+      "name": "top10_holder_stale_days",
+      "formula": "(_td - _ta).dt.days.clip(lower=0)",
+      "dependencies": [
+        "top_holders_reports.announcement_date"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "SHR009",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0668"
+          ],
+          "params": {},
+          "column": {
+            "name": "SHR009",
+            "dtype": "float64",
+            "unit": "days",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "FND",
+      "id": "FND003",
+      "name": "pe_ttm",
+      "formula": "out['pe']",
+      "dependencies": [
+        "valuation_daily.pe_ttm"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "FND003",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "pe_ttm"
+          ],
+          "params": {},
+          "column": {
+            "name": "FND003",
+            "dtype": "float64",
+            "unit": "ratio",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "FND",
+      "id": "FND005",
+      "name": "ps_ttm",
+      "formula": "out['ps']",
+      "dependencies": [
+        "valuation_daily.ps_ttm"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "FND005",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "ps_ttm"
+          ],
+          "params": {},
+          "column": {
+            "name": "FND005",
+            "dtype": "float64",
+            "unit": "ratio",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "CFG",
+      "id": "CFG005",
+      "name": "$factor",
+      "formula": "$factor",
+      "dependencies": [
+        "adjustment_factors.factor"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "CFG005",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "raw_factor"
+          ],
+          "params": {},
+          "column": {
+            "name": "CFG005",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "TRD",
+      "id": "TRD006",
+      "name": "tradability_score",
+      "formula": "np.clip(tradability, 0.0, 1.0)",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "market_daily.close",
+        "price_limits.down_limit",
+        "price_limits.up_limit",
+        "security_status.is_suspended"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "TRD006",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0674"
+          ],
+          "params": {},
+          "column": {
+            "name": "TRD006",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "GRC",
+      "id": "GRC001",
+      "name": "forecast_type_score",
+      "formula": "fc_merged['type_score'].fillna(0)",
+      "dependencies": [
+        "forecast_events.forecast_type"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "GRC001",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0696"
+          ],
+          "params": {},
+          "column": {
+            "name": "GRC001",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "GRC",
+      "id": "GRC002",
+      "name": "forecast_stale_days",
+      "formula": "(out['_dt'] - fc_merged['forecast_ann_date']).dt.days.clip(lower=0).fillna(999).astype(int)",
+      "dependencies": [
+        "forecast_events.announcement_date"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "GRC002",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0698"
+          ],
+          "params": {},
+          "column": {
+            "name": "GRC002",
+            "dtype": "float64",
+            "unit": "days",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "GRC",
+      "id": "GRC003",
+      "name": "has_forecast",
+      "formula": "fc_merged['type_score'].notna().astype(float)",
+      "dependencies": [
+        "forecast_events.announcement_date"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "GRC003",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0701"
+          ],
+          "params": {},
+          "column": {
+            "name": "GRC003",
             "dtype": "float64",
             "unit": "dimensionless",
             "stage": "base",

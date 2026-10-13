@@ -318,6 +318,51 @@ for row in rows:
  if row['name'] in ('amount_zscore_20','is_profitable_ttm'):
   register(row,R[row['name']],note='Amount zscore uses complete 20-session windows and population std; zero std stays missing, matching recovered tracked SysQ helper blob bc225492ee6d9d63718ca65a95c941d3de2ef77c (not asserted present in pinned export). Profitability uses Data-derived native net-income TTM and preserves missing instead of false; v2 explicitly repairs source NaN comparison.')
   new[int(row['inventory_row'])]['semantic_version']='2.0.0'
+# Visible report observations are sequenced by distinct report period; revisions
+# never masquerade as an extra previous-quarter observation (explicit v2).
+R['holder_num_chg_qoq']=sub(div('holder_count','holder_count_previous1'),1)
+R['holder_num_chg_2q']=sub(div('holder_count','holder_count_previous2'),1)
+R['avg_shares_per_holder_chg_qoq']=sub(div('holder_count_previous1','holder_count'),1)
+R['top10_holder_ratio_chg_qoq']=sub(div('top10_ratio','top10_ratio_previous1'),1)
+R['top10_holder_ratio']='top10_ratio'
+R['holder_concentration_score']=div(add(add(mul(csz(R['holder_num_chg_qoq']),-1),csz(R['avg_shares_per_holder_chg_qoq'])),csz(R['top10_holder_ratio_chg_qoq'])),3)
+R['holder_squeeze_score']=mul(mul(csz(R['holder_num_chg_qoq']),-1),clip(csz(R['ret_60d']),0))
+R['holder_price_confirm_score']=mul(csz(R['holder_concentration_score']),clip(csz(R['ret_120d']),0))
+R['holder_concentration_trend_confirm']=mul(R['holder_concentration_score'],clip(csz(R['trend_consistency_120d']),0))
+R['holder_concentration_low_vol_uptrend']=mul(R['holder_concentration_score'],clip(csz(R['low_vol_uptrend_120d']),0))
+R['margin_holder_trend_confirm']=mul(R['margin_trend_confirm_score'],clip(csz(R['holder_concentration_score']),0))
+for row in rows:
+ if row['name'] in ('holder_num_chg_qoq','holder_num_chg_2q','avg_shares_per_holder_chg_qoq','top10_holder_ratio_chg_qoq','top10_holder_ratio','holder_concentration_score','holder_squeeze_score','holder_price_confirm_score','holder_concentration_trend_confirm','holder_concentration_low_vol_uptrend','margin_holder_trend_confirm'):
+  register(row,R[row['name']],note='v2 uses latest visible distinct report periods, with current cutoff-selected revisions, not trading shifts or corrections counted as new reports. Report lags mean previous observed report, not a guaranteed contiguous calendar quarter. Data preserves top10 completeness. Source composite fills are explicit; all three concentration components are required in the declared recipe.')
+  new[int(row['inventory_row'])]['semantic_version']='2.0.0'
+  if row['name'] not in ('holder_num_chg_qoq','holder_num_chg_2q','avg_shares_per_holder_chg_qoq','top10_holder_ratio_chg_qoq','top10_holder_ratio'):
+   new[int(row['inventory_row'])]['missing_policy']='raw report operands preserve missing; source-explicit intermediate CS fill-zero and constant-group-zero; score validity is not complete report coverage'
+meta['session_ordinal']=('days',0,'base',set())
+for prefix,name in (('holder','holder_num_stale_days'),('top10','top10_holder_stale_days')):
+ for row in rows:
+  if row['name']==name:
+   register(row,clip(sub('session_ordinal',prefix+'_announcement_ordinal'),0),note='Calendar-day age of the selected visible latest distinct report announcement; native date encoded as Gregorian ordinal, subtraction remains in Core. Missing announcement remains missing; report corrections retain their selected announcement date.')
+   new[int(row['inventory_row'])]['semantic_version']='2.0.0'
+# Explicit v2 corrections: true supplier TTM fields are not aliases of pe/ps.
+for leaf in ('pe_ttm','ps_ttm'):meta[leaf]=('ratio',0,'base',{'valuation_daily.'+leaf})
+meta['raw_factor']=('dimensionless',0,'base',{'adjustment_factors.factor'})
+for row in rows:
+ if row['name'] in ('pe_ttm','ps_ttm','$factor'):
+  register(row,'raw_factor' if row['name']=='$factor' else row['name'],note='Explicit v2 migration: TTM-named valuation features use their distinct native supplier TTM fields, not pe/ps aliases. Raw factor exposes the native supplier adjustment multiplier with its profile lineage, not an adjusted price or output-day normalized factor.')
+  new[int(row['inventory_row'])]['semantic_version']='2.0.0'
+meta['is_suspended']=('dimensionless',0,'base',{'security_status.is_suspended'})
+for row in rows:
+ if row['name']=='tradability_score':
+  register(row,clip(sub(sub(sub(1,'is_suspended'),mul(fl(R['is_limit_up']),.5)),mul(fl(R['is_limit_down']),.5)),0,1),note='v2 uses native historical suspension state and native-price limit flags. Boolean suspension is exactly 0/1; absent status remains missing, not assumed trading. Preserve unknown limits/status instead of source implicit fill-zero.')
+  new[int(row['inventory_row'])]['semantic_version']='2.0.0'
+score=const(0)
+for code,value in ((1,2),(2,1),(3,1.5),(4,.5),(5,-1),(6,-1),(7,-2),(8,-2)):
+ score=node('where',[binary('eq','forecast_category_code',code),const(value),score],{'missing':'preserve'})
+forecast_roots={'forecast_type_score':score,'forecast_stale_days':clip(sub('session_ordinal','forecast_announcement_ordinal'),0),'has_forecast':fl(gt('forecast_announcement_ordinal',0))}
+for row in rows:
+ if row['name'] in forecast_roots:
+  register(row,forecast_roots[row['name']],note='v2 selects latest cutoff-visible announcement, ties by report period, with Data revision selection; future forecast report periods are allowed. Native categories use stable codes, scoring remains Core (2,1,1.5,0.5,-1,-1,-2,-2; unknown supplied category 0). Absent/unknown announcement remains missing, not fabricated 0/999. Presence is 1 only for a visible supplied announcement.')
+  new[int(row['inventory_row'])]['semantic_version']='2.0.0'
 # Definitions preserve all old records. Registry records certified aliases separately.
 allids={f['id']:f for f in cat['features']}
 registry=[]

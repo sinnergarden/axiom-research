@@ -69,12 +69,14 @@ class FeatureColumnSource:
     def input_schema(self):
         fields=[{'name':f,'dtype':'float64','unit':'CNY' if f=='amount_cny' else 'CNY/share',
                  'stage':'fact','missing':'preserve'} for f in FIELDS[:-1]]
-        fields.extend(dict(name=f,dtype='float64',unit=m['unit'],stage='fact',missing='preserve')
+        fields.extend(dict(name=f,dtype='float64',unit='dimensionless' if m['dtype']=='bool' else m['unit'],stage='fact',missing='preserve')
                       for f,m in self.manifest.get('daily_fields',{}).items())
         if 'volume_shares' in self.manifest.get('daily_fields',{}):
             fields.append(dict(name='vwap',dtype='float64',unit='CNY/share',stage='fact',missing='preserve'))
         if 'up_limit' in self.manifest.get('daily_fields',{}):
             fields.extend(dict(name=f,dtype='float64',unit='CNY/share',stage='fact',missing='preserve') for f in ('raw_open','raw_close'))
+        fields.append(dict(name='raw_factor',dtype='float64',unit='dimensionless',stage='fact',missing='preserve'))
+        fields.append(dict(name='session_ordinal',dtype='float64',unit='days',stage='fact',missing='preserve'))
         return fields
 
     def physical_fields(self):
@@ -85,7 +87,8 @@ class FeatureColumnSource:
                 self.arrays[field+'::'+kind])
 
     def leaf_fields(self, field):
-        if field in ('raw_open','raw_close'): return (field[4:],)
+        if field=='session_ordinal': return ('close',)
+        if field in ('raw_open','raw_close','raw_factor'): return (field[4:],)
         if field == 'vwap': return ('amount_cny','volume_shares','factor')
         return (field,'factor') if field in FIELDS[:4] else (field,)
 
@@ -154,7 +157,15 @@ class FeatureColumnSource:
             return value if securities==spec['universe'] else value[:,positions]
         for field in fields:
             if field in FIELDS or field=='vwap': continue
-            if field in ('raw_open','raw_close'):
+            if field=='session_ordinal':
+                from datetime import date
+                days=spec['read_sessions'][begin:end]
+                selected_values[field]=np.broadcast_to(np.asarray([date.fromisoformat(d).toordinal() for d in days],dtype='float64')[:,None],(len(days),len(securities)))
+                selected_validity[field]=np.ones((len(days),len(securities)),dtype=bool)
+                selected_reasons[field]=np.zeros((len(days),len(securities)),dtype='u1')
+                selected_clocks[field]=np.zeros((len(days),len(securities)),dtype='<i8')
+                continue
+            if field in ('raw_open','raw_close','raw_factor'):
                 native=field[4:]
                 clock=np.where(leaf(native,'available_validity'),(leaf(native,'available')+999999)//1000000*1000000,cutoff)
                 require(bool((clock<=cutoff).all()),'future native price dependency')
@@ -407,11 +418,11 @@ def extend_feature_column_source(data, *, source, daily_fields, destination, blo
     for field,meta in daily_fields.items():
         require(type(field) is str and field.isidentifier() and type(meta) is dict and
                 set(meta)=={'domain','dtype','unit'},'typed daily field declaration required')
-        require(meta['dtype'] in ('float64','int64'),'numeric daily field dtype required')
+        require(meta['dtype'] in ('float64','int64','bool'),'numeric daily field dtype required')
         domain=snapshot['domains'][meta['domain']]; contract=domain['contract']; profile=domain['source_profile']
         require(contract['logical_key']==['security_id','session'],'event domains require explicit as-of selection')
         actual=contract['fields'][field]
-        require(actual['dtype']==meta['dtype'] and actual['unit']==meta['unit'],'daily field dtype/unit mismatch')
+        require(actual['dtype']==meta['dtype'] and actual.get('unit')==meta['unit'],'daily field dtype/unit mismatch')
         require(all(instant_us(_release_time(profile,d).isoformat())<=instant_us(spec['cutoff_by_session'][d])
                     for d in spec['read_sessions']),'hidden later release prevents daily extension')
         if field=='volume_shares':

@@ -142,9 +142,11 @@ class SavedColumnFeatureSource:
             if field!='amount_cny': result[field].update(adjustment='Data.adjust_prices_output_day_anchor_v1',
                 factor_profile=self._field_profile(profiles['adjustment_factors'],'factor'))
         for field,meta in self.source.manifest.get('daily_fields',{}).items():
-            result[field]={'value_projection':'native_binary64_v1',
+            result[field]={'value_projection':'boolean_0_1_binary64_v1' if meta['dtype']=='bool' else 'native_binary64_v1',
                 'source_profile':self._field_profile(profiles[meta['domain']],field), 'missing':'preserve',
                 'clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
+        result['raw_factor']={'value_projection':'native_binary64_v1','source_profile':self._field_profile(profiles['adjustment_factors'],'factor'),'meaning':'native_supplier_adjustment_multiplier; not anchor-normalized price','missing':'preserve','clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
+        result['session_ordinal']={'projection':'proleptic_gregorian_session_date_ordinal_v1','unit':'days','missing':'preserve'}
         if 'up_limit' in result:
             for field in ('raw_open','raw_close'):
                 result[field]={'value_projection':'native_binary64_v1','source_profile':self._field_profile(profiles['market_daily'],field[4:]),'missing':'preserve','adjustment':'none','clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}

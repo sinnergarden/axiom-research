@@ -102,3 +102,34 @@ CORE_INPUT_CONTRACTS['benchmark_close']={'domain':'benchmark_daily','dtype':'flo
 
 FINANCIAL_FIELD_CONTRACTS['reported_net_income']['outputs']['ttm_net_income']={'derivation':'ttm','quarters_back':0}
 CORE_INPUT_CONTRACTS['ttm_net_income']={'domain':'financial_events','dtype':'float64','unit':'CNY'}
+
+# Distinct report observations: corrections remain the same report, never a new lag.
+for _field,_domain,_unit,_prefix,_lags in (
+    ('holder_num','shareholder_count_events','holders','holder_count',3),
+    ('top10_ratio','top_holders_reports','percent of total shares','top10_ratio',2)):
+    _outputs={_prefix+('' if i==0 else '_previous'+str(i)):{'derivation':'report_observation','reports_back':i} for i in range(_lags)}
+    FINANCIAL_FIELD_CONTRACTS[_prefix]={'domain':_domain,'field':_field,'endpoint':None,
+        'report_type':None,'basis':'reported','unit':_unit,'session_timezone':'Asia/Shanghai',
+        'visibility':'strict_before_session_start','outputs':_outputs}
+    CORE_INPUT_CONTRACTS.update({leaf:{'domain':_domain,'dtype':'float64','unit':_unit} for leaf in (_field,*_outputs)})
+
+for _domain,_prefix in (('shareholder_count_events','holder'),('top_holders_reports','top10')):
+    _leaf=_prefix+'_announcement_ordinal'
+    FINANCIAL_FIELD_CONTRACTS[_leaf]={'domain':_domain,'field':'announcement_date','endpoint':None,
+        'report_type':None,'basis':'reported','unit':'days','session_timezone':'Asia/Shanghai',
+        'visibility':'strict_before_session_start','outputs':{_leaf:{'derivation':'report_announcement_ordinal','reports_back':0}}}
+    CORE_INPUT_CONTRACTS[_leaf]={'domain':_domain,'dtype':'float64','unit':'days'}
+CORE_INPUT_CONTRACTS['session_ordinal']={'domain':'calendar','dtype':'float64','unit':'days'}
+
+CORE_INPUT_CONTRACTS['raw_factor']={'domain':'adjustment_factors','dtype':'float64','unit':'dimensionless'}
+
+DAILY_FIELD_CONTRACTS['is_suspended']={'domain':'security_status','dtype':'bool','unit':None}
+CORE_INPUT_CONTRACTS['is_suspended']={'domain':'security_status','dtype':'float64','unit':'dimensionless'}
+
+for _field,_leaf,_unit,_derivation in (
+    ('forecast_type','forecast_category_code','dimensionless','forecast_category_code'),
+    ('announcement_date','forecast_announcement_ordinal','days','report_announcement_ordinal')):
+    FINANCIAL_FIELD_CONTRACTS[_leaf]={'domain':'forecast_events','field':_field,'endpoint':None,
+        'report_type':None,'basis':'reported','unit':_unit,'session_timezone':'Asia/Shanghai',
+        'visibility':'strict_before_session_start','outputs':{_leaf:{'derivation':_derivation,'reports_back':0}}}
+    CORE_INPUT_CONTRACTS[_leaf]={'domain':'forecast_events','dtype':'float64','unit':_unit}
