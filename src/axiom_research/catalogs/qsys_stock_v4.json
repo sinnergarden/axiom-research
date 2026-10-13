@@ -16610,6 +16610,327 @@
         "stage": "cross_sectional",
         "missing": "preserve"
       }
+    },
+    {
+      "name": "_qsys_0623",
+      "op": "pct_change",
+      "version": "1",
+      "inputs": [
+        "benchmark_close"
+      ],
+      "params": {
+        "periods": 3,
+        "fill_method": "none",
+        "zero": "missing"
+      },
+      "column": {
+        "name": "_qsys_0623",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0624",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_qsys_0248",
+        "_qsys_0623"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0624",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0625",
+      "op": "pct_change",
+      "version": "1",
+      "inputs": [
+        "benchmark_close"
+      ],
+      "params": {
+        "periods": 5,
+        "fill_method": "none",
+        "zero": "missing"
+      },
+      "column": {
+        "name": "_qsys_0625",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0626",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_qsys_0249",
+        "_qsys_0625"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0626",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0627",
+      "op": "pct_change",
+      "version": "1",
+      "inputs": [
+        "benchmark_close"
+      ],
+      "params": {
+        "periods": 1,
+        "fill_method": "none",
+        "zero": "missing"
+      },
+      "column": {
+        "name": "_qsys_0627",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0628",
+      "op": "rolling",
+      "version": "1",
+      "inputs": [
+        "_qsys_0627"
+      ],
+      "params": {
+        "window": 5,
+        "min_periods": 5,
+        "inclusive_current": true,
+        "reduction": "std",
+        "missing": "propagate",
+        "ddof": 1,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0628",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0629",
+      "op": "rolling",
+      "version": "1",
+      "inputs": [
+        "_qsys_0627"
+      ],
+      "params": {
+        "window": 10,
+        "min_periods": 10,
+        "inclusive_current": true,
+        "reduction": "std",
+        "missing": "propagate",
+        "ddof": 1,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0629",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0630",
+      "op": "rolling",
+      "version": "1",
+      "inputs": [
+        "_qsys_0627"
+      ],
+      "params": {
+        "window": 20,
+        "min_periods": 20,
+        "inclusive_current": true,
+        "reduction": "std",
+        "missing": "propagate",
+        "ddof": 1,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0630",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0631",
+      "op": "pct_change",
+      "version": "1",
+      "inputs": [
+        "benchmark_close"
+      ],
+      "params": {
+        "periods": 20,
+        "fill_method": "none",
+        "zero": "missing"
+      },
+      "column": {
+        "name": "_qsys_0631",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0632",
+      "op": "rolling",
+      "version": "1",
+      "inputs": [
+        "_a01_0015"
+      ],
+      "params": {
+        "window": 20,
+        "min_periods": 20,
+        "inclusive_current": true,
+        "reduction": "mean",
+        "missing": "propagate",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0632",
+        "dtype": "float64",
+        "unit": "CNY",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0633",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_a01_0015",
+        "_qsys_0632"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0633",
+        "dtype": "float64",
+        "unit": "CNY",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0634",
+      "op": "rolling",
+      "version": "1",
+      "inputs": [
+        "_a01_0015"
+      ],
+      "params": {
+        "window": 20,
+        "min_periods": 20,
+        "inclusive_current": true,
+        "reduction": "std",
+        "missing": "propagate",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0634",
+        "dtype": "float64",
+        "unit": "CNY",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0635",
+      "op": "divide",
+      "version": "1",
+      "inputs": [
+        "_qsys_0633",
+        "_qsys_0634"
+      ],
+      "params": {
+        "zero": "missing"
+      },
+      "column": {
+        "name": "_qsys_0635",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0636",
+      "op": "constant",
+      "version": "1",
+      "inputs": [],
+      "params": {
+        "value": 0
+      },
+      "column": {
+        "name": "_qsys_0636",
+        "dtype": "float64",
+        "unit": "CNY",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0637",
+      "op": "gt",
+      "version": "1",
+      "inputs": [
+        "ttm_net_income",
+        "_qsys_0636"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0637",
+        "dtype": "bool",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0638",
+      "op": "to_float",
+      "version": "1",
+      "inputs": [
+        "_qsys_0637"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0638",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
     }
   ],
   "features": [
@@ -31793,6 +32114,346 @@
             "dtype": "float64",
             "unit": "dimensionless",
             "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "RST",
+      "id": "RST015",
+      "name": "stock_minus_index_ret_3d",
+      "formula": "out['ret_3d'] - idx_ret_3",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "benchmark_daily.close",
+        "market_daily.close"
+      ],
+      "lookback": 4,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "RST015",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0624"
+          ],
+          "params": {},
+          "column": {
+            "name": "RST015",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "RST",
+      "id": "RST016",
+      "name": "stock_minus_index_ret_5d",
+      "formula": "out['ret_5d'] - idx_ret_5",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "benchmark_daily.close",
+        "market_daily.close"
+      ],
+      "lookback": 6,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "RST016",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0626"
+          ],
+          "params": {},
+          "column": {
+            "name": "RST016",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "REG",
+      "id": "REG003",
+      "name": "index_volatility_5",
+      "formula": "idx_close.pct_change().rolling(5).std()",
+      "dependencies": [
+        "benchmark_daily.close"
+      ],
+      "lookback": 6,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "REG003",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0628"
+          ],
+          "params": {},
+          "column": {
+            "name": "REG003",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "REG",
+      "id": "REG004",
+      "name": "index_volatility_10",
+      "formula": "idx_close.pct_change().rolling(10).std()",
+      "dependencies": [
+        "benchmark_daily.close"
+      ],
+      "lookback": 11,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "REG004",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0629"
+          ],
+          "params": {},
+          "column": {
+            "name": "REG004",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "REG",
+      "id": "REG005",
+      "name": "index_volatility_20",
+      "formula": "idx_close.pct_change().rolling(20).std()",
+      "dependencies": [
+        "benchmark_daily.close"
+      ],
+      "lookback": 21,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "REG005",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0630"
+          ],
+          "params": {},
+          "column": {
+            "name": "REG005",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "REG",
+      "id": "REG008",
+      "name": "market_trend_strength",
+      "formula": "idx_close / idx_close.shift(20) - 1",
+      "dependencies": [
+        "benchmark_daily.close"
+      ],
+      "lookback": 21,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "REG008",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0631"
+          ],
+          "params": {},
+          "column": {
+            "name": "REG008",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "GRC",
+      "id": "GRC006",
+      "name": "is_profitable_ttm",
+      "formula": "(inc['ttm_n_income'] > 0).astype(float)\npd.to_numeric(inc_merged[col], errors='coerce')",
+      "dependencies": [
+        "financial_events.net_income"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "GRC006",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0638"
+          ],
+          "params": {},
+          "column": {
+            "name": "GRC006",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "LIQ",
+      "id": "LIQ003",
+      "name": "amount_zscore_20",
+      "formula": "out.groupby('ts_code')['amount'].transform(lambda s: rolling_zscore(s, 20))",
+      "dependencies": [
+        "market_daily.amount_cny"
+      ],
+      "lookback": 20,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "LIQ003",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0635"
+          ],
+          "params": {},
+          "column": {
+            "name": "LIQ003",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
             "missing": "preserve"
           }
         }

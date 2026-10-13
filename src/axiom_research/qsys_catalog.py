@@ -114,6 +114,10 @@ def qsys_input_requirements(names: Sequence[str] | None = None) -> dict[str, dic
             bound_event_dependencies.add(contract['domain'] + '.' + contract['field'])
     if 'market_daily.vwap' in dependencies:
         dependencies.add('market_daily.volume_shares')
+    benchmark={}
+    if 'benchmark_close' in leaves:
+        benchmark={'benchmark_close':{'domain':'benchmark_daily','field':'close','dtype':'float64','unit':'index points','identity':'explicit_caller_binding'}}
+        bound_event_dependencies.add('benchmark_daily.close')
     daily = {}
     for dependency in sorted(dependencies):
         domain, field = dependency.split('.')
@@ -125,7 +129,7 @@ def qsys_input_requirements(names: Sequence[str] | None = None) -> dict[str, dic
         if declaration is None or declaration['domain'] != domain:
             raise FeatureCatalogError('dependency requires a separately bound input bridge: ' + dependency)
         daily[field] = dict(declaration)
-    return {'daily_fields': daily, 'financial_fields': financial}
+    return {'daily_fields': daily, 'financial_fields': financial, 'benchmark_fields': benchmark}
 
 
 def qsys_daily_fields(names: Sequence[str] | None = None) -> dict[str, dict[str, str]]:
@@ -137,8 +141,8 @@ def qsys_daily_fields(names: Sequence[str] | None = None) -> dict[str, dict[str,
     inputs silently would make the preparation request incomplete.
     """
     requirements = qsys_input_requirements(names)
-    if requirements['financial_fields']:
-        raise FeatureCatalogError('selection requires financial materialization; use qsys_input_requirements() for complete daily_fields and financial_fields')
+    if requirements['financial_fields'] or requirements['benchmark_fields']:
+        raise FeatureCatalogError('selection requires separately bound inputs; use qsys_input_requirements() for complete daily_fields and financial_fields')
     return requirements['daily_fields']
 
 

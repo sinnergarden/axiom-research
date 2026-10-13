@@ -8784,12 +8784,12 @@
       },
       "candidate_id": "GRC006",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "profitability_missing_policy",
-        "reason": "Source turns absent profitability inputs into false/zero; definition requires an explicit missing-input policy before admission."
+      "status": "executable",
+      "selection": {
+        "id": "GRC006",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Amount zscore uses complete 20-session windows and population std; zero std stays missing, matching recovered tracked SysQ helper blob bc225492ee6d9d63718ca65a95c941d3de2ef77c (not asserted present in pinned export). Profitability uses Data-derived native net-income TTM and preserves missing instead of false; v2 explicitly repairs source NaN comparison."
     },
     {
       "feature_key": "gross_margin_delta_yoy",
@@ -9479,12 +9479,12 @@
       },
       "candidate_id": "LIQ003",
       "candidate_alias": "LQD004",
-      "status": "blocked",
-      "blocker": {
-        "code": "rolling_policy_review",
-        "reason": "Fixed source inventory imports rolling_zscore, but its helper implementation is absent from the pinned source export; min_periods, ddof and zero-scale policy are not established."
+      "status": "executable",
+      "selection": {
+        "id": "LIQ003",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Amount zscore uses complete 20-session windows and population std; zero std stays missing, matching recovered tracked SysQ helper blob bc225492ee6d9d63718ca65a95c941d3de2ef77c (not asserted present in pinned export). Profitability uses Data-derived native net-income TTM and preserves missing instead of false; v2 explicitly repairs source NaN comparison."
     },
     {
       "feature_key": "volume_shock_3",
@@ -10827,12 +10827,12 @@
       },
       "candidate_id": "RST015",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "index_session_binding",
-        "reason": "Index identity/calendar and one-row-per-session return calculation must be bound; QSYS repeated-row pct_change is not certified."
+      "status": "executable",
+      "selection": {
+        "id": "RST015",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Explicit caller-bound benchmark identity is part of input semantics; one native unadjusted index close per stock-calendar session is broadcast. Returns/volatility operate along sessions, never repeated stock rows. Missing sessions remain missing; v2 corrects source repeated-row/index alignment."
     },
     {
       "feature_key": "stock_minus_index_ret_5d",
@@ -10883,12 +10883,12 @@
       },
       "candidate_id": "RST016",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "index_session_binding",
-        "reason": "Index identity/calendar and one-row-per-session return calculation must be bound; QSYS repeated-row pct_change is not certified."
+      "status": "executable",
+      "selection": {
+        "id": "RST016",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Explicit caller-bound benchmark identity is part of input semantics; one native unadjusted index close per stock-calendar session is broadcast. Returns/volatility operate along sessions, never repeated stock rows. Missing sessions remain missing; v2 corrects source repeated-row/index alignment."
     },
     {
       "feature_key": "stock_minus_industry_ret_3d",
@@ -12421,12 +12421,12 @@
       },
       "candidate_id": "REG003",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "index_session_binding",
-        "reason": "Index identity/calendar and one-row-per-session return calculation must be bound; QSYS repeated-row pct_change is not certified."
+      "status": "executable",
+      "selection": {
+        "id": "REG003",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Explicit caller-bound benchmark identity is part of input semantics; one native unadjusted index close per stock-calendar session is broadcast. Returns/volatility operate along sessions, never repeated stock rows. Missing sessions remain missing; v2 corrects source repeated-row/index alignment."
     },
     {
       "feature_key": "index_volatility_10",
@@ -12455,12 +12455,12 @@
       },
       "candidate_id": "REG004",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "index_session_binding",
-        "reason": "Index identity/calendar and one-row-per-session return calculation must be bound; QSYS repeated-row pct_change is not certified."
+      "status": "executable",
+      "selection": {
+        "id": "REG004",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Explicit caller-bound benchmark identity is part of input semantics; one native unadjusted index close per stock-calendar session is broadcast. Returns/volatility operate along sessions, never repeated stock rows. Missing sessions remain missing; v2 corrects source repeated-row/index alignment."
     },
     {
       "feature_key": "index_volatility_20",
@@ -12489,12 +12489,12 @@
       },
       "candidate_id": "REG005",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "index_session_binding",
-        "reason": "Index identity/calendar and one-row-per-session return calculation must be bound; QSYS repeated-row pct_change is not certified."
+      "status": "executable",
+      "selection": {
+        "id": "REG005",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Explicit caller-bound benchmark identity is part of input semantics; one native unadjusted index close per stock-calendar session is broadcast. Returns/volatility operate along sessions, never repeated stock rows. Missing sessions remain missing; v2 corrects source repeated-row/index alignment."
     },
     {
       "feature_key": "small_vs_large_strength",
@@ -12635,12 +12635,12 @@
       },
       "candidate_id": "REG008",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "index_session_binding",
-        "reason": "Index identity/calendar and one-row-per-session return calculation must be bound; QSYS repeated-row pct_change is not certified."
+      "status": "executable",
+      "selection": {
+        "id": "REG008",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Explicit caller-bound benchmark identity is part of input semantics; one native unadjusted index close per stock-calendar session is broadcast. Returns/volatility operate along sessions, never repeated stock rows. Missing sessions remain missing; v2 corrects source repeated-row/index alignment."
     },
     {
       "feature_key": "industry_ret_1d",

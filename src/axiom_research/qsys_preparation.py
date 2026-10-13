@@ -7,7 +7,7 @@ from .stock_fold_inputs import require
 
 def prepare_qsys_inputs(data, *, source, names, destination, event_snapshots,
                         report_start, report_end, security_ids=None,
-                        daily_snapshot=None, block_sessions=20,
+                        daily_snapshot=None, benchmark_snapshot=None, benchmark_security_id=None, block_sessions=20,
                         maximum_added_bytes=512*1024**2,
                         maximum_event_cache_bytes=64*1024**2):
     """Append only inputs absent from a saved physical source for a subset.
@@ -56,4 +56,15 @@ def prepare_qsys_inputs(data, *, source, names, destination, event_snapshots,
             session_timezone=bundle['session_timezone'],block_sessions=block_sessions,
             maximum_added_bytes=maximum_added_bytes,
             maximum_event_cache_bytes=maximum_event_cache_bytes)
+    if requirements['benchmark_fields']:
+        if 'benchmark_close' in source.physical_fields():
+            existing=source.manifest['source_profiles']['materialized_benchmark_daily']['source_profile']['benchmark_security_id']
+            require(benchmark_security_id==existing,'existing benchmark identity differs from request')
+            metrics['reused_fields'].append('benchmark_close')
+        else:
+            from .benchmark_feature_columns import extend_benchmark_feature_source
+            source,metrics['benchmark']=extend_benchmark_feature_source(data,source=source,
+                snapshot=benchmark_snapshot,benchmark_security_id=benchmark_security_id,
+                destination=root/'benchmark',block_sessions=block_sessions,
+                maximum_added_bytes=maximum_added_bytes)
     return source,metrics

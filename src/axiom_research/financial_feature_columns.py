@@ -114,12 +114,13 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
     shape=(len(days),len(symbols)); required=len(days)*len(symbols)*27*len(outputs)
     require(type(maximum_added_bytes) is int and required<=maximum_added_bytes,'financial output buffer budget exceeded')
     root=Path(destination);root.mkdir(parents=True,exist_ok=True)
+    from .feature_input_buffers import allocate_feature_buffer, seal_feature_buffer
     arrays=dict(source.arrays)
     kinds={'values':('<f8','float64_le'),'original_values':('<f8','float64_le'),
            'validity':(bool,'bool_u8'),'available':('<i8','int64_le'),
            'available_validity':(bool,'bool_u8'),'reasons':('u1','uint8')}
     for name in outputs:
-        for kind,(dtype,_) in kinds.items(): arrays[name+'::'+kind]=np.zeros(shape,dtype=dtype)
+        for kind,(dtype,_) in kinds.items(): arrays[name+'::'+kind]=allocate_feature_buffer(root,dtype=dtype,shape=shape)
     declarations={name:{**projection,'source_domain':query.domain,'source_field':field,
         'endpoint':query.filters['endpoint'],'report_type':query.filters.get('report_type'),'basis':actual.get('basis','reported'),
         'unit':unit,'selection':POLICY,'session_timezone':session_timezone,'recipe_version':FINANCIAL_RECIPE_VERSION,
@@ -200,7 +201,7 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
     for name in outputs:
         for kind,(_,dtype) in kinds.items():
             value=arrays[name+'::'+kind]
-            manifest['buffers'][name+'::'+kind]=write_buffer(root,value.astype('u1').reshape(-1) if dtype=='bool_u8' else value.reshape(-1),dtype=dtype,shape=list(shape))
+            manifest['buffers'][name+'::'+kind],arrays[name+'::'+kind]=seal_feature_buffer(root,value,dtype=dtype,shape=shape)
     manifest.setdefault('daily_fields',{}).update({n:{'domain':DOMAIN,'dtype':'float64','unit':unit} for n in outputs})
     manifest.setdefault('financial_materializations',{}).update(declarations)
     manifest.setdefault('daily_extensions',[]).append({'fields':list(outputs),'chunks':chunks})

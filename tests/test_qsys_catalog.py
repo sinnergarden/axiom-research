@@ -42,9 +42,9 @@ class QsysCatalogTests(unittest.TestCase):
     def test_388_traceable_rows_and_no_blocked_placeholders(self):
         registry=load_qsys_feature_registry();rows=registry['rows']
         self.assertEqual(len(rows),388)
-        self.assertEqual(sum(r['status']=='executable' for r in rows),329)
+        self.assertEqual(sum(r['status']=='executable' for r in rows),337)
         self.assertEqual(sum(r['status']=='alias' for r in rows),2)
-        self.assertEqual(sum(r['status']=='blocked' for r in rows),57)
+        self.assertEqual(sum(r['status']=='blocked' for r in rows),49)
         for r in rows:
             self.assertTrue(r['expression']);self.assertTrue(r['qsys_source'])
             if r['status']=='blocked':self.assertNotIn('selection',r)
@@ -109,6 +109,8 @@ class QsysCatalogTests(unittest.TestCase):
         self.assertNotIn('valuation_daily.ps',{d for f in catalog.definitions for d in f['dependencies']})
         requirements=qsys_input_requirements()
         extensions=requirements['daily_fields']
+        if requirements['benchmark_fields']:
+            extensions['benchmark_close']={'domain':'materialized_benchmark_daily','dtype':'float64','unit':'index points'}
         for bundle in requirements['financial_fields'].values():
             physical=canonical[bundle['domain']]['fields'][bundle['field']]
             self.assertEqual((physical['unit'],physical.get('basis','reported')),(bundle['unit'],bundle['basis']))
@@ -125,6 +127,9 @@ class QsysCatalogTests(unittest.TestCase):
                 {k:CORE_INPUT_CONTRACTS[field][k] for k in ('dtype','unit')})
         for dep in {d for f in catalog.definitions for d in f['dependencies']}:
             domain,field=dep.split('.')
+            if domain=='benchmark_daily':
+                self.assertEqual(CORE_INPUT_CONTRACTS['benchmark_close']['unit'],'index points')
+                continue
             self.assertEqual(CORE_INPUT_CONTRACTS[field]['domain'],domain)
             if field=='vwap' or domain=='adjustment_factors':continue
             self.assertEqual(CORE_INPUT_CONTRACTS[field]['unit'],canonical[domain]['fields'][field]['unit'])
@@ -148,15 +153,13 @@ class QsysCatalogTests(unittest.TestCase):
             value=execute_feature_plan(plan,facts,context).to_dict()['rows'][0]['values'][0]
             if expected is None:self.assertIsNone(value)
             else:self.assertAlmostEqual(value,expected)
-        # The disputed NaN->0 profitability recipe remains explicitly blocked.
-        with self.assertRaisesRegex(FeatureCatalogError,'blocked'):
-            select_qsys_features(['is_profitable_ttm'])
+        self.assertEqual(select_qsys_features(['is_profitable_ttm'])[0].semantic_version,'2.0.0')
 
     def test_every_recipe_compiles_and_executes_through_core(self):
         catalog=load_qsys_feature_catalog();base,facts,context=fixture()
         for normalized in (False,True):
             plan=build_feature_plan(base,catalog.default_selection,catalog=catalog,normalized=normalized)
-            self.assertEqual(len(plan.to_dict()['outputs']),346)
+            self.assertEqual(len(plan.to_dict()['outputs']),354)
         plan=build_feature_plan(base,catalog.default_selection,catalog=catalog)
         out=execute_feature_plan(plan,facts,context).to_dict()
         actual={f['name']:v for f,v in zip(catalog.definitions,out['rows'][0]['values'])}

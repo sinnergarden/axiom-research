@@ -432,12 +432,13 @@ def extend_feature_column_source(data, *, source, daily_fields, destination, blo
     require(type(maximum_added_bytes) is int and maximum_added_bytes>0 and
             len(days)*len(symbols)*27*len(daily_fields)<=maximum_added_bytes,
             'daily extension buffers exceed maximum_added_bytes')
+    from .feature_input_buffers import allocate_feature_buffer, seal_feature_buffer
     arrays=dict(source.arrays); metrics={'data_read_calls':0,'added_fields':len(daily_fields),'existing_field_reads':0}
     kinds={'values':('<f8','float64_le'),'original_values':('<f8','float64_le'),
         'validity':(bool,'bool_u8'),'available':('<i8','int64_le'),
         'available_validity':(bool,'bool_u8'),'reasons':('u1','uint8')}
     for field in daily_fields:
-        for kind,(dtype,_) in kinds.items(): arrays[field+'::'+kind]=np.zeros(shape,dtype=dtype)
+        for kind,(dtype,_) in kinds.items(): arrays[field+'::'+kind]=allocate_feature_buffer(root,dtype=dtype,shape=shape)
     chunks=[]
     for offset in range(0,len(days),block_sessions):
         selected=days[offset:offset+block_sessions]; keys=[(s,d) for d in selected for s in symbols]
@@ -480,8 +481,7 @@ def extend_feature_column_source(data, *, source, daily_fields, destination, blo
     for field in daily_fields:
         for kind,(_,dtype) in kinds.items():
             name=field+'::'+kind; value=arrays[name]
-            manifest['buffers'][name]=write_buffer(root,value.astype('u1').reshape(-1) if dtype=='bool_u8' else value.reshape(-1),
-                dtype=dtype,shape=list(shape))
+            manifest['buffers'][name],arrays[name]=seal_feature_buffer(root,value,dtype=dtype,shape=shape)
     manifest['daily_fields']={**previous,**deepcopy(daily_fields)}
     manifest.setdefault('daily_extensions',[]).append({'fields':list(daily_fields),'chunks':chunks})
     manifest.pop('source_ref'); manifest=seal(manifest,'source_ref')

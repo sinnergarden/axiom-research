@@ -97,3 +97,8 @@ DAILY_FIELD_CONTRACTS.update({field:{'domain':'price_limits','dtype':'float64','
     for field in ('up_limit','down_limit')})
 CORE_INPUT_CONTRACTS.update({field:dict(spec) for field,spec in DAILY_FIELD_CONTRACTS.items() if field in ('up_limit','down_limit')})
 CORE_INPUT_CONTRACTS.update({field:{'domain':'market_daily','dtype':'float64','unit':'CNY/share'} for field in ('raw_close','raw_open')})
+
+CORE_INPUT_CONTRACTS['benchmark_close']={'domain':'benchmark_daily','dtype':'float64','unit':'index points'}
+
+FINANCIAL_FIELD_CONTRACTS['reported_net_income']['outputs']['ttm_net_income']={'derivation':'ttm','quarters_back':0}
+CORE_INPUT_CONTRACTS['ttm_net_income']={'domain':'financial_events','dtype':'float64','unit':'CNY'}

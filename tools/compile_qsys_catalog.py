@@ -302,6 +302,22 @@ for row in rows:
 for row in rows:
  if row['name'] in ('continuation_candidate_score','repair_candidate_score','overheat_risk_score','margin_crowding_score','margin_trend_confirm_score','margin_overheat_risk_score','margin_pullback_recovery_confirm','value_trap_risk_score'):
   new[int(row['inventory_row'])]['missing_policy']='raw inputs preserve missing; source-explicit intermediate fill and constant-group policies are encoded in DAG; score validity is not input-completeness evidence'
+# The benchmark bridge binds one explicit index and one observation per session.
+meta['benchmark_close']=('index points',0,'base',{'benchmark_daily.close'})
+for w in (3,5):R[f'stock_minus_index_ret_{w}d']=sub(ret(c,w),ret('benchmark_close',w))
+for w in (5,10,20):R[f'index_volatility_{w}']=roll(ret('benchmark_close'),w,'std')
+R['market_trend_strength']=ret('benchmark_close',20)
+for row in rows:
+ if row['name'] in ('stock_minus_index_ret_3d','stock_minus_index_ret_5d','index_volatility_5','index_volatility_10','index_volatility_20','market_trend_strength'):
+  register(row,R[row['name']],note='Explicit caller-bound benchmark identity is part of input semantics; one native unadjusted index close per stock-calendar session is broadcast. Returns/volatility operate along sessions, never repeated stock rows. Missing sessions remain missing; v2 corrects source repeated-row/index alignment.')
+  new[int(row['inventory_row'])]['semantic_version']='2.0.0'
+# Recovered tracked helper: SysQ transforms blob bc225492ee6d9d63718ca65a95c941d3de2ef77c.
+R['amount_zscore_20']=div(sub(a,roll(a,20)),roll(a,20,'std',ddof=0))
+R['is_profitable_ttm']=fl(gt('ttm_net_income',0))
+for row in rows:
+ if row['name'] in ('amount_zscore_20','is_profitable_ttm'):
+  register(row,R[row['name']],note='Amount zscore uses complete 20-session windows and population std; zero std stays missing, matching recovered tracked SysQ helper blob bc225492ee6d9d63718ca65a95c941d3de2ef77c (not asserted present in pinned export). Profitability uses Data-derived native net-income TTM and preserves missing instead of false; v2 explicitly repairs source NaN comparison.')
+  new[int(row['inventory_row'])]['semantic_version']='2.0.0'
 # Definitions preserve all old records. Registry records certified aliases separately.
 allids={f['id']:f for f in cat['features']}
 registry=[]
