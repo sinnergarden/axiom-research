@@ -145,6 +145,9 @@ class SavedColumnFeatureSource:
             result[field]={'value_projection':'native_binary64_v1',
                 'source_profile':self._field_profile(profiles[meta['domain']],field), 'missing':'preserve',
                 'clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
+        if 'up_limit' in result:
+            for field in ('raw_open','raw_close'):
+                result[field]={'value_projection':'native_binary64_v1','source_profile':self._field_profile(profiles['market_daily'],field[4:]),'missing':'preserve','adjustment':'none','clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
         for field in self.source.manifest.get('financial_materializations',{}):
             result[field]['value_projection']='Data_financial_derivation_binary64_v1'
         if 'volume_shares' in result:
@@ -166,6 +169,9 @@ class SavedColumnFeatureSource:
         selected.pop('identity_map',None)
         if selected.get('id')=='research.financial_materialization.v1':
             projection=selected['projections'][field]
+            field_inputs=selected.pop('financial_inputs_by_field',None)
+            if field_inputs is not None:
+                selected['financial_inputs']=field_inputs[field]
             selected['projections']={field:projection}
             selected['financial_inputs']=SavedColumnFeatureSource._field_profile(
                 selected['financial_inputs'],projection['source_field'])

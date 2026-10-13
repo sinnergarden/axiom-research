@@ -21,13 +21,13 @@ QSYS_SOURCE_REVISION = "852bcb73125f8781b7a80618b8188928ef4d38f2"
 def load_qsys_feature_catalog() -> FeatureCatalog:
     """Load executable recipes; this does not assert historical input coverage."""
     return FeatureCatalog(files("axiom_research").joinpath(
-        "catalogs", "qsys_stock_v3.json").read_text(encoding="utf-8"))
+        "catalogs", "qsys_stock_v4.json").read_text(encoding="utf-8"))
 
 
 def load_qsys_feature_registry() -> dict:
     """Return a fresh, validated mapping of all 388 forensic source rows."""
     value = json.loads(files("axiom_research").joinpath(
-        "catalogs", "qsys_registry_v3.json").read_text(encoding="utf-8"))
+        "catalogs", "qsys_registry_v4.json").read_text(encoding="utf-8"))
     if (value["schema_version"] != "qsys_registry_v1" or
             value["source_revision"] != QSYS_SOURCE_REVISION or
             {r["inventory_row"] for r in value["rows"]} != set(range(1, 389)) or

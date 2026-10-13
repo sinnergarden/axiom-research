@@ -17,12 +17,8 @@ def fixture(count=760, changes=None):
     nodes = catalog.to_dict()['shared_nodes'] + [n for f in catalog.definitions for n in f['core_nodes']]
     named = {n['name'] for n in nodes}
     leaves = sorted({a for n in nodes for a in n['inputs'] if a not in named})
-    def unit(n):
-        if n in ('open','high','low','close','vwap'): return 'CNY/share'
-        if n in ('volume_shares','lend_volume','lend_repay_volume'): return 'shares'
-        if n in ('pe','pb'): return 'ratio'
-        if n == 'turnover_rate': return 'percent'
-        return 'CNY'
+    from axiom_research.qsys_input_contracts import CORE_INPUT_CONTRACTS
+    def unit(n):return CORE_INPUT_CONTRACTS[n]['unit']
     schema = [dict(name=n,dtype='float64',unit=unit(n),stage='fact',missing='preserve') for n in leaves]
     sessions = [(date(2020,1,1)+timedelta(days=i)).isoformat() for i in range(count)]
     sources = [dict(id='synthetic',data_ref=REF,view_ref=REF,revision_policy='frozen-synthetic',qualification='synthetic',availability_basis='visible-cutoff')]
@@ -46,13 +42,13 @@ class QsysCatalogTests(unittest.TestCase):
     def test_388_traceable_rows_and_no_blocked_placeholders(self):
         registry=load_qsys_feature_registry();rows=registry['rows']
         self.assertEqual(len(rows),388)
-        self.assertEqual(sum(r['status']=='executable' for r in rows),271)
+        self.assertEqual(sum(r['status']=='executable' for r in rows),329)
         self.assertEqual(sum(r['status']=='alias' for r in rows),2)
-        self.assertEqual(sum(r['status']=='blocked' for r in rows),115)
+        self.assertEqual(sum(r['status']=='blocked' for r in rows),57)
         for r in rows:
             self.assertTrue(r['expression']);self.assertTrue(r['qsys_source'])
             if r['status']=='blocked':self.assertNotIn('selection',r)
-        for name in ('pe_ttm','ps_ttm','revenue_yoy','industry_ret_20d','volume_contraction_after_rise_60d','$lend_sell_volume'):
+        for name in ('pe_ttm','ps_ttm','industry_ret_20d','volume_contraction_after_rise_60d','$lend_sell_volume'):
             with self.subTest(name=name),self.assertRaisesRegex(FeatureCatalogError,'blocked'):
                 select_qsys_features([name])
         self.assertEqual(select_qsys_features(['($close - $open) / $open'])[0].id,'ALP001')
@@ -97,10 +93,13 @@ class QsysCatalogTests(unittest.TestCase):
         from axiom_research.stock_feature_columns import FeatureColumnSource
         from axiom_research.qsys_input_contracts import DAILY_FIELD_CONTRACTS, CORE_INPUT_CONTRACTS
         canonical={'market_daily':TUSHARE_DAILY_CONTRACT}
-        for endpoint in ('daily_basic','moneyflow','margin_detail','income'):
+        for endpoint in ('daily_basic','moneyflow','margin_detail','income','balancesheet','fina_indicator'):
             spec=stock_input_source_spec(endpoint,identity_map={'000001.SZ':'A'},
                 next_open_session_by_date={'2020-01-01':'2020-01-02'})
             canonical[spec['domain']]=spec['contract']
+        from axiom_data.event_sources import CONTRACTS
+        canonical['cash_flow_events']=CONTRACTS['cashflow']
+        canonical['price_limits']=CONTRACTS['stk_limit']
         # Covers even supported future fields such as ps; there is no CNY fallback.
         for field,spec in DAILY_FIELD_CONTRACTS.items():
             physical=canonical[spec['domain']]['fields'][field]
@@ -112,7 +111,7 @@ class QsysCatalogTests(unittest.TestCase):
         extensions=requirements['daily_fields']
         for bundle in requirements['financial_fields'].values():
             physical=canonical[bundle['domain']]['fields'][bundle['field']]
-            self.assertEqual((physical['unit'],physical['basis']),(bundle['unit'],bundle['basis']))
+            self.assertEqual((physical['unit'],physical.get('basis','reported')),(bundle['unit'],bundle['basis']))
             self.assertEqual(bundle['visibility'],'strict_before_session_start')
             for leaf in bundle['outputs']:
                 extensions[leaf]={'domain':'materialized_financial_events','dtype':'float64','unit':bundle['unit']}
@@ -157,7 +156,7 @@ class QsysCatalogTests(unittest.TestCase):
         catalog=load_qsys_feature_catalog();base,facts,context=fixture()
         for normalized in (False,True):
             plan=build_feature_plan(base,catalog.default_selection,catalog=catalog,normalized=normalized)
-            self.assertEqual(len(plan.to_dict()['outputs']),288)
+            self.assertEqual(len(plan.to_dict()['outputs']),346)
         plan=build_feature_plan(base,catalog.default_selection,catalog=catalog)
         out=execute_feature_plan(plan,facts,context).to_dict()
         actual={f['name']:v for f,v in zip(catalog.definitions,out['rows'][0]['values'])}

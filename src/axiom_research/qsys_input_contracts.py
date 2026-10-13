@@ -49,3 +49,51 @@ CORE_INPUT_CONTRACTS.update({
     field: {'domain': 'financial_events', 'dtype': 'float64', 'unit': 'CNY'}
     for field in ('revenue', 'ttm_revenue', 'ttm_revenue_prior_year', 'single_q_revenue', 'single_q_revenue_prior_year')
 })
+
+# Reported inputs retain native basis; no implicit TTM or percent conversion.
+_REPORT_INPUTS = (
+    ('revenue', 'financial_events', 'income', 'CNY', 'cumulative_ytd', True),
+    ('net_income', 'financial_events', 'income', 'CNY', 'cumulative_ytd', True),
+    ('total_assets', 'balance_sheet_events', 'balancesheet', 'CNY', 'period_end_stock', False),
+    ('parent_equity', 'balance_sheet_events', 'balancesheet', 'CNY', 'period_end_stock', False),
+    ('inventory', 'balance_sheet_events', 'balancesheet', 'CNY', 'period_end_stock', True),
+    ('accounts_receiv', 'balance_sheet_events', 'balancesheet', 'CNY', 'period_end_stock', True),
+    ('operating_cash_flow', 'cash_flow_events', 'cashflow', 'CNY', 'cumulative_ytd', False),
+    ('roe', 'financial_indicator_events', 'fina_indicator', 'percent', 'reported', False),
+    ('grossprofit_margin', 'financial_indicator_events', 'fina_indicator', 'percent', 'reported', False),
+    ('debt_to_assets', 'financial_indicator_events', 'fina_indicator', 'percent', 'reported', False),
+    ('current_ratio', 'financial_indicator_events', 'fina_indicator', 'ratio', 'reported', False),
+)
+for _field, _domain, _endpoint, _unit, _basis, _year_ago in _REPORT_INPUTS:
+    _outputs={'reported_'+_field: {'derivation':'reported','quarters_back':0}}
+    if _year_ago:
+        _outputs['reported_'+_field+'_prior_year']={'derivation':'reported','quarters_back':4}
+    if _field=='revenue':
+        FINANCIAL_FIELD_CONTRACTS['revenue_ttm_yoy']['outputs'].update(_outputs)
+    else:
+        FINANCIAL_FIELD_CONTRACTS['reported_'+_field]={
+            'domain':_domain,'field':_field,'endpoint':_endpoint,
+            'report_type':None if _endpoint=='fina_indicator' else '1',
+            'basis':_basis,'unit':_unit,'session_timezone':'Asia/Shanghai',
+            'visibility':'strict_before_session_start','outputs':_outputs}
+    CORE_INPUT_CONTRACTS.update({leaf:{'domain':_domain,'dtype':'float64','unit':_unit} for leaf in (_field,*_outputs)})
+FINANCIAL_FIELD_CONTRACTS['single_q_oper_cost']={
+    'domain':'financial_events','field':'oper_cost','endpoint':'income','report_type':'1',
+    'basis':'cumulative_ytd','unit':'CNY','session_timezone':'Asia/Shanghai',
+    'visibility':'strict_before_session_start',
+    'outputs':{'single_q_oper_cost':{'derivation':'single_quarter','quarters_back':0},
+               'single_q_oper_cost_prior_year':{'derivation':'single_quarter','quarters_back':4}}}
+CORE_INPUT_CONTRACTS.update({leaf:{'domain':'financial_events','dtype':'float64','unit':'CNY'}
+    for leaf in ('oper_cost',*FINANCIAL_FIELD_CONTRACTS['single_q_oper_cost']['outputs'])})
+
+# Acceleration compares two fiscal YoY observations at one visible cutoff.
+for _key in ('revenue_ttm_yoy','reported_net_income'):
+    _contract=FINANCIAL_FIELD_CONTRACTS[_key]
+    _leaf='reported_'+_contract['field']+'_two_years_ago'
+    _contract['outputs'][_leaf]={'derivation':'reported','quarters_back':8}
+    CORE_INPUT_CONTRACTS[_leaf]={'domain':_contract['domain'],'dtype':'float64','unit':_contract['unit']}
+
+DAILY_FIELD_CONTRACTS.update({field:{'domain':'price_limits','dtype':'float64','unit':'CNY/share'}
+    for field in ('up_limit','down_limit')})
+CORE_INPUT_CONTRACTS.update({field:dict(spec) for field,spec in DAILY_FIELD_CONTRACTS.items() if field in ('up_limit','down_limit')})
+CORE_INPUT_CONTRACTS.update({field:{'domain':'market_daily','dtype':'float64','unit':'CNY/share'} for field in ('raw_close','raw_open')})

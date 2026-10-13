@@ -73,6 +73,8 @@ class FeatureColumnSource:
                       for f,m in self.manifest.get('daily_fields',{}).items())
         if 'volume_shares' in self.manifest.get('daily_fields',{}):
             fields.append(dict(name='vwap',dtype='float64',unit='CNY/share',stage='fact',missing='preserve'))
+        if 'up_limit' in self.manifest.get('daily_fields',{}):
+            fields.extend(dict(name=f,dtype='float64',unit='CNY/share',stage='fact',missing='preserve') for f in ('raw_open','raw_close'))
         return fields
 
     def physical_fields(self):
@@ -83,6 +85,7 @@ class FeatureColumnSource:
                 self.arrays[field+'::'+kind])
 
     def leaf_fields(self, field):
+        if field in ('raw_open','raw_close'): return (field[4:],)
         if field == 'vwap': return ('amount_cny','volume_shares','factor')
         return (field,'factor') if field in FIELDS[:4] else (field,)
 
@@ -151,6 +154,15 @@ class FeatureColumnSource:
             return value if securities==spec['universe'] else value[:,positions]
         for field in fields:
             if field in FIELDS or field=='vwap': continue
+            if field in ('raw_open','raw_close'):
+                native=field[4:]
+                clock=np.where(leaf(native,'available_validity'),(leaf(native,'available')+999999)//1000000*1000000,cutoff)
+                require(bool((clock<=cutoff).all()),'future native price dependency')
+                selected_values[field]=leaf(native,'original_values')
+                selected_validity[field]=leaf(native,'validity')
+                selected_reasons[field]=leaf(native,'reasons')
+                selected_clocks[field]=clock
+                continue
             clock=np.where(leaf(field,'available_validity'),
                 (leaf(field,'available')+999999)//1000000*1000000,cutoff)
             require(bool((clock<=cutoff).all()),'future source dependency')

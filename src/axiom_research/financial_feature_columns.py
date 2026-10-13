@@ -46,8 +46,8 @@ def validate_financial_materializations(manifest, child=None):
         require(type(spec.get('event_snapshot')) is str and spec['event_snapshot'] not in ('','current','latest'),
                 'financial Snapshot must be pinned')
         require(field in manifest.get('daily_fields',{}) and spec['selection']==POLICY and
-                spec['derivation'] in ('ttm','single_quarter') and type(spec['quarters_back']) is int and
-                spec['quarters_back']>=0 and spec['basis']=='cumulative_ytd', 'financial materialization declaration')
+                spec['derivation'] in ('ttm','single_quarter','reported') and type(spec['quarters_back']) is int and
+                spec['quarters_back']>=0 and (spec['derivation']=='reported' or spec['basis']=='cumulative_ytd'), 'financial materialization declaration')
         require(manifest['daily_fields'][field]=={'domain':DOMAIN,'dtype':'float64','unit':spec['unit']},
                 'financial materialization typed leaf mismatch')
     if child is None: return
@@ -78,7 +78,7 @@ def validate_financial_materializations(manifest, child=None):
 def extend_financial_feature_source(data, *, source, query, field, outputs, unit,
         destination, event_snapshot, session_timezone='Asia/Shanghai', block_sessions=20,
         maximum_added_bytes=64*1024**2, maximum_event_cache_bytes=64*1024**2):
-    """Append TTM/single-quarter leaves, retaining original source descriptors.
+    """Append reported/TTM/single-quarter leaves without rebuilding existing columns.
 
     ``outputs`` maps leaf name to {derivation, quarters_back}. Every leaf uses
     the latest visible current report and an explicit fiscal-quarter offset.
@@ -94,23 +94,23 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
     from axiom_data import EventQuery, iter_event_cutoffs, single_quarter, ttm
     from axiom_data.financial import FINANCIAL_RECIPE_VERSION
     from .stock_feature_columns import FeatureColumnSource, REASONS
-    require(isinstance(query,EventQuery) and query.domain in ('financial_events','cash_flow_events') and
+    require(isinstance(query,EventQuery) and query.domain in ('financial_events','cash_flow_events','balance_sheet_events','financial_indicator_events') and
             query.time_field=='report_period' and query.fields==(field,) and query.purpose=='decision_facts',
             'one explicit financial event field required')
     manifest=deepcopy(source.manifest); spec=manifest['spec']; days=spec['read_sessions']; symbols=spec['universe']
     require(bool(query.symbols) and list(query.symbols)==sorted(set(query.symbols)) and
             set(query.symbols)<=set(symbols) and query.pit_policy==spec['pit_policy']=='best_effort_vendor_v1','financial source scope/policy mismatch')
-    require(query.filters.get('endpoint') and query.filters.get('report_type'),'financial stream endpoint/report_type required')
+    require(query.filters.get('endpoint'),'financial stream endpoint required')
     require(type(block_sessions) is int and 0<block_sessions<=32,'one to 32 financial sessions per block')
     require(type(outputs) is dict and outputs and not set(outputs)&set(source.physical_fields()),'new financial outputs required')
     for name,projection in outputs.items():
         require(name.isidentifier() and set(projection)=={'derivation','quarters_back'} and
-                projection['derivation'] in ('ttm','single_quarter') and type(projection['quarters_back']) is int and
+                projection['derivation'] in ('ttm','single_quarter','reported') and type(projection['quarters_back']) is int and
                 projection['quarters_back']>=0,'explicit financial output recipe required')
     require(event_snapshot not in ('','current','latest'),'pinned independent financial Snapshot required')
     snapshot=data.describe_snapshot(snapshot=event_snapshot,domains=[query.domain]); native=snapshot['domains'][query.domain]
     actual=native['contract']['fields'][field]
-    require(actual.get('unit')==unit and actual.get('basis')=='cumulative_ytd','financial input unit/basis mismatch')
+    require(actual.get('unit')==unit and (all(p['derivation']=='reported' for p in outputs.values()) or actual.get('basis')=='cumulative_ytd'),'financial input unit/basis mismatch')
     shape=(len(days),len(symbols)); required=len(days)*len(symbols)*27*len(outputs)
     require(type(maximum_added_bytes) is int and required<=maximum_added_bytes,'financial output buffer budget exceeded')
     root=Path(destination);root.mkdir(parents=True,exist_ok=True)
@@ -121,7 +121,7 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
     for name in outputs:
         for kind,(dtype,_) in kinds.items(): arrays[name+'::'+kind]=np.zeros(shape,dtype=dtype)
     declarations={name:{**projection,'source_domain':query.domain,'source_field':field,
-        'endpoint':query.filters['endpoint'],'report_type':query.filters['report_type'],'basis':'cumulative_ytd',
+        'endpoint':query.filters['endpoint'],'report_type':query.filters.get('report_type'),'basis':actual.get('basis','reported'),
         'unit':unit,'selection':POLICY,'session_timezone':session_timezone,'recipe_version':FINANCIAL_RECIPE_VERSION,
         'report_start':query.start,'report_end':query.end,'event_snapshot':event_snapshot,
         'coverage_security_ids':list(query.symbols)} for name,projection in outputs.items()}
@@ -143,7 +143,7 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
                 latest={}
                 for row in batch.frame.to_dict('records'):
                     require(row['security_id'] in subset and row['endpoint']==query.filters['endpoint'] and
-                            row['report_type']==query.filters['report_type'],'unexpected financial event stream')
+                            ('report_type' not in query.filters or row.get('report_type')==query.filters['report_type']),'unexpected financial event stream')
                     if row['report_period']<=day:
                         latest[row['security_id']]=max(latest.get(row['security_id'],row['report_period']),row['report_period'])
                 # Prepare each Data derivation once for the union of current
@@ -154,6 +154,16 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
                 for recipe in {p['derivation'] for p in outputs.values()}:
                     periods=sorted({p for name,target in targets_by_name.items()
                                     if outputs[name]['derivation']==recipe for p in target.values()})
+                    if recipe=='reported':
+                        records={(r['security_id'],r['report_period']):r for r in batch.frame.to_dict('records')}
+                        by={}
+                        for item in batch.field_meta[field]['by_key']:
+                            key=(item['security_id'],item['report_period'])
+                            by[key]={'status':item['status'],'missing_reason':item.get('missing_reason'),
+                                     'components':[{'security_id':key[0],'report_period':key[1],
+                                         'status':item['status'],'provenance':deepcopy(item)}]}
+                        derived_by_recipe[recipe]=(records,by)
+                        continue
                     derived=(ttm if recipe=='ttm' else single_quarter)(batch,field=field,
                         endpoint=query.filters['endpoint'],report_type=query.filters['report_type'],basis='cumulative_ytd',unit=unit,
                         periods=periods) if periods else None
@@ -165,7 +175,8 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
                     records,by=derived_by_recipe[projection['derivation']]
                     for sj,security in enumerate(subset):
                         period=targets.get(security); meta=deepcopy(by.get((security,period),{'components':[],'status':'source_missing','missing_reason':'no_visible_report'}))
-                        value=records.get((security,period),{}).get(field);valid=value is not None
+                        value=records.get((security,period),{}).get(field);valid=meta['status']=='value' and value is not None
+                        value=float(value) if valid else None
                         clocks=[c['provenance']['usable_from'] for c in meta['components'] if c['provenance'] is not None]
                         clock=max(clocks,key=instant_us) if clocks else cutoffs[offset]
                         bases=sorted({c['provenance']['availability_basis'] for c in meta['components'] if c['provenance'] is not None})
@@ -199,9 +210,11 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
                 'projections':{n:{k:v for k,v in d.items() if k not in ('event_snapshot','report_start','report_end','coverage_security_ids')} for n,d in declarations.items()},'selection':POLICY,'not_native_daily':True}}
     previous=manifest['source_profiles'].get(DOMAIN)
     if previous is not None:
-        require(previous['source_profile']['financial_inputs']==profile['source_profile']['financial_inputs'],
-                'additional financial leaves must use the same canonical input contract/profile')
         merged=deepcopy(previous)
+        owner=merged['source_profile']
+        by_field=owner.setdefault('financial_inputs_by_field',{
+            name:deepcopy(owner['financial_inputs']) for name in owner['projections']})
+        by_field.update({name:deepcopy(profile['source_profile']['financial_inputs']) for name in outputs})
         merged['contract']['fields'].update(profile['contract']['fields'])
         merged['source_profile']['projections'].update(profile['source_profile']['projections'])
         profile=merged

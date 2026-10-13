@@ -15,7 +15,7 @@ rows=list(csv.DictReader(args.inventory_csv.open()))
 assert len(rows)==388 and [int(r['inventory_row']) for r in rows]==list(range(1,389))
 cat=json.load(open(ROOT/'src/axiom_research/catalogs/a01_price_v1.json'))
 legacy=json.load(open(ROOT/'src/axiom_research/catalogs/stock_ml_v1.json'))
-cat['catalog_id']='qsys_stock_v3'
+cat['catalog_id']='qsys_stock_v4'
 cat['shared_nodes']+=legacy['shared_nodes'];cat['features']+=legacy['features']
 groups={g['id'] for g in cat['groups']}
 for g in legacy['groups']:
@@ -208,6 +208,100 @@ for leaf in ('single_q_revenue','single_q_revenue_prior_year'):
  meta[leaf]=('CNY',0,'base',{'financial_events.revenue'})
 register(rows[184],sub(div('single_q_revenue','single_q_revenue_prior_year'),1),
  note='Native revenue cumulative YTD converted by Data.single_quarter; prior-year operand is exactly four economic quarters earlier at the same visible cutoff. Missing components and zero denominators remain missing; no trading-day or report-row shift.')
+# Shared report bridge: native reported values and explicit economic-period lags.
+contracts=run_path(str(ROOT/'src/axiom_research/qsys_input_contracts.py'))['FINANCIAL_FIELD_CONTRACTS']
+for contract in contracts.values():
+ for leaf in contract['outputs']:
+  meta[leaf]=(contract['unit'],0,'base',{contract['domain']+'.'+contract['field']})
+financial_aliases={k:'reported_'+v for k,v in {
+ 'roe':'roe','grossprofit_margin':'grossprofit_margin','debt_to_assets':'debt_to_assets',
+ 'current_ratio':'current_ratio','net_income':'net_income','revenue':'revenue',
+ 'total_assets':'total_assets','equity':'parent_equity','op_cashflow':'operating_cash_flow'}.items()}
+alias_inputs.update(financial_aliases)
+financial={}
+for name,leaf in financial_aliases.items():financial['$'+name]=leaf
+financial.update(roe='reported_roe',gross_margin='reported_grossprofit_margin',debt_to_asset='reported_debt_to_assets',
+ net_margin=div('reported_net_income','reported_revenue'),
+ operating_cf_to_profit=div('reported_operating_cash_flow','reported_net_income'),
+ roa=div('reported_net_income','reported_total_assets'),
+ earnings_yield_proxy=div('reported_net_income','total_mv'),
+ ocf_margin=div('reported_operating_cash_flow','reported_revenue'))
+for native,name in (('revenue','revenue_yoy'),('net_income','profit_yoy'),('inventory','inventory_yoy'),('accounts_receiv','ar_yoy')):
+ financial[name]=sub(div('reported_'+native,'reported_'+native+'_prior_year'),1)
+financial['peg_proxy']=div('pe',abs_(financial['profit_yoy']))
+financial['gross_margin_delta_yoy']=sub(
+ div(sub('single_q_revenue','single_q_oper_cost'),'single_q_revenue'),
+ div(sub('single_q_revenue_prior_year','single_q_oper_cost_prior_year'),'single_q_revenue_prior_year'))
+for row in rows:
+ if row['name'] in financial:
+  register(row,financial[row['name']],note='Data-selected native report values retain units and basis. Current and prior-year operands use exact report-quarter offsets and cutoff-visible revisions, not trading-row shifts. Zero denominators/missing remain missing; no implicit TTM conversion. Separate statement fields retain their own visible report lineage.')
+  if row['name'] in ('revenue_yoy','profit_yoy','inventory_yoy','ar_yoy','peg_proxy'):
+   new[int(row['inventory_row'])]['semantic_version']='2.0.0'
+for row in rows[367:375]:
+ register(row,parse(row['expression']),note='Original absnorm arithmetic on native reported financial inputs in CNY. This does not convert cumulative YTD values into TTM; each selected report/revision remains in input evidence.')
+# Source-explicit missing fills apply only inside these composite scores.
+def filled(a,value=0):return node('fill',[a],{'value':value})
+def csz(a):return node('cs_zscore',[a],dict(group='session',unknown_group='reject',missing='fill_zero',ddof=0,epsilon=1e-12,constant='zero',clip=None,excluded='missing'),'dimensionless')
+R['continuation_candidate_score']=div(add(add(rank(clip(filled(R['trend_smoothness_60d']),-1,1)),filled(R['rps_120d'])),add(mul(filled(R['price_percentile_252d']),.5),mul(sub(1,filled(R['rps_20d'])),.3))),2.8)
+R['repair_candidate_score']=div(add(add(sub(1,filled(R['pe_percentile_756d'],.5)),mul(sub(1,clip(filled(R['distance_to_252d_low']),0,1)),.5)),mul(filled(R['rps_120d']),.3)),1.8)
+R['overheat_risk_score']=add(add(mul(filled(R['price_percentile_252d']),.4),mul(filled(R['rps_120d']),.4)),mul(div(clip(filled(R['volume_spike_20d']),0,3),3),.2))
+R['margin_crowding_score']=add(csz(R['margin_balance_to_float_mv']),csz(R['margin_balance_chg_60d']))
+R['margin_trend_confirm_score']=mul(csz(R['margin_balance_chg_60d']),clip(csz(R['ret_60d']),0))
+R['margin_overheat_risk_score']=mul(csz(R['margin_crowding_score']),clip(csz(R['ret_120d']),0))
+R['margin_pullback_recovery_confirm']=mul(R['margin_trend_confirm_score'],clip(csz(R['pullback_recovery_speed_60d']),0))
+for row in rows:
+ if row['name'] in ('continuation_candidate_score','repair_candidate_score','overheat_risk_score','margin_crowding_score','margin_trend_confirm_score','margin_overheat_risk_score','margin_pullback_recovery_confirm'):
+  register(row,R[row['name']],note='Source-explicit intermediate fill-zero (valuation percentile fill 0.5); CS uses frozen reference membership, population std and constant zero. Raw operands retain missing evidence; score values do not certify input completeness.')
+# Explicitly day-named deltas retain the source trading-session semantics;
+# these are differences of historical PIT observations, not fiscal YoY.
+for src,name,lag in (('roe','roe_delta_252d',252),('grossprofit_margin','grossprofit_margin_delta_252d',252),('debt_to_assets','debt_to_assets_delta_252d',252),('op_cashflow','op_cashflow_delta_252d',252),('roe','roe_delta_756d',756),('net_margin','net_margin_delta_756d',756)):
+ root=financial_aliases[src] if src in financial_aliases else financial[src]
+ R[name]=sub(root,shift(root,lag))
+for src,name in (('revenue','revenue_yoy_accel'),('net_income','profit_yoy_accel')):
+ current=sub(div('reported_'+src,'reported_'+src+'_prior_year'),1)
+ previous=sub(div('reported_'+src+'_prior_year','reported_'+src+'_two_years_ago'),1)
+ R[name]=sub(current,previous)
+R['value_trap_risk_score']=add(add(mul(sub(1,filled(R['pe_percentile_756d'],.5)),.3),mul(sub(1,filled(R['price_percentile_252d'],.5)),.3)),add(mul(fl(lt(filled(R['roe_delta_756d']),-.01)),.2),mul(fl(lt(filled(R['net_margin_delta_756d']),-.01)),.2)))
+for row in rows:
+ if row['name'] in ('roe_delta_252d','grossprofit_margin_delta_252d','debt_to_assets_delta_252d','op_cashflow_delta_252d','roe_delta_756d','net_margin_delta_756d','revenue_yoy_accel','profit_yoy_accel','value_trap_risk_score'):
+  register(row,R[row['name']],note='Day-named deltas compare cutoff-visible daily financial observations exactly 252/756 sessions apart, not fiscal YoY. YoY acceleration instead compares economic quarters 0/4/8 at one visible cutoff; semantic v2 replaces the source daily-row approximation. Value-trap score preserves source-explicit intermediate fills and thresholds in native units.')
+  if row['name'] in ('revenue_yoy_accel','profit_yoy_accel'):
+   new[int(row['inventory_row'])]['semantic_version']='2.0.0'
+# Historical exchange limits and original prices share an unadjusted basis.
+for leaf in ('up_limit','down_limit'):meta[leaf]=('CNY/share',0,'base',{'price_limits.'+leaf})
+for leaf in ('raw_open','raw_close'):meta[leaf]=('CNY/share',0,'base',{'market_daily.'+leaf[4:]})
+R['is_limit_up']=binary('and',gt('up_limit',0),binary('or',gt('raw_close','up_limit'),binary('eq','raw_close','up_limit')))
+R['is_limit_down']=binary('and',gt('down_limit',0),binary('or',lt('raw_close','down_limit'),binary('eq','raw_close','down_limit')))
+R['distance_to_limit_up']=div(sub('up_limit','raw_close'),'raw_close')
+R['distance_to_limit_down']=div(sub('raw_close','down_limit'),'raw_close')
+R['limit_up_count_5d']=roll(fl(R['is_limit_up']),5,'sum')
+R['opened_from_limit_up']=binary('and',R['is_limit_up'],lt('raw_open','up_limit'))
+for row in rows:
+ if row['name'] in ('is_limit_up','is_limit_down','distance_to_limit_up','distance_to_limit_down','limit_up_count_5d','opened_from_limit_up'):
+  root=R[row['name']]
+  if meta[root][0]=='dimensionless' and row['name'] in ('is_limit_up','is_limit_down','opened_from_limit_up'):root=fl(root)
+  register(row,root,note='Original unadjusted native open/close versus historical exchange limits in CNY/share, selected at declared daily cutoff. Missing price/limit propagates rather than becoming false; semantic v2 corrects source boolean missing conversion. Five-day counts require all five observations.')
+  new[int(row['inventory_row'])]['semantic_version']='2.0.0'
+  new[int(row['inventory_row'])]['dependencies']=[d for d in new[int(row['inventory_row'])]['dependencies'] if d!='adjustment_factors.factor']
+# A single shared Core aggregate broadcasts only to frozen reference members.
+def csmean(root):return node('cs_mean',[root],dict(group='session',unknown_group='reject',missing='skip',excluded='missing'))
+def masked(root,condition):return node('where',[condition,root,div(const(0,meta[root][0]),0)],{'missing':'preserve'})
+R['market_breadth']=csmean(fl(gt(ret(c),0)))
+R['limit_up_breadth']=csmean(fl(R['is_limit_up']))
+for field,name,reverse in (('circ_mv','small_vs_large_strength',False),('pb','growth_vs_value_proxy',True)):
+ ranked=rank(alias_inputs.get(field,field))
+ low=binary('or',lt(ranked,.3),binary('eq',ranked,.3))
+ high=binary('or',gt(ranked,.7),binary('eq',ranked,.7))
+ low_mean=csmean(masked(ret(c),low));high_mean=csmean(masked(ret(c),high))
+ R[name]=sub(high_mean,low_mean) if reverse else sub(low_mean,high_mean)
+for row in rows:
+ if row['name'] in ('market_breadth','limit_up_breadth','small_vs_large_strength','growth_vs_value_proxy'):
+  register(row,R[row['name']],note='Session mean over frozen reference members only; broadcast back to reference members, excluded rows stay missing. Missing observations are skipped, empty cohorts remain missing. Rank thresholds retain average ties. v2 repairs source group-result alignment and missing-return-to-false behavior.')
+  new[int(row['inventory_row'])]['semantic_version']='2.0.0'
+# Scores explicitly preserve source fills only at named intermediate nodes.
+for row in rows:
+ if row['name'] in ('continuation_candidate_score','repair_candidate_score','overheat_risk_score','margin_crowding_score','margin_trend_confirm_score','margin_overheat_risk_score','margin_pullback_recovery_confirm','value_trap_risk_score'):
+  new[int(row['inventory_row'])]['missing_policy']='raw inputs preserve missing; source-explicit intermediate fill and constant-group policies are encoded in DAG; score validity is not input-completeness evidence'
 # Definitions preserve all old records. Registry records certified aliases separately.
 allids={f['id']:f for f in cat['features']}
 registry=[]
@@ -222,13 +316,14 @@ for r in rows:
   elif i in (274,276):code='ambiguous_valuation_name';reason='QSYS TTM-named feature reads non-TTM pe/ps. Supplier fields are distinct; no silent replacement or misleading name admitted.'
   elif i==388 or 'industry' in r['name'] or i in (204,205,249,250):code='historical_industry';reason='Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled.'
   elif i in (227,228,261,262,263,266):code='index_session_binding';reason='Index identity/calendar and one-row-per-session return calculation must be bound; QSYS repeated-row pct_change is not certified.'
+  elif i==186:code='profitability_missing_policy';reason='Source turns absent profitability inputs into false/zero; definition requires an explicit missing-input policy before admission.'
   elif i in (259,260,264,265):code='reference_aggregation';reason='Reference-pool group aggregate/broadcast semantics require reviewed Core composition and frozen membership.'
   elif i in (341,342):code='source_formula_defect';reason='Source clips negative of a nonnegative series to nonnegative, yielding zero; meaningful corrected formula requires separately versioned decision.'
   elif i==380:code='adjustment_anchor_identity';reason='Raw factor requires explicit source/anchor interpretation; not a substitute for adjusted-price lineage.'
   elif i in range(206,213):code='limit_price_binding';reason='Historical upper/lower price limits with same price basis and cutoff are not yet bound.'
   elif i==189:code='last_true_age';reason='Requires reviewed last-true session-age semantics and missing/history policy.'
   elif i==188:code='breakout_missing_policy';reason='Source partial-window/exclusive-high boolean requires reviewed missing-to-false behavior before admission.'
-  elif i==198 or i==199:code='rolling_policy_review';reason='Source rolling zscore helper policy still requires review.'
+  elif i==198 or i==199:code='rolling_policy_review';reason='Fixed source inventory imports rolling_zscore, but its helper implementation is absent from the pinned source export; min_periods, ddof and zero-scale policy are not established.'
   elif any(x in r['name'] for x in ('holder','forecast')) or i in (312,325,326,327,330,345,346,347,348,349):code='event_revision_binding';reason='Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate.'
   elif i in (308,309,310,311,318,319,320):code='dependent_composite';reason='Composite score depends on blocked inputs and/or source fill-zero/CS semantics requiring explicit review.'
   else:code='financial_report_binding';reason='Financial report-period/TTM/single-quarter fields and visible revisions are not bound to daily column input; year-over-year and acceleration cannot use 252-row shift.'
@@ -244,6 +339,6 @@ for f in cat['features']:
  for n in f['core_nodes']:
   for p in n['inputs']:include(p)
 cat['shared_nodes']=[n for n in cat['shared_nodes'] if n['name'] in needed]
-for name,obj in [('qsys_stock_v3.json',cat),('qsys_registry_v3.json',dict(schema_version='qsys_registry_v1',source_revision='852bcb73125f8781b7a80618b8188928ef4d38f2',normalization_boundary='normalized=True means Axiom frozen-reference CS zscore. QSYS absnorm expressions remain separate raw recipes; never aliases for normalized=True.',rows=registry))]:
+for name,obj in [('qsys_stock_v4.json',cat),('qsys_registry_v4.json',dict(schema_version='qsys_registry_v1',source_revision='852bcb73125f8781b7a80618b8188928ef4d38f2',normalization_boundary='normalized=True means Axiom frozen-reference CS zscore. QSYS absnorm expressions remain separate raw recipes; never aliases for normalized=True.',rows=registry))]:
  (ROOT/'src/axiom_research/catalogs'/name).write_text(json.dumps(obj,indent=2,ensure_ascii=False)+'\n')
 print('features',len(cat['features']),'registry',len(registry),'states',{s:sum(r['status']==s for r in registry)for s in ('executable','alias','blocked')})
