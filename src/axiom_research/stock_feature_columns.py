@@ -48,8 +48,7 @@ def feature_column_plan(source, catalog, *, selection=None, normalized=True):
         'calendar_ref':calendar_ref,'reference_ref':reference_ref,
         'reference_members':{day:{security:None for j,security in enumerate(spec['universe']) if bool(a['member'][i,j])}
             for i,day in enumerate(spec['read_sessions'])},
-        'input_schema':[{'name':f,'dtype':'float64','unit':'CNY' if f=='amount_cny' else 'CNY/share',
-            'stage':'fact','missing':'preserve'} for f in FIELDS[:-1]],
+        'input_schema':source.input_schema(),
         'event_schema':{},'sources':sorted(source.source_bindings(),key=lambda b:b['id']),
         'observation_domain':'sessions','history_policy':'partial','nodes':[],'outputs':[],'obligations':[]}
     return build_feature_plan(FeaturePlan.from_dict(header),selection,catalog=catalog,normalized=normalized)
@@ -67,6 +66,26 @@ class FeatureColumnSource:
     def identity(self):
         return self.manifest['source_ref']
 
+    def input_schema(self):
+        fields=[{'name':f,'dtype':'float64','unit':'CNY' if f=='amount_cny' else 'CNY/share',
+                 'stage':'fact','missing':'preserve'} for f in FIELDS[:-1]]
+        fields.extend(dict(name=f,dtype='float64',unit=m['unit'],stage='fact',missing='preserve')
+                      for f,m in self.manifest.get('daily_fields',{}).items())
+        if 'volume_shares' in self.manifest.get('daily_fields',{}):
+            fields.append(dict(name='vwap',dtype='float64',unit='CNY/share',stage='fact',missing='preserve'))
+        return fields
+
+    def physical_fields(self):
+        return (*FIELDS, *self.manifest.get('daily_fields',{}), 'is_member')
+
+    def field_array(self, field, kind):
+        return (self.arrays[kind][:,:,FIELDS.index(field)] if field in FIELDS else
+                self.arrays[field+'::'+kind])
+
+    def leaf_fields(self, field):
+        if field == 'vwap': return ('amount_cny','volume_shares','factor')
+        return (field,'factor') if field in FIELDS[:4] else (field,)
+
     def select(self, day, *, history_sessions=252, securities=None, fields=None):
         """Apply Data's original anchor kernel to just the selected physical block."""
         import numpy as np
@@ -77,14 +96,14 @@ class FeatureColumnSource:
         require(bool(securities) and securities==sorted(set(securities)) and set(securities)<=set(spec['universe']),
                 'selected securities outside source')
         fields=list(FIELDS[:-1] if fields is None else fields)
-        require(bool(fields) and len(fields)==len(set(fields)) and set(fields)<=set(FIELDS[:-1]),
+        require(bool(fields) and len(fields)==len(set(fields)) and set(fields)<={c['name'] for c in self.input_schema()},
                 'selected fields outside source')
         positions=[self.security_positions[s] for s in securities]
         # Bound copies by the requested history and securities before adjustment.
         a={name:(value[begin:end] if securities==spec['universe'] else value[begin:end][:,positions])
-           for name,value in self.arrays.items()}
+           for name,value in self.arrays.items() if '::' not in name}
         cutoff=instant_us(spec['cutoff_by_session'][day])//1000000*1000000
-        prices=[name for name in fields if name!='amount_cny']; indices=[FIELDS.index(name) for name in prices]
+        prices=[name for name in fields if name in FIELDS[:4]]; indices=[FIELDS.index(name) for name in prices]
         selected_values={}; selected_validity={}; selected_reasons={}; selected_clocks={}
         if prices:
             shape=(history_sessions,len(securities),len(prices))
@@ -117,6 +136,39 @@ class FeatureColumnSource:
             selected_validity['amount_cny']=a['validity'][:,:,4]
             selected_reasons['amount_cny']=a['reasons'][:,:,4]
             selected_clocks['amount_cny']=amount_clock
+        # Added daily leaves retain their native numeric precision and clocks.
+        def leaf(field, kind):
+            value=self.field_array(field,kind)[begin:end]
+            return value if securities==spec['universe'] else value[:,positions]
+        for field in fields:
+            if field in FIELDS or field=='vwap': continue
+            clock=np.where(leaf(field,'available_validity'),
+                (leaf(field,'available')+999999)//1000000*1000000,cutoff)
+            require(bool((clock<=cutoff).all()),'future source dependency')
+            selected_values[field]=leaf(field,'values')
+            selected_validity[field]=leaf(field,'validity')
+            selected_reasons[field]=leaf(field,'reasons')
+            selected_clocks[field]=clock
+        if 'vwap' in fields:
+            amount=leaf('amount_cny','original_values'); volume=leaf('volume_shares','values')
+            valid=leaf('amount_cny','validity') & leaf('volume_shares','validity') & (volume>0) & (amount>0)
+            reasons=np.where(~leaf('amount_cny','validity'),leaf('amount_cny','reasons'),
+                np.where(~leaf('volume_shares','validity'),leaf('volume_shares','reasons'),
+                         np.where(valid,0,REASONS.index('invalid_price')))).astype('u1')
+            raw=np.divide(amount,volume,out=np.zeros_like(amount),where=valid)
+            factor=leaf('factor','values'); factor_valid=leaf('factor','validity')
+            values,validity,reasons=_adjust_columns(raw,valid,reasons,factor,factor_valid,
+                np.broadcast_to(factor[-1:],factor.shape),np.broadcast_to(factor_valid[-1:],factor.shape))
+            clocks=[]
+            for f in ('amount_cny','volume_shares','factor'):
+                clocks.append(np.where(leaf(f,'available_validity'),leaf(f,'available'),np.iinfo(np.int64).min))
+            clocks.append(np.broadcast_to(clocks[-1][-1:],factor.shape))
+            clock=np.maximum.reduce(clocks)
+            known=clock!=np.iinfo(np.int64).min
+            clock=np.where(known,(np.where(known,clock,0)+999999)//1000000*1000000,cutoff)
+            require(bool((clock<=cutoff).all()),'future source dependency')
+            selected_values['vwap']=values; selected_validity['vwap']=validity
+            selected_reasons['vwap']=reasons; selected_clocks['vwap']=clock
         selection={'source_ref':self.identity,'session':day,'history_sessions':spec['read_sessions'][begin:end],
             'anchor_session':day,'knowledge_cutoff':spec['cutoff_by_session'][day]}
         return {'selection':selection,'selection_ref':digest(selection),
@@ -132,24 +184,24 @@ class FeatureColumnSource:
         return [dict(id=digest([self.identity,field]),data_ref=digest({'snapshot':self.manifest['spec']['snapshot']}),
             view_ref=self.identity,revision_policy=self.manifest['spec']['pit_policy'],
             qualification='best_effort',availability_basis='declared_vendor_assumption')
-            for field in (*FIELDS,'is_member')]
+            for field in self.physical_fields()]
 
     def core_inputs(self, day, *, calendar_ref, reference_ref, schema, history_sessions=252, securities=None):
         import numpy as np
         view=self.select(day,history_sessions=history_sessions,securities=securities,
                          fields=[c['name'] for c in schema]); shape=view['member'].shape
-        ids={field:binding['id'] for field,binding in zip((*FIELDS,'is_member'),self.source_bindings())}
-        sets=[[ids[field],ids['factor']] for field in FIELDS[:4]]+[[ids['amount_cny']],[ids['is_member']]]
-        sets=[sorted(set(group)) for group in sets]
+        ids={field:binding['id'] for field,binding in zip(self.physical_fields(),self.source_bindings())}
+        names=[c['name'] for c in self.input_schema()]
+        sets=[sorted(ids[f] for f in self.leaf_fields(name)) for name in names]+[[ids['is_member']]]
         inputs=dict(contract_version='feature_column_input_v1',calendar_ref=calendar_ref,
             reference_ref=reference_ref,schema=schema,source_bindings=sorted(self.source_bindings(),key=lambda b:b['id']),
             sessions=list(view['sessions']),security_ids=list(view['universe']),
             cutoffs_utc_us=np.full(len(view['sessions']),instant_us(view['selection']['knowledge_cutoff'])//1000000*1000000,dtype='<i8'),
             values=view['values'],validity=view['validity'],reason_codes={k:v.astype('<i4') for k,v in view['missing_reasons'].items()},
             reason_dictionary=list(REASONS),available_at_utc_us=view['availability'],
-            source_codes={field:np.full(shape,i,dtype='<i4') for i,field in enumerate(FIELDS[:-1]) if field in view['values']},
+            source_codes={field:np.full(shape,i,dtype='<i4') for i,field in enumerate(names) if field in view['values']},
             source_sets=sets,reference_member=view['member'],reference_industry=np.full(shape,None,dtype=object),
-            reference_available_at_utc_us=view['member_available'],reference_source_codes=np.full(shape,5,dtype='<i4'),
+            reference_available_at_utc_us=view['member_available'],reference_source_codes=np.full(shape,len(names),dtype='<i4'),
             input_refs={'source_ref':self.identity,'selection_ref':view['selection_ref']})
         return inputs,view['selection']
 
@@ -285,3 +337,121 @@ def load_feature_column_source(path):
         for desc in chunk['evidence']:
             require(file_digest(desc['path'])==desc['file_digest'],'column source provenance changed')
     return FeatureColumnSource(manifest,arrays)
+
+
+def extend_feature_column_source(data, *, source, daily_fields, destination, block_sessions=20,
+                                 maximum_added_bytes=512*1024**2, snapshot=None):
+    """Append explicitly typed daily facts without reading or rewriting old fields.
+
+    daily_fields maps canonical names to {domain, dtype, unit}. Only daily Data
+    queries whose declared releases are visible at every row cutoff are admitted.
+    Event histories must use an explicit as-of selector and are not daily fields.
+    The returned source retains all original buffer and evidence descriptors.
+    """
+    from copy import deepcopy
+    import numpy as np
+    import pandas as pd
+    from axiom_data import QuerySpec
+    from axiom_data.reader import _release_time
+    require(type(block_sessions) is int and 0<block_sessions<=32,'bounded source calendar block required')
+    require(bool(daily_fields) and type(daily_fields) is dict,'explicit daily fields required')
+    manifest=deepcopy(source.manifest); spec=manifest['spec']
+    require(spec['pit_policy']=='best_effort_vendor_v1','daily extension needs proved vendor selection invariance')
+    previous=manifest.get('daily_fields',{})
+    require(not (set(daily_fields)&set(source.physical_fields())) and 'vwap' not in daily_fields,
+            'daily extension cannot replace existing or derived fields')
+    original_snapshot=spec['snapshot']
+    source_snapshot=data.store.load_snapshot(original_snapshot)
+    candidate=source_snapshot if snapshot is None or snapshot==original_snapshot else data.store.load_snapshot(snapshot)
+    if snapshot is not None and snapshot!=original_snapshot:
+        require(all(candidate['domains'].get(domain)==source_snapshot['domains'].get(domain)
+                    for domain in manifest['source_profiles']),
+                'candidate snapshot changes reused source domains')
+        manifest.setdefault('snapshot_extensions',[]).append({'from_snapshot':original_snapshot,
+            'to_snapshot':snapshot,'reused_domains':{domain:digest(source_snapshot['domains'][domain])
+                for domain in manifest['source_profiles']}})
+        spec['snapshot']=snapshot
+    snapshot=candidate; domains={}
+    for field,meta in daily_fields.items():
+        require(type(field) is str and field.isidentifier() and type(meta) is dict and
+                set(meta)=={'domain','dtype','unit'},'typed daily field declaration required')
+        require(meta['dtype'] in ('float64','int64'),'numeric daily field dtype required')
+        domain=snapshot['domains'][meta['domain']]; contract=domain['contract']; profile=domain['source_profile']
+        require(contract['logical_key']==['security_id','session'],'event domains require explicit as-of selection')
+        actual=contract['fields'][field]
+        require(actual['dtype']==meta['dtype'] and actual['unit']==meta['unit'],'daily field dtype/unit mismatch')
+        require(all(instant_us(_release_time(profile,d).isoformat())<=instant_us(spec['cutoff_by_session'][d])
+                    for d in spec['read_sessions']),'hidden later release prevents daily extension')
+        if field=='volume_shares':
+            require(meta=={'domain':'market_daily','dtype':'int64','unit':'shares'},'canonical volume shares required')
+        domains.setdefault(meta['domain'],[]).append(field)
+        incoming={'contract':contract,'source_profile':profile}
+        if meta['domain'] in manifest['source_profiles']:
+            from .stock_feature_library import SavedColumnFeatureSource
+            for existing in source.physical_fields():
+                old=manifest['source_profiles'][meta['domain']]
+                if existing in old['contract']['fields']:
+                    require(SavedColumnFeatureSource._field_profile(old,existing)==
+                            SavedColumnFeatureSource._field_profile(incoming,existing),
+                            'daily extension changes existing field semantics')
+        manifest['source_profiles'][meta['domain']]=incoming
+    root=Path(destination); root.mkdir(parents=True,exist_ok=True)
+    days=spec['read_sessions']; symbols=spec['universe']; shape=(len(days),len(symbols))
+    require(type(maximum_added_bytes) is int and maximum_added_bytes>0 and
+            len(days)*len(symbols)*27*len(daily_fields)<=maximum_added_bytes,
+            'daily extension buffers exceed maximum_added_bytes')
+    arrays=dict(source.arrays); metrics={'data_read_calls':0,'added_fields':len(daily_fields),'existing_field_reads':0}
+    kinds={'values':('<f8','float64_le'),'original_values':('<f8','float64_le'),
+        'validity':(bool,'bool_u8'),'available':('<i8','int64_le'),
+        'available_validity':(bool,'bool_u8'),'reasons':('u1','uint8')}
+    for field in daily_fields:
+        for kind,(dtype,_) in kinds.items(): arrays[field+'::'+kind]=np.zeros(shape,dtype=dtype)
+    chunks=[]
+    for offset in range(0,len(days),block_sessions):
+        selected=days[offset:offset+block_sessions]; keys=[(s,d) for d in selected for s in symbols]
+        expected=set(keys); chunk_shape=(len(selected),len(symbols)); evidence=[]
+        for domain,fields in domains.items():
+            query=QuerySpec(domain,tuple(fields),tuple(symbols),tuple(selected),spec['pit_policy'],
+                            {d:spec['cutoff_by_session'][d] for d in selected})
+            batch=data.read(snapshot=spec['snapshot'],query=query); metrics['data_read_calls']+=1
+            frame=batch.frame.set_index(['security_id','session'])
+            require(frame.index.is_unique and set(frame.index)==expected,'complete unique daily keys required')
+            frame=frame.reindex(pd.MultiIndex.from_tuples(keys,names=['security_id','session']))
+            for field in fields:
+                meta=batch.field_meta[field]; declaration=daily_fields[field]
+                require(meta['dtype']==declaration['dtype'] and meta['unit']==declaration['unit'],
+                        'reader daily field dtype/unit mismatch')
+                by_key={(r['security_id'],r['session']):r for r in meta['by_key']}
+                require(len(by_key)==len(meta['by_key']) and set(by_key)==expected,'complete unique daily provenance required')
+                rows=[by_key[k] for k in keys]
+                require(all(r.get('missing_reason')!='not_visible_at_cutoff' and
+                    r.get('availability_basis') in (None,'declared_vendor_assumption') and
+                    (r.get('usable_from') is None or instant_us(r['usable_from'])<=instant_us(spec['cutoff_by_session'][d]))
+                    for (_,d),r in zip(keys,rows)),'unproved daily selection invariance')
+                values=frame[field].to_numpy(dtype=np.float64,na_value=np.nan).reshape(chunk_shape)
+                valid=~np.isnan(values)
+                require(bool(np.isfinite(values[valid]).all()),'nonfinite daily value')
+                if declaration['dtype']=='int64':
+                    require(bool(((np.abs(values[valid])<=2**53)&(values[valid]==np.floor(values[valid]))).all()),
+                            'integer outside exact binary64 range')
+                reasons=np.asarray([REASONS.index(r.get('missing_reason')) for r in rows],dtype='u1').reshape(chunk_shape)
+                require(bool((reasons[valid]==0).all()) and bool((reasons[~valid]!=0).all()),'daily validity/reason mismatch')
+                payload={'values':np.where(valid,values,0),'original_values':np.where(valid,values,0),'validity':valid,
+                    'available':np.asarray([instant_us(r['usable_from']) if r.get('usable_from') else 0 for r in rows]).reshape(chunk_shape),
+                    'available_validity':np.asarray([r.get('usable_from') is not None for r in rows]).reshape(chunk_shape),
+                    'reasons':reasons}
+                for kind,value in payload.items(): arrays[field+'::'+kind][offset:offset+len(selected)]=value
+            child=seal({'contract_version':'reader_column_evidence_v1','context':batch.context,
+                'field_meta':batch.field_meta,'fields':fields,'sessions':selected},'evidence_ref')
+            evidence.append(write_part(root,child,'evidence_ref'))
+        chunks.append({'sessions':selected,'evidence':evidence})
+    for field in daily_fields:
+        for kind,(_,dtype) in kinds.items():
+            name=field+'::'+kind; value=arrays[name]
+            manifest['buffers'][name]=write_buffer(root,value.astype('u1').reshape(-1) if dtype=='bool_u8' else value.reshape(-1),
+                dtype=dtype,shape=list(shape))
+    manifest['daily_fields']={**previous,**deepcopy(daily_fields)}
+    manifest.setdefault('daily_extensions',[]).append({'fields':list(daily_fields),'chunks':chunks})
+    manifest.pop('source_ref'); manifest=seal(manifest,'source_ref')
+    write_json(root/'source.json',manifest)
+    return FeatureColumnSource(manifest,arrays),metrics

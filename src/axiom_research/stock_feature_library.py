@@ -141,6 +141,18 @@ class SavedColumnFeatureSource:
                 'clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
             if field!='amount_cny': result[field].update(adjustment='Data.adjust_prices_output_day_anchor_v1',
                 factor_profile=self._field_profile(profiles['adjustment_factors'],'factor'))
+        for field,meta in self.source.manifest.get('daily_fields',{}).items():
+            result[field]={'value_projection':'native_binary64_v1',
+                'source_profile':self._field_profile(profiles[meta['domain']],field), 'missing':'preserve',
+                'clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
+        if 'volume_shares' in result:
+            result['vwap']={'formula':'original_amount_cny / volume_shares',
+                'value_projection':'native_binary64_v1','missing':'preserve',
+                'amount_profile':self._field_profile(profiles['market_daily'],'amount_cny'),
+                'volume_profile':result['volume_shares']['source_profile'],
+                'adjustment':'Data.adjust_prices_output_day_anchor_v1',
+                'factor_profile':self._field_profile(profiles['adjustment_factors'],'factor'),
+                'clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
         return result
 
     @staticmethod
@@ -200,7 +212,6 @@ class SavedColumnFeatureSource:
 
     def _selected_buffers(self, field, indices, securities):
         """One bounded physical field/day fingerprint; rolling windows combine refs."""
-        j=('open','high','low','close','amount_cny','factor').index(field)
         rows=[]
         axis=tuple(securities); axis=self._leaf_axis(axis)
         if axis not in self._axis_positions:
@@ -209,10 +220,10 @@ class SavedColumnFeatureSource:
         for i in indices:
             key=field,i,axis
             if key not in self._buffer_refs:
-                buffers={k:_array_ref(self.source.arrays[k][i,positions,j]) for k in
+                buffers={k:_array_ref(self.source.field_array(field,k)[i,positions]) for k in
                     ('values','original_values','validity','available','available_validity','reasons')}
                 self.metrics['physical_field_day_hashes']+=1
-                self.metrics['physical_hash_bytes']+=sum(self.source.arrays[k][i,positions,j].nbytes for k in buffers)
+                self.metrics['physical_hash_bytes']+=sum(self.source.field_array(field,k)[i,positions].nbytes for k in buffers)
                 self._buffer_refs[key]=digest(buffers)
             rows.append([self.source.manifest['spec']['read_sessions'][i],self._buffer_refs[key]])
         return {'contract_version':'ordered_field_day_buffers_v1','field':field,'days':rows}
@@ -252,12 +263,15 @@ class SavedColumnFeatureSource:
                 selected={}; field_days={}
                 for field in definition['inputs']:
                     ix=sorted(needed[field])
-                    field_days.setdefault(field,set()).update(spec['read_sessions'][i] for i in ix)
-                    selected[field]=deepcopy(self._selected_buffers(field,ix,securities))
-                    if field!='amount_cny':
-                        factor_ix=sorted(set(ix)|{positions[day]})
-                        field_days.setdefault('factor',set()).update(spec['read_sessions'][i] for i in factor_ix)
-                        selected[field]['factor']=self._selected_buffers('factor',factor_ix,securities)
+                    leaves=self.source.leaf_fields(field)
+                    # Preserve old receipt structure byte-for-byte for old fields.
+                    first=leaves[0]
+                    field_days.setdefault(first,set()).update(spec['read_sessions'][i] for i in ix)
+                    selected[field]=deepcopy(self._selected_buffers(first,ix,securities))
+                    for leaf in leaves[1:]:
+                        leaf_ix=sorted(set(ix)|{positions[day]}) if leaf=='factor' else ix
+                        field_days.setdefault(leaf,set()).update(spec['read_sessions'][i] for i in leaf_ix)
+                        selected[field][leaf]=self._selected_buffers(leaf,leaf_ix,securities)
                 receipt={'selected_buffers':selected,'leaf_revisions':{
                     field:self._selected_leaf_refs({field},needed_days,securities)[field]
                     for field,needed_days in field_days.items()},
@@ -300,9 +314,9 @@ class SavedColumnFeatureSource:
 
     def execution_plan(self, plan, day, securities, dependencies):
         p=plan.to_dict(); names={c['name'] for c in p['input_schema']}
-        fields=('open','high','low','close','amount_cny','factor','is_member')
-        require(names<=set(fields[:5]), 'saved vendor source profile has fixed price/amount fact fields')
-        selected=names|{'is_member'}|({'factor'} if names-{'amount_cny'} else set())
+        fields=self.source.physical_fields()
+        require(names<={c['name'] for c in self.source.input_schema()}, 'source fact fields unavailable')
+        selected={'is_member'}|set().union(*(self.source.leaf_fields(name) for name in names))
         p['sources']=sorted((binding for field,binding in zip(fields,self.source.source_bindings())
                              if field in selected),key=lambda b:b['id'])
         return FeaturePlan.from_dict(p)
