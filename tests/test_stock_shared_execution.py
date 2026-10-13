@@ -26,7 +26,7 @@ from test_stock_matrix_prepare import PrepareFeatureFixture
 from test_stock_target_config_blocks import label,training
 
 
-def real_configuration(root):
+def real_configuration(root, *, feature_stage='cross_sectional'):
     import yaml
     from column_source_fixture import prepared
     from axiom_research import SessionRange,to_dict
@@ -57,7 +57,7 @@ def real_configuration(root):
             scope['result_ref']=digest(scope['result']);scope.pop('scope_bundle_ref');scope['scope_bundle_ref']=digest(scope)
             write_json(target/'scope.json',scope)
             self.spec['scope'].update(file_digest=file_digest(target/'scope.json'),scope_bundle_ref=scope['scope_bundle_ref'])
-    fixture,feature=CompactV3Tests().fixture(root,feature_class=JoinedFeature)
+    fixture,feature=CompactV3Tests().fixture(root,feature_class=JoinedFeature,feature_stage=feature_stage)
     folds=deepcopy(fixture.folds()[:2])
     for fold in folds:fold['contract_version']='stock_ml_fold_spec_v3'
     model=replace(training(),backend_version=importlib.metadata.version('lightgbm'),
@@ -111,6 +111,10 @@ class SharedExecutionTests(unittest.TestCase):
                 self.assertEqual(len(backend_metrics),2)
                 self.assertTrue(all(m['train_calls']==m['predict_calls']==1 for m in backend_metrics))
                 self.assertEqual(len(result['folds']),2)
+                self.assertEqual(prepare_metrics['sequential']['train_calls'],2)
+                self.assertEqual(prepare_metrics['sequential']['predict_calls'],2)
+                self.assertAlmostEqual(sum(prepare_metrics['sequential']['stages'].values()),
+                                       prepare_metrics['sequential']['total_seconds'],places=6)
                 self.assertEqual(prepare_metrics['columnar_normalized_windows'],2)
                 self.assertGreater(prepare_metrics['normalized_daily_reuses'],0)
                 shared=prepare_metrics['shared_execution']
@@ -134,6 +138,10 @@ class SharedExecutionTests(unittest.TestCase):
                     for fold in reused['folds']:load_stock_ml_fold(fold['path'])
                 self.assertEqual(source.statistics,before)
                 self.assertEqual(reused,result)
+                self.assertEqual(resume_metrics['sequential']['train_calls'],0)
+                self.assertEqual(resume_metrics['sequential']['predict_calls'],0)
+                self.assertTrue(all(f['cache_hit'] and f['fit_seconds']==f['predict_seconds']==0
+                                    for f in resume_metrics['sequential']['folds']))
                 frozen=_read(result['raw_signal_evaluation_input'].uri)
                 source_paths={item['path'] for item in frozen['admission_receipt']['source_records']}
                 prepared_root=Path(result['batch_manifest']['prepared_view']['path']).parent

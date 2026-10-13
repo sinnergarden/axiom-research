@@ -9,6 +9,7 @@ Label/proof inputs again; changed selections use reuse_raw_from_batch instead.
 import argparse
 from contextlib import ExitStack
 import json
+import time
 from pathlib import Path
 
 
@@ -98,24 +99,28 @@ def execute(args, options, configured, output, registration):
     limits.update({name:preparation[name] for name in ('maximum_parent_bytes','maximum_source_bytes')
         if name in preparation})
     reuse_manifest = read(options['reuse_raw_from_batch']) if options.get('reuse_raw_from_batch') else None
+    metrics = {}
     with ExitStack() as owners:
+        before=time.perf_counter()
         if options.get('feature_library_training_view'):
             from axiom_research import load_feature_library_training_view
             feature=owners.enter_context(load_feature_library_training_view(options['feature_library_training_view'],limits=limits))
         else:
             feature_path = read(options['feature_result'])['path']
             feature=owners.enter_context(load_stock_feature_view(feature_path,limits=limits,residency='sequential'))
+        metrics['feature_cold_admission_seconds']=time.perf_counter()-before
+        before=time.perf_counter()
         reuse = owners.enter_context(load_stock_ml_batch_inputs(reuse_manifest,
             feature_inputs=feature,limits=limits,residency='sequential')) if reuse_manifest is not None else None
         prepared=owners.enter_context(load_stock_ml_batch_inputs(load_stock_ml_batch_manifest(options['prepared_batch']).wire,
             feature_inputs=feature,limits=limits,residency='sequential')) if options.get('prepared_batch') else None
+        metrics['saved_batch_admission_seconds']=time.perf_counter()-before
         data=source=None
         if prepared is None:
             from axiom_data import Data
             data=Data(options['data_root'])
             snapshot=feature.to_dict()['spec']['snapshot']
             source=owners.enter_context(data.open_column_source(snapshot=snapshot,limits=options['data_limits']))
-        metrics = {}
         result = build_configured_stock_sequential_experiment(data,
             configuration_path=options['experiment_file'],feature_inputs=feature,
             column_source=source,destination=output/'training',reuse_raw_from_batch=reuse,

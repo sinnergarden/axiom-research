@@ -25,7 +25,7 @@ from test_stock_folds import backend
 
 
 class CompactV3Tests(unittest.TestCase):
-    def fixture(self,root,transform=None,feature_class=PrepareFeatureFixture,width=6):
+    def fixture(self,root,transform=None,feature_class=PrepareFeatureFixture,width=6,feature_stage='cross_sectional'):
         """Write a tiny explicit table, not a Feature numerical executor."""
         f=feature_class(root); path=root/'feature-table'; path.mkdir()
         if width!=6:
@@ -49,7 +49,7 @@ class CompactV3Tests(unittest.TestCase):
         for day in f.days:
             dr,proof=f.day(day); rows.extend(dr)
             parents[day]={'feature_ref':digest(proof),'qlib_view_ref':digest(['saved-qlib',day])}
-        schema=[{'name':c,'dtype':'float64','unit':'dimensionless','stage':'cross_sectional','missing':'preserve'} for c in f.columns]
+        schema=[{'name':c,'dtype':'float64','unit':'dimensionless','stage':feature_stage,'missing':'preserve'} for c in f.columns]
         row_index=write_part(path,seal({'sessions':f.days,'security_ids':f.universe,
             'row_count':len(rows),'order':'session_security'},'row_index_ref'),'row_index_ref')
         metadata=write_part(path,seal({'rows':rows,'row_references':parents},'metadata_ref'),'metadata_ref')

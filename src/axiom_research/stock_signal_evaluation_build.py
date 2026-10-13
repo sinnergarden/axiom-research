@@ -6,6 +6,7 @@ from weakref import WeakKeyDictionary
 import errno
 import os
 import tempfile
+import time
 
 from .stock_artifacts import digest, file_digest, write_json
 from .stock_fold_inputs import require
@@ -154,6 +155,7 @@ class _BuildOOSWriter:
     def _consume(self,descriptor,lease):
         from .stock_signal_evaluation_compact import _admit_compact
         from .stock_signal_evaluation_projection import _shard,_check_marks
+        started=time.perf_counter()
         try:
             self._check()
             require(lease._batch is self.batch,'build lease owner mismatch')
@@ -203,6 +205,7 @@ class _BuildOOSWriter:
             # before the borrowed lease and the enclosing build projection close.
             lease._check_sources(); _check_marks(self.marks)
         finally:
+            self.metrics['consume_seconds']=self.metrics.get('consume_seconds',0.0)+time.perf_counter()-started
             # Tracebacks may outlive writer.close() and its charge credit.
             fold=spec=days=selected=local=admitted=records=marks=raw=_=None
             new_records=new_sources=new_lineages=delta=p=r=s=day=name=None

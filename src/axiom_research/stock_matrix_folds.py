@@ -119,6 +119,16 @@ def _build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,train
     if inputs.get('contract_version') in ('stock_ml_saved_inputs_v3','stock_ml_saved_inputs_v4','stock_ml_saved_inputs_v5'):
         from .stock_batch import _data
         state=_data(batch)['matrix_state']
+        if inputs.get('contract_version') == 'stock_ml_saved_inputs_v5':
+            # Every v3 producer, including direct and restored-batch calls,
+            # reaches this boundary before HIT admission or native fitting.
+            # Raw library projections remain readable, but this model profile
+            # has always declared cross-sectional normalized Feature inputs.
+            schema=(state.model_binding['schema'] if state.model_binding is not None
+                    else state.feature.to_dict()['schema'])
+            require(bool(schema) and all(c['stage']=='cross_sectional' and
+                    c['unit']=='dimensionless' for c in schema),
+                    'stock ModelRelease v3 requires normalized cross_sectional Feature inputs; raw training is unsupported')
         common=state.control_common(inputs,spec)
         if model_feature_selection is not None:
             from .stock_compact_store import model_feature_binding
@@ -333,6 +343,7 @@ def _load_matrix_fold(path, *, projection,batch,ingress,_lease=None):
             (model['feature_selection'],common['feature_selection']),(model['catalog_ref'],common['catalog_ref']),
             (model['parameters'],parameters),(model['num_boost_round'],rounds),
             (model['target_semantics'],_target(common)),
+            (model['feature_normalization'],'same_date_visible_members_cs_zscore_no_fit'),
             (model['label_normalization'],_label_normalization() if columnar else NORMALIZATION_SPEC),
             (model['environment'],definition['environment']),(model['implementation_ref'],definition['implementation_ref']),
             (model['booster_digest'],manifest['files']['booster.txt'])):
