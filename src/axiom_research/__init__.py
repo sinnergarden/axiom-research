@@ -30,6 +30,8 @@ from importlib import import_module as _import_module
 
 _RUNTIME_EXPORTS = {
     "extend_financial_feature_source": ".financial_feature_columns",
+    "extend_benchmark_feature_source": ".benchmark_feature_columns",
+    "prepare_qsys_inputs": ".qsys_preparation",
     "load_stock_signal_evaluation_summary": ".stock_signal_evaluation_summary",
     "ViewRef": ".view_ref",
     "FeatureBuild": ".joint_build", "build_joint_features": ".joint_build",

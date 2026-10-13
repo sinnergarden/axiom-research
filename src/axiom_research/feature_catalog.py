@@ -157,7 +157,7 @@ def _validate_catalog(value: Any) -> None:
         _require(type(feature["formula"]) is str and bool(feature["formula"]), "formula required")
         dependencies = feature["dependencies"]
         _require(type(dependencies) is list and bool(dependencies) and
-                 all(type(d) is str and re.fullmatch(r"[a-z_]+\.[a-z_]+", d) for d in dependencies) and
+                 all(type(d) is str and re.fullmatch(r"[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*", d) for d in dependencies) and
                  len(dependencies) == len(set(dependencies)), "unique qualified Data dependencies required")
         _require(type(feature["lookback"]) is int and feature["lookback"] >= 1,
                  "lookback is inclusive history sessions")
