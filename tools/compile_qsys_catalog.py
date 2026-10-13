@@ -15,7 +15,7 @@ rows=list(csv.DictReader(args.inventory_csv.open()))
 assert len(rows)==388 and [int(r['inventory_row']) for r in rows]==list(range(1,389))
 cat=json.load(open(ROOT/'src/axiom_research/catalogs/a01_price_v1.json'))
 legacy=json.load(open(ROOT/'src/axiom_research/catalogs/stock_ml_v1.json'))
-cat['catalog_id']='qsys_stock_v2'
+cat['catalog_id']='qsys_stock_v3'
 cat['shared_nodes']+=legacy['shared_nodes'];cat['features']+=legacy['features']
 groups={g['id'] for g in cat['groups']}
 for g in legacy['groups']:
@@ -204,6 +204,10 @@ for leaf in ('ttm_revenue','ttm_revenue_prior_year'):
  meta[leaf]=('CNY',0,'base',{'financial_events.revenue'})
 register(rows[183],sub(div('ttm_revenue','ttm_revenue_prior_year'),1),
  note='Fixed QSYS formula: TTM revenue / prior-year TTM revenue - 1; native revenue, not total_revenue; zero denominator and missing preserve. Data bridge uses four contiguous report quarters and the same cutoff-visible revisions for current and year-ago operands, strictly before session start. QSYS four-row shift and same-report revision filtering are not claimed fully equivalent; no trading-day lag. Source report history is a separate bridge obligation.')
+for leaf in ('single_q_revenue','single_q_revenue_prior_year'):
+ meta[leaf]=('CNY',0,'base',{'financial_events.revenue'})
+register(rows[184],sub(div('single_q_revenue','single_q_revenue_prior_year'),1),
+ note='Native revenue cumulative YTD converted by Data.single_quarter; prior-year operand is exactly four economic quarters earlier at the same visible cutoff. Missing components and zero denominators remain missing; no trading-day or report-row shift.')
 # Definitions preserve all old records. Registry records certified aliases separately.
 allids={f['id']:f for f in cat['features']}
 registry=[]
@@ -240,6 +244,6 @@ for f in cat['features']:
  for n in f['core_nodes']:
   for p in n['inputs']:include(p)
 cat['shared_nodes']=[n for n in cat['shared_nodes'] if n['name'] in needed]
-for name,obj in [('qsys_stock_v2.json',cat),('qsys_registry_v2.json',dict(schema_version='qsys_registry_v1',source_revision='852bcb73125f8781b7a80618b8188928ef4d38f2',normalization_boundary='normalized=True means Axiom frozen-reference CS zscore. QSYS absnorm expressions remain separate raw recipes; never aliases for normalized=True.',rows=registry))]:
+for name,obj in [('qsys_stock_v3.json',cat),('qsys_registry_v3.json',dict(schema_version='qsys_registry_v1',source_revision='852bcb73125f8781b7a80618b8188928ef4d38f2',normalization_boundary='normalized=True means Axiom frozen-reference CS zscore. QSYS absnorm expressions remain separate raw recipes; never aliases for normalized=True.',rows=registry))]:
  (ROOT/'src/axiom_research/catalogs'/name).write_text(json.dumps(obj,indent=2,ensure_ascii=False)+'\n')
 print('features',len(cat['features']),'registry',len(registry),'states',{s:sum(r['status']==s for r in registry)for s in ('executable','alias','blocked')})

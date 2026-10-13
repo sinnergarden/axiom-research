@@ -40,10 +40,12 @@ FINANCIAL_FIELD_CONTRACTS = {
         'outputs': {
             'ttm_revenue': {'derivation': 'ttm', 'quarters_back': 0},
             'ttm_revenue_prior_year': {'derivation': 'ttm', 'quarters_back': 4},
+            'single_q_revenue': {'derivation': 'single_quarter', 'quarters_back': 0},
+            'single_q_revenue_prior_year': {'derivation': 'single_quarter', 'quarters_back': 4},
         },
     },
 }
 CORE_INPUT_CONTRACTS.update({
     field: {'domain': 'financial_events', 'dtype': 'float64', 'unit': 'CNY'}
-    for field in ('revenue', 'ttm_revenue', 'ttm_revenue_prior_year')
+    for field in ('revenue', 'ttm_revenue', 'ttm_revenue_prior_year', 'single_q_revenue', 'single_q_revenue_prior_year')
 })

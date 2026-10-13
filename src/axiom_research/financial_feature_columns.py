@@ -197,7 +197,14 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
                         'fields':{n:{'dtype':'float64','unit':unit} for n in outputs}},
              'source_profile':{'id':'research.financial_materialization.v1','financial_inputs':{k:native[k] for k in ('contract','source_profile')},
                 'projections':{n:{k:v for k,v in d.items() if k not in ('event_snapshot','report_start','report_end','coverage_security_ids')} for n,d in declarations.items()},'selection':POLICY,'not_native_daily':True}}
-    require(DOMAIN not in manifest['source_profiles'],'append financial fields together in one bridge')
+    previous=manifest['source_profiles'].get(DOMAIN)
+    if previous is not None:
+        require(previous['source_profile']['financial_inputs']==profile['source_profile']['financial_inputs'],
+                'additional financial leaves must use the same canonical input contract/profile')
+        merged=deepcopy(previous)
+        merged['contract']['fields'].update(profile['contract']['fields'])
+        merged['source_profile']['projections'].update(profile['source_profile']['projections'])
+        profile=merged
     manifest['source_profiles'][DOMAIN]=profile
     validate_financial_materializations(manifest)
     manifest.pop('source_ref');manifest=seal(manifest,'source_ref');write_json(root/'source.json',manifest)
