@@ -25,7 +25,7 @@ def _feature_source_compatibility(view, source, selection):
     """Same semantics and local selected facts, allowing unchanged historical frames."""
     from axiom_engine.feature_library import feature_definitions
     from .feature_catalog import load_feature_catalog_ref
-    from .stock_feature_library import normalized_feature_dependency_ref
+    from .stock_feature_library import normalized_feature_dependency_ref, admitted_raw_dependency_refs
     cap=view.describe(); physical=source.source; spec=physical.manifest['spec']
     require(cap['security_ids']==spec['universe'] and set(cap['sessions'])<=set(spec['feature_sessions']) and
             [s['id'] for s in selection]==cap['columns'], 'Feature/source axes or selection mismatch')
@@ -40,14 +40,16 @@ def _feature_source_compatibility(view, source, selection):
                    cap['definitions'][name]['schema']==expected[name]['schema'] for name in cap['columns'])
     layer='raw' if same(raw) else 'normalized' if same(normalized) else None
     require(layer is not None, 'Feature/source definition semantics mismatch')
-    dependencies=source.dependency_refs(raw,cap['sessions'],cap['security_ids'])
+    dependencies=(admitted_raw_dependency_refs(view,source,raw,cap['sessions'],cap['security_ids'])
+                  if layer=='raw' else source.dependency_refs(raw,cap['sessions'],cap['security_ids']))
     if layer=='normalized':
         dependencies={day:{name:normalized_feature_dependency_ref(source,day,raw[name]['semantic_ref'],ref)
                            for name,ref in columns.items()} for day,columns in dependencies.items()}
-    for day,columns in dependencies.items():
-        receipts=view.column_receipts(day,list(columns))
-        require(all(receipts[name]['dependency_ref']==ref for name,ref in columns.items()),
-                'Feature/source local dependency or reference mismatch')
+    if layer=='normalized':
+        for day,columns in dependencies.items():
+            receipts=view.column_receipts(day,list(columns))
+            require(all(receipts[name]['dependency_ref']==ref for name,ref in columns.items()),
+                    'Feature/source local dependency or reference mismatch')
     return seal({'contract_version':'stock_feature_source_compatibility_v1','layer':layer,
         'view_ref':view.identity,'semantic_refs':{n:cap['definitions'][n]['semantic_ref'] for n in cap['columns']},
         'dependency_refs':dependencies,'reference_security_ids':list(source.reference_security_ids),

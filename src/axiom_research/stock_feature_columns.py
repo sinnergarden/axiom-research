@@ -60,58 +60,72 @@ class FeatureColumnSource:
     def __init__(self, manifest, arrays):
         self.manifest, self.arrays = manifest, arrays
         self.positions = {day:i for i,day in enumerate(manifest['spec']['read_sessions'])}
+        self.security_positions={security:i for i,security in enumerate(manifest['spec']['universe'])}
         for value in arrays.values(): value.flags.writeable=False
 
     @property
     def identity(self):
         return self.manifest['source_ref']
 
-    def select(self, day, *, history_sessions=252):
-        """Apply the original output anchor using the Data-owned array kernel."""
+    def select(self, day, *, history_sessions=252, securities=None, fields=None):
+        """Apply Data's original anchor kernel to just the selected physical block."""
         import numpy as np
         from axiom_data.derived import _adjust_columns
         spec=self.manifest['spec']; end=self.positions[day]+1; begin=end-history_sessions
         require(begin>=0 and day in spec['feature_sessions'],'complete declared output history required')
-        a=self.arrays; shape=(history_sessions,len(spec['universe']),4)
-        factor=np.broadcast_to(a['values'][begin:end,:,5,None],shape)
-        factor_valid=np.broadcast_to(a['validity'][begin:end,:,5,None],shape)
-        anchor=np.broadcast_to(a['values'][end-1:end,:,5,None],shape)
-        anchor_valid=np.broadcast_to(a['validity'][end-1:end,:,5,None],shape)
-        values,validity,reasons=_adjust_columns(a['values'][begin:end,:,:4],
-            a['validity'][begin:end,:,:4],a['reasons'][begin:end,:,:4],
-            factor,factor_valid,anchor,anchor_valid)
-        price_clock=a['available'][begin:end,:,:4]
-        price_known=a['available_validity'][begin:end,:,:4]
-        factor_clock=np.broadcast_to(a['available'][begin:end,:,5,None],shape)
-        factor_known=np.broadcast_to(a['available_validity'][begin:end,:,5,None],shape)
-        anchor_clock=np.broadcast_to(a['available'][end-1:end,:,5,None],shape)
-        anchor_known=np.broadcast_to(a['available_validity'][end-1:end,:,5,None],shape)
-        # Null leaves do not contribute a clock. Absence is established at this
-        # output cutoff only when every raw/factor/anchor leaf clock is null.
-        sentinel=np.iinfo(np.int64).min
-        known=price_known|factor_known|anchor_known
-        clock=np.maximum.reduce([np.where(price_known,price_clock,sentinel),
-            np.where(factor_known,factor_clock,sentinel),np.where(anchor_known,anchor_clock,sentinel)])
+        securities=list(spec['universe'] if securities is None else securities)
+        require(bool(securities) and securities==sorted(set(securities)) and set(securities)<=set(spec['universe']),
+                'selected securities outside source')
+        fields=list(FIELDS[:-1] if fields is None else fields)
+        require(bool(fields) and len(fields)==len(set(fields)) and set(fields)<=set(FIELDS[:-1]),
+                'selected fields outside source')
+        positions=[self.security_positions[s] for s in securities]
+        # Bound copies by the requested history and securities before adjustment.
+        a={name:(value[begin:end] if securities==spec['universe'] else value[begin:end][:,positions])
+           for name,value in self.arrays.items()}
         cutoff=instant_us(spec['cutoff_by_session'][day])//1000000*1000000
-        clock=np.where(known,(clock+999999)//1000000*1000000,cutoff)
-        amount_known=a['available_validity'][begin:end,:,4]
-        amount_clock=np.where(amount_known,(a['available'][begin:end,:,4]+999999)//1000000*1000000,cutoff)
-        require(bool((clock<=cutoff).all()) and bool((amount_clock<=cutoff).all()),'future source dependency')
+        prices=[name for name in fields if name!='amount_cny']; indices=[FIELDS.index(name) for name in prices]
+        selected_values={}; selected_validity={}; selected_reasons={}; selected_clocks={}
+        if prices:
+            shape=(history_sessions,len(securities),len(prices))
+            factor=np.broadcast_to(a['values'][:,:,5,None],shape)
+            factor_valid=np.broadcast_to(a['validity'][:,:,5,None],shape)
+            anchor=np.broadcast_to(a['values'][-1:,:,5,None],shape)
+            anchor_valid=np.broadcast_to(a['validity'][-1:,:,5,None],shape)
+            values,validity,reasons=_adjust_columns(a['values'][:,:,indices],
+                a['validity'][:,:,indices],a['reasons'][:,:,indices],
+                factor,factor_valid,anchor,anchor_valid)
+            price_clock=a['available'][:,:,indices]; price_known=a['available_validity'][:,:,indices]
+            factor_clock=np.broadcast_to(a['available'][:,:,5,None],shape)
+            factor_known=np.broadcast_to(a['available_validity'][:,:,5,None],shape)
+            anchor_clock=np.broadcast_to(a['available'][-1:,:,5,None],shape)
+            anchor_known=np.broadcast_to(a['available_validity'][-1:,:,5,None],shape)
+            sentinel=np.iinfo(np.int64).min; known=price_known|factor_known|anchor_known
+            clock=np.maximum.reduce([np.where(price_known,price_clock,sentinel),
+                np.where(factor_known,factor_clock,sentinel),np.where(anchor_known,anchor_clock,sentinel)])
+            clock=np.where(known,(clock+999999)//1000000*1000000,cutoff)
+            require(bool((clock<=cutoff).all()),'future source dependency')
+            selected_values={name:values[:,:,i] for i,name in enumerate(prices)}
+            selected_validity={name:validity[:,:,i] for i,name in enumerate(prices)}
+            selected_reasons={name:reasons[:,:,i] for i,name in enumerate(prices)}
+            selected_clocks={name:clock[:,:,i] for i,name in enumerate(prices)}
+        if 'amount_cny' in fields:
+            amount_clock=np.where(a['available_validity'][:,:,4],
+                (a['available'][:,:,4]+999999)//1000000*1000000,cutoff)
+            require(bool((amount_clock<=cutoff).all()),'future source dependency')
+            selected_values['amount_cny']=a['values'][:,:,4]
+            selected_validity['amount_cny']=a['validity'][:,:,4]
+            selected_reasons['amount_cny']=a['reasons'][:,:,4]
+            selected_clocks['amount_cny']=amount_clock
         selection={'source_ref':self.identity,'session':day,'history_sessions':spec['read_sessions'][begin:end],
             'anchor_session':day,'knowledge_cutoff':spec['cutoff_by_session'][day]}
         return {'selection':selection,'selection_ref':digest(selection),
-            'sessions':tuple(spec['read_sessions'][begin:end]),'universe':tuple(spec['universe']),
-            'values':{name:values[:,:,i] for i,name in enumerate(FIELDS[:4])}|
-                     {'amount_cny':a['values'][begin:end,:,4]},
-            'validity':{name:validity[:,:,i] for i,name in enumerate(FIELDS[:4])}|
-                       {'amount_cny':a['validity'][begin:end,:,4]},
-            'availability':{name:clock[:,:,i] for i,name in enumerate(FIELDS[:4])}|
-                           {'amount_cny':amount_clock},
-            'missing_reasons':{name:reasons[:,:,i] for i,name in enumerate(FIELDS[:4])}|
-                              {'amount_cny':a['reasons'][begin:end,:,4]},
-            'member':a['member'][begin:end],
-            'member_available':np.where(a['member_available_validity'][begin:end],
-                (a['member_available'][begin:end]+999999)//1000000*1000000,cutoff)}
+            'sessions':tuple(spec['read_sessions'][begin:end]),'universe':tuple(securities),
+            'values':selected_values,'validity':selected_validity,
+            'availability':selected_clocks,'missing_reasons':selected_reasons,
+            'member':a['member'],
+            'member_available':np.where(a['member_available_validity'],
+                (a['member_available']+999999)//1000000*1000000,cutoff)}
 
     def source_bindings(self):
         """Stable source range IDs; selections bind the exact dependency window."""
@@ -120,9 +134,10 @@ class FeatureColumnSource:
             qualification='best_effort',availability_basis='declared_vendor_assumption')
             for field in (*FIELDS,'is_member')]
 
-    def core_inputs(self, day, *, calendar_ref, reference_ref, schema, history_sessions=252):
+    def core_inputs(self, day, *, calendar_ref, reference_ref, schema, history_sessions=252, securities=None):
         import numpy as np
-        view=self.select(day,history_sessions=history_sessions); shape=view['member'].shape
+        view=self.select(day,history_sessions=history_sessions,securities=securities,
+                         fields=[c['name'] for c in schema]); shape=view['member'].shape
         ids={field:binding['id'] for field,binding in zip((*FIELDS,'is_member'),self.source_bindings())}
         sets=[[ids[field],ids['factor']] for field in FIELDS[:4]]+[[ids['amount_cny']],[ids['is_member']]]
         sets=[sorted(set(group)) for group in sets]
@@ -132,7 +147,7 @@ class FeatureColumnSource:
             cutoffs_utc_us=np.full(len(view['sessions']),instant_us(view['selection']['knowledge_cutoff'])//1000000*1000000,dtype='<i8'),
             values=view['values'],validity=view['validity'],reason_codes={k:v.astype('<i4') for k,v in view['missing_reasons'].items()},
             reason_dictionary=list(REASONS),available_at_utc_us=view['availability'],
-            source_codes={field:np.full(shape,i,dtype='<i4') for i,field in enumerate(FIELDS[:-1])},
+            source_codes={field:np.full(shape,i,dtype='<i4') for i,field in enumerate(FIELDS[:-1]) if field in view['values']},
             source_sets=sets,reference_member=view['member'],reference_industry=np.full(shape,None,dtype=object),
             reference_available_at_utc_us=view['member_available'],reference_source_codes=np.full(shape,5,dtype='<i4'),
             input_refs={'source_ref':self.identity,'selection_ref':view['selection_ref']})

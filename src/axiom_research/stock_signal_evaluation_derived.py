@@ -114,7 +114,7 @@ def _derived_rows(signal,base,scope,raw_admission,seen,*,project=True):
     try:
         from .stock_compact_store import sealed
         sealed(signal,'signal_run_ref')
-        require(signal['contract_version']=='derived_signal_run_v1' and
+        require(signal['contract_version'] in ('derived_signal_run_v1','derived_signal_run_v2') and
             signal['score_ref']==digest(signal['rows']) and signal['signal_stage'] in ('daily_zscore','final') and
             signal['score_unit']=='dimensionless' and signal['universe']==base['scope']['universe'] and
             signal['context']['calendar_ref']==base['raw_metadata']['calendar_ref'],
