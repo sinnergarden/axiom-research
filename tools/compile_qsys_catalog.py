@@ -385,6 +385,8 @@ for r in rows:
   elif i==189:code='last_true_age';reason='Requires reviewed last-true session-age semantics and missing/history policy.'
   elif i==188:code='breakout_missing_policy';reason='Source partial-window/exclusive-high boolean requires reviewed missing-to-false behavior before admission.'
   elif i==198 or i==199:code='rolling_policy_review';reason='Fixed source inventory imports rolling_zscore, but its helper implementation is absent from the pinned source export; min_periods, ddof and zero-scale policy are not established.'
+  elif i==312:code='eligibility_semantics';reason='Observed margin balance presence is not authoritative margin eligibility; no qualification flag is fabricated.'
+  elif i==347:code='blocked_formula_dependency';reason='Depends on volume_contraction_after_rise_60d, whose original formula is provably constant zero and needs an explicit corrected definition.'
   elif any(x in r['name'] for x in ('holder','forecast')) or i in (312,325,326,327,330,345,346,347,348,349):code='event_revision_binding';reason='Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate.'
   elif i in (308,309,310,311,318,319,320):code='dependent_composite';reason='Composite score depends on blocked inputs and/or source fill-zero/CS semantics requiring explicit review.'
   else:code='financial_report_binding';reason='Financial report-period/TTM/single-quarter fields and visible revisions are not bound to daily column input; year-over-year and acceleration cannot use 252-row shift.'

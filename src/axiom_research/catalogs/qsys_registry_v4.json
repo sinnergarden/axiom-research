@@ -14523,8 +14523,8 @@
       "candidate_alias": "",
       "status": "blocked",
       "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+        "code": "eligibility_semantics",
+        "reason": "Observed margin balance presence is not authoritative margin eligibility; no qualification flag is fabricated."
       },
       "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
     },
@@ -16255,8 +16255,8 @@
       "candidate_alias": "",
       "status": "blocked",
       "blocker": {
-        "code": "event_revision_binding",
-        "reason": "Requires report/event-period and previous-announcement revisions bound at each cutoff; no trading-row shift surrogate."
+        "code": "blocked_formula_dependency",
+        "reason": "Depends on volume_contraction_after_rise_60d, whose original formula is provably constant zero and needs an explicit corrected definition."
       },
       "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
     },

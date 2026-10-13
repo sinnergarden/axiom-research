@@ -144,7 +144,7 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
         for si in range(0,len(query.symbols),256):
             subset=list(query.symbols[si:si+256])
             cutoffs=[_cutoff(d,spec['cutoff_by_session'][d],session_timezone) for d in selected]
-            batches=iter_event_cutoffs(data,snapshot=event_snapshot,query=replace(query,symbols=tuple(subset)),
+            batches=iter_event_cutoffs(data,snapshot=event_snapshot,query=replace(query,symbols=tuple(subset),fields=tuple(dict.fromkeys((field,'announcement_date'))) if query.domain=='forecast_events' else query.fields),
                 cutoffs=cutoffs,maximum_cache_bytes=maximum_event_cache_bytes)
             metrics['event_blocks']+=1
             for offset,(day,batch) in enumerate(zip(selected,batches)):

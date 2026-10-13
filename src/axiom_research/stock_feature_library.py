@@ -9,6 +9,7 @@ from contextlib import nullcontext
 from hashlib import sha256
 import json
 import sys
+import tempfile
 import zlib
 
 from axiom_engine.core import FeaturePlan, required_history
@@ -56,6 +57,7 @@ class SavedColumnFeatureSource:
     def __init__(self, descriptor, *, reference_security_ids=None, maximum_source_bytes=8*1024**3,
                  maximum_working_bytes=512*1024**2):
         self._leaf_cache_bytes=0
+        self._leaf_spool=tempfile.TemporaryFile(mode="w+b")
         self.store=VerifiedMatrixStore(maximum_source_bytes=maximum_source_bytes,
             maximum_matrix_bytes=maximum_working_bytes,
             _caller_retained_bytes=lambda:self._leaf_cache_bytes)
@@ -119,8 +121,10 @@ class SavedColumnFeatureSource:
                 # encode, hash copies and zlib workspace before allocation.
                 raw=json.dumps(rows,separators=(',',':')).encode()
                 raw_bytes=len(raw);packed=zlib.compress(raw);raw=None
+                offset=self._leaf_spool.tell();self._leaf_spool.write(packed)
+                stored=(offset,len(packed));packed=None
                 self._retain_leaf(self._leaf_refs,(field,day),(symbols,digest({'dtype':metadata['dtype'],
-                    'unit':metadata['unit'],'selected_revisions':rows}),metadata['dtype'],metadata['unit'],packed,raw_bytes))
+                    'unit':metadata['unit'],'selected_revisions':rows}),metadata['dtype'],metadata['unit'],stored,raw_bytes))
                 require(base+self._leaf_cache_bytes+workspace<=self.store.maximum_matrix_bytes,
                         'Feature leaf evidence cache and source exceed maximum_working_bytes')
 
@@ -214,7 +218,12 @@ class SavedColumnFeatureSource:
                         base=self.store._native_caller_bytes()
                         require(base+1024**2+64*raw_bytes<=self.store.maximum_matrix_bytes,
                                 'Feature leaf decode workspace exceeds maximum_working_bytes')
-                        decoder=zlib.decompressobj(); raw=decoder.decompress(packed,raw_bytes+1)
+                        offset,length=packed
+                        require(base+1024**2+64*raw_bytes+length<=self.store.maximum_matrix_bytes,'Feature leaf spool decode budget exceeded')
+                        self._leaf_spool.seek(offset);compressed=self._leaf_spool.read(length)
+                        require(len(compressed)==length,'Feature leaf spool truncated')
+                        decoder=zlib.decompressobj(); raw=decoder.decompress(compressed,raw_bytes+1)
+                        compressed=None
                         require(len(raw)==raw_bytes and decoder.eof and not decoder.unused_data,
                                 'Feature leaf compressed length mismatch')
                         selected=set(securities);rows=json.loads(raw)
@@ -338,7 +347,7 @@ class SavedColumnFeatureSource:
         return FeaturePlan.from_dict(p)
 
     def close(self):
-        self.source.arrays.clear(); self.store.close()
+        self.source.arrays.clear(); self.store.close(); self._leaf_spool.close()
         self._leaf_cache_bytes=0
         for cache in (self._leaf_refs,self._leaf_axes,self._leaf_subsets,self._dependencies,
                       self._buffer_refs,self._reference_refs,self._axis_positions): cache.clear()
