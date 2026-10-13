@@ -96,7 +96,7 @@ class SavedSecurityBlockTests(unittest.TestCase):
 
     def test_prepare_projects_fields_securities_and_history_before_adjustment(self):
         from axiom_data.derived import _adjust_columns
-        from axiom_engine.feature_library.identity import select_security_plan
+        from axiom_engine.feature_library.identity import select_security_plan, select_feature_plan
         with tempfile.TemporaryDirectory() as temp:
             def unrelated_future(arrays): arrays['available'][:,:,1]+=10*24*3600*1000000
             descriptor=saved_source(Path(temp)/'source',securities=['A','B','C','D'],mutate_arrays=unrelated_future)
@@ -104,7 +104,8 @@ class SavedSecurityBlockTests(unittest.TestCase):
             with SavedColumnFeatureSource(descriptor,maximum_working_bytes=8*1024**2) as source:
                 day=source.source.manifest['spec']['feature_sessions'][-1]; securities=['C','D']
                 for feature,history,fields in [('ALP019',5,{'close'}),('LQD001',1,{'amount_cny'})]:
-                    plan=select_security_plan(source.plan(catalog,[{'id':feature,'semantic_version':'1.0.0'}]),securities)
+                    plan=select_security_plan(select_feature_plan(
+                        source.plan(catalog,[{'id':feature,'semantic_version':'1.0.0'}]),[feature]),securities)
                     definitions=feature_definitions(plan,input_semantics=source.input_semantics())
                     dependencies=source.dependency_refs(definitions,[day],securities)[day]
                     with patch('axiom_data.derived._adjust_columns',wraps=_adjust_columns) as adjust:
