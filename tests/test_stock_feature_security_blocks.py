@@ -119,6 +119,29 @@ class SavedSecurityBlockTests(unittest.TestCase):
                         self.assertEqual(adjust.call_args.args[0].shape,(5,2,1))
                     else: adjust.assert_not_called()
 
+    def test_leaf_cache_and_subset_inflate_share_existing_working_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            descriptor=saved_source(Path(temp)/'source',day_count=4)
+            with SavedColumnFeatureSource(descriptor,maximum_working_bytes=8*1024**2) as source:
+                self.assertGreater(source._leaf_cache_bytes,0)
+                self.assertEqual(source.store._caller_retained_bytes(),source._leaf_cache_bytes)
+                maximum=source.store.maximum_matrix_bytes
+                try:
+                    retained=source._leaf_cache_bytes
+                    source.store.maximum_matrix_bytes=retained+100
+                    with self.assertRaisesRegex(ValueError,'cache exceeds'):
+                        source._charge_leaf_cache(101)
+                    self.assertEqual(source._leaf_cache_bytes,retained)
+                    source.store.maximum_matrix_bytes=maximum
+                    base=source.store._native_caller_bytes()
+                    source.store.maximum_matrix_bytes=base+512*1024
+                    field,day=next(iter(source._leaf_refs))
+                    with patch('axiom_research.stock_feature_library.zlib.decompressobj',
+                               side_effect=AssertionError('inflate allocated before budget check')):
+                        with self.assertRaisesRegex(ValueError,'decode workspace'):
+                            source._selected_leaf_refs({field},{day},['A'])
+                finally: source.store.maximum_matrix_bytes=maximum
+
     def test_cohort_only_change_recomputes_cs_without_adjusting_cached_raw(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); descriptor=saved_source(root/'source',day_count=4)

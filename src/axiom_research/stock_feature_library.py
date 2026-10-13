@@ -8,6 +8,7 @@ from copy import deepcopy
 from contextlib import nullcontext
 from hashlib import sha256
 import json
+import sys
 import zlib
 
 from axiom_engine.core import FeaturePlan, required_history
@@ -54,8 +55,10 @@ class SavedColumnFeatureSource:
     """Admit an immutable source through the original owner, then borrow mmap."""
     def __init__(self, descriptor, *, reference_security_ids=None, maximum_source_bytes=8*1024**3,
                  maximum_working_bytes=512*1024**2):
+        self._leaf_cache_bytes=0
         self.store=VerifiedMatrixStore(maximum_source_bytes=maximum_source_bytes,
-                                      maximum_matrix_bytes=maximum_working_bytes)
+            maximum_matrix_bytes=maximum_working_bytes,
+            _caller_retained_bytes=lambda:self._leaf_cache_bytes)
         self._leaf_refs={}; self._dependencies={}; self._buffer_refs={}; self._reference_refs={}
         self._leaf_subsets={}; self._leaf_axes={}; self._axis_positions={}
         self.metrics={'physical_field_day_hashes':0,'physical_hash_bytes':0}
@@ -74,8 +77,33 @@ class SavedColumnFeatureSource:
                 set(self.reference_security_ids)<=set(physical), 'explicit reference subset of admitted source required')
         self._reference_set=set(self.reference_security_ids)
 
+    def _leaf_axis(self, axis):
+        if axis not in self._leaf_axes:
+            self._charge_leaf_cache(256+sys.getsizeof(axis)+sum(sys.getsizeof(s) for s in axis))
+            self._leaf_axes[axis]=axis
+        return self._leaf_axes[axis]
+
+    def _charge_leaf_cache(self, amount):
+        require(self._leaf_cache_bytes+amount<=self.store.maximum_matrix_bytes,
+                'Feature leaf evidence cache exceeds maximum_working_bytes')
+        self._leaf_cache_bytes+=amount
+
+    def _retain_leaf(self, mapping, key, value):
+        require(key not in mapping,'duplicate Feature leaf cache entry')
+        # Container/key overhead plus direct scalar/packed payloads. Shared
+        # security tuples are charged once by _leaf_axis, not once per day.
+        amount=512+sum(sys.getsizeof(v) for v in key if type(v) is str)
+        amount+=sum(sys.getsizeof(v) for v in value if type(v) in (str,bytes,int)) if type(value) is tuple else sys.getsizeof(value)
+        self._charge_leaf_cache(amount);mapping[key]=value
+
     def _capture_leaf_refs(self, child):
+        base=self.store._native_caller_bytes(child)-self._leaf_cache_bytes
+        original_bytes=max(self.store.fingerprints[path][2] for path,descriptor in self.store.descriptors.items()
+                           if descriptor.get("evidence_ref")==child["evidence_ref"])
         for field, metadata in child['field_meta'].items():
+            workspace=1024**2+16*original_bytes+32*len(metadata['by_key'])+256*len(child['sessions'])
+            require(base+self._leaf_cache_bytes+workspace<=self.store.maximum_matrix_bytes,
+                    'Feature leaf encoding workspace exceeds maximum_working_bytes')
             grouped={day:[] for day in child['sessions']}
             for row in metadata['by_key']:
                 require(row['session'] in grouped, 'source provenance outside declared chunk')
@@ -84,13 +112,17 @@ class SavedColumnFeatureSource:
                 rows=sorted(rows,key=lambda r:r['security_id'])
                 symbols=tuple(r['security_id'] for r in rows)
                 require(len(symbols)==len(set(symbols)), 'duplicate source provenance key')
-                symbols=self._leaf_axes.setdefault(symbols,symbols)
+                symbols=self._leaf_axis(symbols)
                 # Keep day-local exact evidence for future subset admission,
                 # without retaining the decoded per-security provenance objects.
-                self._leaf_refs[field,day]=(symbols,digest({'dtype':metadata['dtype'],
-                    'unit':metadata['unit'],'selected_revisions':rows}),
-                    metadata['dtype'],metadata['unit'],
-                    zlib.compress(json.dumps(rows,separators=(',',':')).encode()))
+                # The complete admitted parent byte size bounds this one-day
+                # encode, hash copies and zlib workspace before allocation.
+                raw=json.dumps(rows,separators=(',',':')).encode()
+                raw_bytes=len(raw);packed=zlib.compress(raw);raw=None
+                self._retain_leaf(self._leaf_refs,(field,day),(symbols,digest({'dtype':metadata['dtype'],
+                    'unit':metadata['unit'],'selected_revisions':rows}),metadata['dtype'],metadata['unit'],packed,raw_bytes))
+                require(base+self._leaf_cache_bytes+workspace<=self.store.maximum_matrix_bytes,
+                        'Feature leaf evidence cache and source exceed maximum_working_bytes')
 
     def capabilities(self):
         return {'contract_version':'feature_source_capabilities_v1','source_ref':self.source.identity,
@@ -139,20 +171,30 @@ class SavedColumnFeatureSource:
     def _selected_leaf_refs(self, fields, days, securities):
         wanted={(field,day) for field in fields for day in days}
         require(wanted<=set(self._leaf_refs), 'used source leaf evidence absent')
-        axis=tuple(securities); axis=self._leaf_axes.setdefault(axis,axis)
+        axis=tuple(securities); axis=self._leaf_axis(axis)
         result={}
         for field in sorted(fields):
             result[field]={}
             for day in sorted(days):
-                symbols,full,dtype,unit,packed=self._leaf_refs[field,day]
+                symbols,full,dtype,unit,packed,raw_bytes=self._leaf_refs[field,day]
                 require(set(securities)<=set(symbols), 'source leaf security axes mismatch')
                 if axis==symbols: result[field][day]=full
                 else:
                     key=(field,day,axis)
                     if key not in self._leaf_subsets:
-                        selected=set(securities); rows=json.loads(zlib.decompress(packed))
-                        self._leaf_subsets[key]=digest({'dtype':dtype,'unit':unit,
+                        # Bound inflate output and its decoded flat provenance
+                        # graph before allocation; saved rows come from admitted JSON.
+                        base=self.store._native_caller_bytes()
+                        require(base+1024**2+64*raw_bytes<=self.store.maximum_matrix_bytes,
+                                'Feature leaf decode workspace exceeds maximum_working_bytes')
+                        decoder=zlib.decompressobj(); raw=decoder.decompress(packed,raw_bytes+1)
+                        require(len(raw)==raw_bytes and decoder.eof and not decoder.unused_data,
+                                'Feature leaf compressed length mismatch')
+                        selected=set(securities);rows=json.loads(raw)
+                        reference=digest({'dtype':dtype,'unit':unit,
                             'selected_revisions':[r for r in rows if r['security_id'] in selected]})
+                        rows=raw=decoder=None
+                        self._retain_leaf(self._leaf_subsets,key,reference)
                     result[field][day]=self._leaf_subsets[key]
         return result
 
@@ -160,7 +202,7 @@ class SavedColumnFeatureSource:
         """One bounded physical field/day fingerprint; rolling windows combine refs."""
         j=('open','high','low','close','amount_cny','factor').index(field)
         rows=[]
-        axis=tuple(securities); axis=self._leaf_axes.setdefault(axis,axis)
+        axis=tuple(securities); axis=self._leaf_axis(axis)
         if axis not in self._axis_positions:
             self._axis_positions[axis]=[self.source.security_positions[s] for s in securities]
         positions=self._axis_positions[axis]
@@ -195,7 +237,7 @@ class SavedColumnFeatureSource:
         require(bool(securities) and securities==sorted(set(securities)) and
                 set(securities)<=set(spec['universe']) and set(days)<=set(spec['feature_sessions']),
                 'requested axes outside admitted physical source')
-        axis=tuple(securities); axis=self._leaf_axes.setdefault(axis,axis)
+        axis=tuple(securities); axis=self._leaf_axis(axis)
         result={}
         for day in days:
             result[day]={}
@@ -267,6 +309,7 @@ class SavedColumnFeatureSource:
 
     def close(self):
         self.source.arrays.clear(); self.store.close()
+        self._leaf_cache_bytes=0
         for cache in (self._leaf_refs,self._leaf_axes,self._leaf_subsets,self._dependencies,
                       self._buffer_refs,self._reference_refs,self._axis_positions): cache.clear()
     def __enter__(self): return self
