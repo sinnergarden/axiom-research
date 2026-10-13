@@ -11,6 +11,7 @@ import json
 from typing import Sequence
 
 from .feature_catalog import FeatureCatalog, FeatureCatalogError, FeatureSelection
+from .qsys_input_contracts import DAILY_FIELD_CONTRACTS
 
 
 QSYS_SOURCE_REVISION = "852bcb73125f8781b7a80618b8188928ef4d38f2"
@@ -96,7 +97,8 @@ def qsys_daily_fields(names: Sequence[str] | None = None) -> dict[str, dict[str,
         domain, field = dependency.split('.')
         if domain == 'adjustment_factors' or domain == 'market_daily' and field != 'volume_shares':
             continue
-        unit = ('shares' if field in ('volume_shares', 'lend_volume', 'lend_repay_volume') else
-                'ratio' if field in ('pe', 'pb') else 'percent' if field == 'turnover_rate' else 'CNY')
-        result[field] = {'domain': domain, 'dtype': 'int64' if field == 'volume_shares' else 'float64', 'unit': unit}
+        declaration = DAILY_FIELD_CONTRACTS.get(field)
+        if declaration is None or declaration['domain'] != domain:
+            raise FeatureCatalogError('dependency requires a separately bound input bridge: ' + dependency)
+        result[field] = dict(declaration)
     return result

@@ -90,6 +90,38 @@ class QsysCatalogTests(unittest.TestCase):
             'extra_large_sell_cny':{'domain':'money_flow_daily','dtype':'float64','unit':'CNY'}})
         self.assertEqual(qsys_daily_fields(['KMID']),{})
 
+    def test_all_current_dependencies_match_data_and_adapter_contracts(self):
+        from axiom_data.sources import TUSHARE_DAILY_CONTRACT
+        from axiom_data.stock_input_sources import stock_input_source_spec
+        from axiom_research.stock_feature_columns import FeatureColumnSource
+        from axiom_research.qsys_input_contracts import DAILY_FIELD_CONTRACTS, CORE_INPUT_CONTRACTS
+        canonical={'market_daily':TUSHARE_DAILY_CONTRACT}
+        for endpoint in ('daily_basic','moneyflow','margin_detail'):
+            spec=stock_input_source_spec(endpoint,identity_map={'000001.SZ':'A'},
+                next_open_session_by_date={'2020-01-01':'2020-01-02'})
+            canonical[spec['domain']]=spec['contract']
+        # Covers even supported future fields such as ps; there is no CNY fallback.
+        for field,spec in DAILY_FIELD_CONTRACTS.items():
+            physical=canonical[spec['domain']]['fields'][field]
+            self.assertEqual({k:physical[k] for k in ('dtype','unit')}, {k:spec[k] for k in ('dtype','unit')})
+        self.assertEqual(DAILY_FIELD_CONTRACTS['ps']['unit'],'ratio')
+        catalog=load_qsys_feature_catalog()
+        self.assertNotIn('valuation_daily.ps',{d for f in catalog.definitions for d in f['dependencies']})
+        extensions=qsys_daily_fields()
+        source=FeatureColumnSource({'spec':{'read_sessions':[],'universe':[]},'daily_fields':extensions},{})
+        schema={c['name']:c for c in source.input_schema()}
+        nodes=catalog.to_dict()['shared_nodes']+[n for f in catalog.definitions for n in f['core_nodes']]
+        names={n['name'] for n in nodes}
+        leaves={a for n in nodes for a in n['inputs'] if a not in names}
+        for field in leaves:
+            self.assertEqual({k:schema[field][k] for k in ('dtype','unit')},
+                {k:CORE_INPUT_CONTRACTS[field][k] for k in ('dtype','unit')})
+        for dep in {d for f in catalog.definitions for d in f['dependencies']}:
+            domain,field=dep.split('.')
+            self.assertEqual(CORE_INPUT_CONTRACTS[field]['domain'],domain)
+            if field=='vwap' or domain=='adjustment_factors':continue
+            self.assertEqual(CORE_INPUT_CONTRACTS[field]['unit'],canonical[domain]['fields'][field]['unit'])
+
     def test_every_recipe_compiles_and_executes_through_core(self):
         catalog=load_qsys_feature_catalog();base,facts,context=fixture()
         for normalized in (False,True):

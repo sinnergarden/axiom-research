@@ -21,6 +21,10 @@ groups={g['id'] for g in cat['groups']}
 for g in legacy['groups']:
  if g['id'] not in groups:cat['groups'].append(g);groups.add(g['id'])
 units={'open':'CNY/share','high':'CNY/share','low':'CNY/share','close':'CNY/share','vwap':'CNY/share','volume_shares':'shares','amount_cny':'CNY','factor':'dimensionless','pe':'ratio','pb':'ratio','ps':'ratio','turnover_rate':'percent','total_mv':'CNY','circ_mv':'CNY','net_inflow':'CNY','big_inflow':'CNY','margin_balance':'CNY','margin_buy_amount':'CNY','margin_repay_amount':'CNY','margin_total_balance':'CNY','lend_volume':'shares','lend_sell_volume':'shares','lend_repay_volume':'shares'}
+# Use the same reviewed declarations as the public adapter mapping.
+from runpy import run_path
+input_contracts=run_path(str(ROOT/'src/axiom_research/qsys_input_contracts.py'))['CORE_INPUT_CONTRACTS']
+units.update({name: declaration['unit'] for name,declaration in input_contracts.items() if name in units})
 deps={k:'market_daily.'+k for k in ('open','high','low','close','vwap','volume_shares','amount_cny')}
 deps.update({k:'valuation_daily.'+k for k in ('pe','pb','ps','turnover_rate','total_mv','circ_mv')})
 deps.update({k:'moneyflow_daily.'+k for k in ('net_inflow','big_inflow')})
