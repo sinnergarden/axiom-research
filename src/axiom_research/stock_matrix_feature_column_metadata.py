@@ -120,6 +120,11 @@ def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts
     require(set(spec['cutoff_by_session'])>=set(days) and
             all(_instant(spec['cutoff_by_session'][a])<=_instant(spec['cutoff_by_session'][b])
                 for a,b in zip(days,days[1:])), 'column source cutoff order mismatch')
+    financial=manifest.get('financial_materializations',{})
+    if financial or any(m.get('domain')=='materialized_financial_events'
+                        for m in manifest.get('daily_fields',{}).values()):
+        from .financial_feature_columns import validate_financial_materializations
+        validate_financial_materializations(manifest)
     extra=manifest.get('daily_fields',{})
     require(type(extra) is dict and all(type(f) is str and f.isidentifier() and
         set(m)=={'domain','dtype','unit'} and m['dtype'] in ('float64','int64') for f,m in extra.items()),
@@ -183,9 +188,12 @@ def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts
                                 meta['dtype']==declaration['dtype'] and meta['unit']==declaration['unit'],
                                 'daily evidence domain/type/unit mismatch')
                         keys=[(r['security_id'],r['session']) for r in meta['by_key']]
-                        require(len(keys)==len(set(keys)) and set(keys)=={(s,d) for d in chunk_days for s in securities},
+                        covered_securities=financial[field]['coverage_security_ids'] if field in financial else securities
+                        require(len(keys)==len(set(keys)) and set(keys)=={(s,d) for d in chunk_days for s in covered_securities},
                                 'daily evidence key coverage mismatch')
                     seen_fields.extend(child['fields'])
+                if financial:
+                    validate_financial_materializations(manifest,child=child)
                 if _dependency_receipts is not None:
                     _dependency_receipts(child)
                 if store is not None:

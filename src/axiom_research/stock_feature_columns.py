@@ -86,6 +86,14 @@ class FeatureColumnSource:
         if field == 'vwap': return ('amount_cny','volume_shares','factor')
         return (field,'factor') if field in FIELDS[:4] else (field,)
 
+    def require_coverage(self, fields, securities):
+        """Unmaterialized financial securities are outside the source, not null facts."""
+        declarations=self.manifest.get('financial_materializations',{})
+        for field in fields:
+            if field in declarations:
+                require(set(securities)<=set(declarations[field]['coverage_security_ids']),
+                        'requested securities outside financial field coverage')
+
     def select(self, day, *, history_sessions=252, securities=None, fields=None):
         """Apply Data's original anchor kernel to just the selected physical block."""
         import numpy as np
@@ -98,6 +106,7 @@ class FeatureColumnSource:
         fields=list(FIELDS[:-1] if fields is None else fields)
         require(bool(fields) and len(fields)==len(set(fields)) and set(fields)<={c['name'] for c in self.input_schema()},
                 'selected fields outside source')
+        self.require_coverage(fields,securities)
         positions=[self.security_positions[s] for s in securities]
         # Bound copies by the requested history and securities before adjustment.
         a={name:(value[begin:end] if securities==spec['universe'] else value[begin:end][:,positions])
@@ -181,9 +190,11 @@ class FeatureColumnSource:
 
     def source_bindings(self):
         """Stable source range IDs; selections bind the exact dependency window."""
-        return [dict(id=digest([self.identity,field]),data_ref=digest({'snapshot':self.manifest['spec']['snapshot']}),
+        return [dict(id=digest([self.identity,field]),data_ref=digest({'snapshot':self.manifest.get('financial_materializations',{}).get(field,{}).get(
+                'event_snapshot',self.manifest['spec']['snapshot'])}),
             view_ref=self.identity,revision_policy=self.manifest['spec']['pit_policy'],
-            qualification='best_effort',availability_basis='declared_vendor_assumption')
+            qualification='best_effort',availability_basis=('financial_components_max_declared_vendor_assumption'
+                if field in self.manifest.get('financial_materializations',{}) else 'declared_vendor_assumption'))
             for field in self.physical_fields()]
 
     def core_inputs(self, day, *, calendar_ref, reference_ref, schema, history_sessions=252, securities=None):

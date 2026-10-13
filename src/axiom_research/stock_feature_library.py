@@ -145,6 +145,8 @@ class SavedColumnFeatureSource:
             result[field]={'value_projection':'native_binary64_v1',
                 'source_profile':self._field_profile(profiles[meta['domain']],field), 'missing':'preserve',
                 'clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
+        for field in self.source.manifest.get('financial_materializations',{}):
+            result[field]['value_projection']='Data_financial_derivation_binary64_v1'
         if 'volume_shares' in result:
             result['vwap']={'formula':'original_amount_cny / volume_shares',
                 'value_projection':'native_binary64_v1','missing':'preserve',
@@ -162,6 +164,11 @@ class SavedColumnFeatureSource:
         # Canonical security axes and selected revision rows bind identity maps;
         # adding an unrelated security must not change every field's semantics.
         selected.pop('identity_map',None)
+        if selected.get('id')=='research.financial_materialization.v1':
+            projection=selected['projections'][field]
+            selected['projections']={field:projection}
+            selected['financial_inputs']=SavedColumnFeatureSource._field_profile(
+                selected['financial_inputs'],projection['source_field'])
         raw_field=selected.get('field_map',{}).get(field)
         if 'field_map' in selected:
             selected['field_map']={k:v for k,v in selected['field_map'].items() if k in (field,'security_id','session')}
@@ -258,6 +265,7 @@ class SavedColumnFeatureSource:
                 key=(definition['semantic_ref'],day,axis)
                 if key in self._dependencies:
                     result[day][name]=self._dependencies[key]; continue
+                source.require_coverage(definition['inputs'],securities)
                 semantic=definition['semantic']; needed=_needed({'input_schema':[v['schema'] for v in semantic['inputs'].values()],
                     'nodes':semantic['nodes'],'outputs':[semantic['output']]},[positions[day]])
                 selected={}; field_days={}
