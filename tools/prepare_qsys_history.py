@@ -137,7 +137,7 @@ def main():
     if source_path.exists():source=load_source(source_path)
     else:
         progress('base_inputs',sessions=len(sessions),securities=len(symbols))
-        source,_=build_feature_column_source(data,spec=spec,destination=source_path.parent,block_sessions=2,
+        source,_=build_feature_column_source(data,spec=spec,destination=source_path.parent,block_sessions=2,checkpoint=True,
             progress=lambda p:progress('base_inputs',detail=p))
     requirements=qsys_input_requirements();daily=requirements['daily_fields']
     # Each domain checkpoints independently instead of restarting 21 columns.

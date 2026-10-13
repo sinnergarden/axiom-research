@@ -273,7 +273,7 @@ def _membership_masks(series, ordered, meta, days, shape):
     return values,known,complete,reasons
 
 
-def build_feature_column_source(data, *, spec, destination, block_sessions=20, progress=None):
+def build_feature_column_source(data, *, spec, destination, block_sessions=20, progress=None, checkpoint=False):
     """Prepare once with public reads and the unchanged float32 projection."""
     import numpy as np
     import pandas as pd
@@ -299,18 +299,35 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
     config=_source_config(spec); prepared=prepare_matrix_qlib(data,config=config,destination=root,physical_only=True)
     sessions=spec['read_sessions']; symbols=spec['universe']; shape=(len(sessions),len(symbols),len(FIELDS))
     from .feature_input_buffers import allocate_feature_buffer, seal_feature_buffer
-    arrays={name:allocate_feature_buffer(root,dtype=dtype,shape=shape[:2] if name.startswith('member') else shape)
+    layout={name:{'dtype':np.dtype(dtype).str,'shape':list(shape[:2] if name.startswith('member') else shape)}
             for name,dtype in {'values':'<f8','original_values':'<f8','validity':bool,
                 'available':'<i8','available_validity':bool,'reasons':'u1',
                 'member':bool,'member_known':bool,'member_pool_complete':bool,'member_reasons':'u1',
                 'member_available':'<i8','member_available_validity':bool}.items()}
     chunks=[]; metrics={'data_read_calls':0,'feature_core_calls':0,'source_rows':0,'native_value_reuses':0,
         'reader_projection_fallback_cells':0,'qlib_prepare_seconds':prepared['seconds']}
+    staging=None; start=0
+    implementations=_implementation()
+    if checkpoint:
+        from .feature_input_checkpoint import FeatureInputCheckpoint, atomic_json
+        binding={'spec':spec,'source_profiles':profiles,'qlib_view':prepared['view_reference'],
+                 'implementation_ref':digest(implementations),'block_sessions':block_sessions}
+        if (root/'source.json').exists():
+            import json
+            saved=json.loads((root/'source.json').read_text())
+            require(all(saved[k]==binding[k] for k in ('spec','source_profiles','qlib_view','implementation_ref')),
+                    'existing input source binding mismatch')
+            return load_feature_column_source(root/'source.json'),{'data_read_calls':0,'feature_core_calls':0,'reused_complete_source':True}
+        staging=FeatureInputCheckpoint(root,binding=binding,layout=layout,sessions=sessions,metrics=metrics)
+        arrays=staging.arrays; start=staging.state['completed_dates']
+        chunks=list(staging.state['chunks']); metrics=dict(staging.state['metrics'])
+    else:
+        arrays={name:allocate_feature_buffer(root,dtype=item['dtype'],shape=tuple(item['shape'])) for name,item in layout.items()}
     clock_cache={}
     def timestamp(value):
         if value not in clock_cache: clock_cache[value]=instant_us(value)
         return clock_cache[value]
-    for offset in range(0,len(sessions),block_sessions):
+    for offset in range(start,len(sessions),block_sessions):
         days=sessions[offset:offset+block_sessions]; keys=[(s,d) for d in days for s in symbols]
         native=_NativeWindow(prepared['view'].read(fields=FIELDS,symbols=symbols,
             start=days[0],end=days[-1]),sessions=days,symbols=symbols,
@@ -371,20 +388,28 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
                 'field_meta':batch.field_meta,'fields':list(query.fields),'sessions':list(days)},'evidence_ref')
             evidence.append(write_part(root,child,'evidence_ref')); del batch,frame,child,ordered,by_key
         chunks.append({'sessions':list(days),'evidence':evidence}); metrics['source_rows']+=len(keys)
+        if staging is not None: staging.commit(offset+len(days),chunks,metrics)
         if progress is not None: progress({'stage':'feature_column_source','completed_dates':offset+len(days),
             'total_dates':len(sessions),**metrics})
-    del native
+    if start<len(sessions): del native
     descriptors={}
     for name,array in arrays.items():
         dtype='bool_u8' if array.dtype.kind=='b' else 'uint8' if array.dtype==np.dtype('u1') else 'int64_le' if array.dtype.kind=='i' else 'float64_le'
-        descriptors[name],arrays[name]=seal_feature_buffer(root,array,dtype=dtype,shape=list(array.shape))
-    implementations=_implementation()
+        if staging is None:
+            descriptors[name],arrays[name]=seal_feature_buffer(root,array,dtype=dtype,shape=list(array.shape))
+        else:
+            # Keep staging intact until and after the final receipt is published.
+            # A crash during sealing can safely repeat immutable publication.
+            wire=array.view('u1') if dtype=='bool_u8' else array
+            descriptors[name]=write_buffer(root,wire.reshape(-1),dtype=dtype,shape=list(array.shape))
+            arrays[name]=np.memmap(descriptors[name]['path'],mode='r',dtype=array.dtype,shape=array.shape)
     manifest=seal({'contract_version':SOURCE_VERSION,'spec':spec,'qlib_view':prepared['view_reference'],
         'buffers':descriptors,'chunks':chunks,'reason_codes':list(REASONS),'source_profiles':profiles,
         'selection_invariance':'declared_vendor_release_visible_at_each_historical_row_cutoff',
         'implementation_sources':implementations,'implementation_ref':digest(implementations),
         'environment':_environment()},'source_ref')
-    write_json(root/'source.json',manifest)
+    if staging is not None: atomic_json(root/'source.json',manifest)
+    else: write_json(root/'source.json',manifest)
     return FeatureColumnSource(manifest,arrays),metrics
 
 
