@@ -35,6 +35,7 @@ class StockDerivedSignal:
         sealed(self._manifest,'content_digest');signal=self.to_dict()
         return {'kind':'derived',**{k:signal[k] for k in
             ('signal_run_ref','signal_plan_ref','score_ref','implementation_ref','signal_stage')},
+            **({'signal_semantics_ref':signal['signal_semantics_ref']} if 'signal_semantics_ref' in signal else {}),
             'signal_artifact':self.artifact,'parent_inputs':deepcopy(self._manifest['parent_inputs'])}
 
 
@@ -77,6 +78,7 @@ def build_stock_derived_signal(signal_plan,*,prediction_inputs,context,destinati
     """
     from .stock_fold_artifacts import load_stock_ml_fold
     from axiom_engine.core import execute_signal_plan,StockPredictionFrame
+    from axiom_engine.core.stock_signal import signal_semantics_ref
     plan=from_dict(_transport_defaults(signal_plan)) if type(signal_plan) is dict else signal_plan
     require(type(plan) is SignalPlanSpec,'typed SignalPlanSpec required');validate(plan,require_resolved=True)
     wire=_transport_defaults(_encode(plan,True));configuration_ref=semantic_identity(plan)
@@ -88,7 +90,8 @@ def build_stock_derived_signal(signal_plan,*,prediction_inputs,context,destinati
         raw,binding,pins=_parent(run);parents[alias]=StockPredictionFrame.from_dict(raw);bindings[alias]=binding
         for name,ref in pins.items():
             require(name not in files or files[name]==ref,'conflicting DerivedSignal parent pin');files[name]=ref
-    definition={'contract_version':'stock_derived_signal_request_v1','signal_plan':wire,
+    definition={'contract_version':'stock_derived_signal_request_v2','signal_plan':wire,
+        'signal_semantics_ref':signal_semantics_ref(wire),
         'configuration_spec_ref':configuration_ref,'context':deepcopy(context),
         'parent_signal_refs':{a:b['signal_run_ref'] for a,b in bindings.items()}}
     target=Path(destination).resolve()/digest(definition)[7:]
@@ -100,7 +103,8 @@ def build_stock_derived_signal(signal_plan,*,prediction_inputs,context,destinati
     # stage, validity, clocks and the actual resulting frame identities.
     signal=execute_signal_plan(wire,inputs=parents,context=deepcopy(context)).to_dict()
     sealed(signal,'signal_run_ref')
-    require(signal['contract_version']=='derived_signal_run_v1' and
+    require(signal['contract_version']=='derived_signal_run_v2' and
+        signal['signal_semantics_ref']==definition['signal_semantics_ref'] and
         signal['parent_signal_refs']==definition['parent_signal_refs'] and signal['score_ref']==digest(signal['rows']),
         'Core DerivedSignal original parent/output identity mismatch')
     target.parent.mkdir(parents=True,exist_ok=True)
@@ -151,18 +155,20 @@ def _load_stock_derived_signal(path,*,limits=None,_shared_bytes=0):
             'parent_files','content_digest'},'exact saved DerivedSignal manifest required')
         require(manifest['contract_version']=='stock_derived_signal_manifest_v1','unsupported DerivedSignal manifest')
         definition=manifest['definition']
-        fields(definition,{'contract_version','signal_plan','configuration_spec_ref','context','parent_signal_refs'},
+        fields(definition,{'contract_version','signal_plan','configuration_spec_ref','context','parent_signal_refs'} |
+            ({'signal_semantics_ref'} if definition.get('contract_version')=='stock_derived_signal_request_v2' else set()),
             'exact saved DerivedSignal request required')
-        require(definition['contract_version']=='stock_derived_signal_request_v1','unsupported DerivedSignal request')
+        require(definition['contract_version'] in ('stock_derived_signal_request_v1','stock_derived_signal_request_v2'),'unsupported DerivedSignal request')
         plan=from_dict(definition['signal_plan'])
         require(type(plan) is SignalPlanSpec,'saved typed SignalPlanSpec required');validate(plan,require_resolved=True)
         require(semantic_identity(plan)==definition['configuration_spec_ref'],
             'saved DerivedSignal typed configuration identity mismatch')
         signal=store.read_json({'path':str(path/'signal.json'),'file_digest':manifest['signal_file_digest']},key='signal_run_ref')
         fields(signal,{'contract_version','signal_run_ref','score_ref','signal_plan','signal_plan_ref','parent_signal_refs',
-            'implementation_ref','signal_stage','score_semantics','score_unit','universe','rows','context','limitations'},
+            'implementation_ref','signal_stage','score_semantics','score_unit','universe','rows','context','limitations'} |
+            ({'signal_semantics_ref'} if signal.get('contract_version')=='derived_signal_run_v2' else set()),
             'exact saved Core DerivedSignal required')
-        require(signal['contract_version']=='derived_signal_run_v1' and signal['score_ref']==digest(signal['rows']) and
+        require(signal['contract_version'] in ('derived_signal_run_v1','derived_signal_run_v2') and signal['score_ref']==digest(signal['rows']) and
             reference(signal['signal_plan_ref']) and reference(signal['implementation_ref']) and
             signal['signal_plan_ref']==manifest['definition']['configuration_spec_ref'] and
             signal['parent_signal_refs']==manifest['definition']['parent_signal_refs']=={
@@ -170,6 +176,11 @@ def _load_stock_derived_signal(path,*,limits=None,_shared_bytes=0):
             signal['context']==manifest['definition']['context'] and
             manifest['signal_artifact']==_artifact(path/'signal.json',signal,'DerivedSignal',signal['signal_run_ref']),
             'saved DerivedSignal original identity/context mismatch')
+        if signal['contract_version']=='derived_signal_run_v2':
+            require(definition['contract_version']=='stock_derived_signal_request_v2' and
+                    reference(signal['signal_semantics_ref']) and signal['signal_semantics_ref']==definition.get('signal_semantics_ref'), 'saved Derived semantic identity required')
+        else:
+            require(definition['contract_version']=='stock_derived_signal_request_v1', 'legacy signal/request mismatch')
         def neutral(value):
             if type(value) is list:return [neutral(v) for v in value]
             if type(value) is dict:return {k:neutral(v) for k,v in value.items() if k!='contract_type'}

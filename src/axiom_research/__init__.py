@@ -29,6 +29,7 @@ __version__ = "0.2.7"
 from importlib import import_module as _import_module
 
 _RUNTIME_EXPORTS = {
+    "load_stock_signal_evaluation_summary": ".stock_signal_evaluation_summary",
     "ViewRef": ".view_ref",
     "FeatureBuild": ".joint_build", "build_joint_features": ".joint_build",
     "load_feature_build": ".joint_build",
