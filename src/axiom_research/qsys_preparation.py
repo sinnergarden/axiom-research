@@ -7,7 +7,7 @@ from .stock_fold_inputs import require
 
 def prepare_qsys_inputs(data, *, source, names, destination, event_snapshots,
                         report_start, report_end, security_ids=None,
-                        daily_snapshot=None, benchmark_snapshot=None, benchmark_security_id=None, block_sessions=20,
+                        daily_snapshot=None, industry_snapshot=None, benchmark_snapshot=None, benchmark_security_id=None, block_sessions=20,
                         maximum_added_bytes=512*1024**2,
                         maximum_event_cache_bytes=64*1024**2):
     """Append only inputs absent from a saved physical source for a subset.
@@ -66,5 +66,15 @@ def prepare_qsys_inputs(data, *, source, names, destination, event_snapshots,
             source,metrics['benchmark']=extend_benchmark_feature_source(data,source=source,
                 snapshot=benchmark_snapshot,benchmark_security_id=benchmark_security_id,
                 destination=root/'benchmark',block_sessions=block_sessions,
+                maximum_added_bytes=maximum_added_bytes)
+    if requirements['industry_fields']:
+        if 'industry_code' in source.physical_fields():
+            existing=source.manifest['source_profiles']['materialized_industry_intervals']['source_profile']['snapshot_id']
+            require(existing==industry_snapshot,'existing industry snapshot differs from request')
+            metrics['reused_fields'].append('industry_code')
+        else:
+            from .industry_feature_columns import extend_industry_feature_source
+            source,metrics['industry']=extend_industry_feature_source(data,source=source,
+                snapshot=industry_snapshot,destination=root/'industry',block_sessions=min(block_sessions,5),
                 maximum_added_bytes=maximum_added_bytes)
     return source,metrics

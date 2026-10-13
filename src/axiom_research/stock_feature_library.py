@@ -262,7 +262,7 @@ class SavedColumnFeatureSource:
                 self._reference_refs[i]=digest({'member':_array_ref(member),
                     'available':_array_ref(source.arrays['member_available'][i]),
                     'available_validity':_array_ref(source.arrays['member_available_validity'][i]),
-                    'leaf':self._selected_leaf_refs({'is_member'},{days[i]},source.manifest['spec']['universe'])})
+                    'leaf':self._selected_leaf_refs({'is_member'}|({'industry_code'} if 'industry_code' in source.physical_fields() else set()),{days[i]},source.manifest['spec']['universe'])})
             rows.append([days[i],self._reference_refs[i]])
         return {'selection':self.reference_security_ids,'days':rows}
 
@@ -440,7 +440,7 @@ class _RawCrossSectionSource:
             reference_ref=p['reference_ref'],security_ids=list(securities),
             cutoffs_utc_us=np.asarray([cutoff],dtype='<i8'),
             reference_member=original.arrays['member'][position:position+1],
-            reference_industry=np.full((1,len(securities)),None,dtype=object),
+            reference_industry=original.industries([position],[original.security_positions[s] for s in securities]),
             reference_available_at_utc_us=member_clock,
             input_refs={'source_ref':original.identity})
         # Core requires actual original source IDs, including the reference source.

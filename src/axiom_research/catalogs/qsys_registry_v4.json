@@ -8921,8 +8921,8 @@
       "candidate_alias": "",
       "status": "blocked",
       "blocker": {
-        "code": "last_true_age",
-        "reason": "Requires reviewed last-true session-age semantics and missing/history policy."
+        "code": "excluded_by_user",
+        "reason": "Explicitly removed from requested scope: last-high age is not required; observed margin balance remains a separate feature and is not relabeled eligibility."
       },
       "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
     },
@@ -9709,12 +9709,12 @@
       },
       "candidate_id": "LIQ008",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "LIQ008",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "turnover_rate_ind_zscore",
@@ -9759,12 +9759,12 @@
       },
       "candidate_id": "LIQ009",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "LIQ009",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "is_limit_up",
@@ -10944,12 +10944,12 @@
       },
       "candidate_id": "RST017",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "RST017",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "stock_minus_industry_ret_5d",
@@ -11005,12 +11005,12 @@
       },
       "candidate_id": "RST018",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "RST018",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "ret_20d",
@@ -11876,12 +11876,12 @@
       },
       "candidate_id": "RST037",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "RST037",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "rps_industry_120d",
@@ -11937,12 +11937,12 @@
       },
       "candidate_id": "RST038",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "RST038",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "price_percentile_252d",
@@ -12696,12 +12696,12 @@
       },
       "candidate_id": "INC001",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INC001",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "industry_ret_3d",
@@ -12757,12 +12757,12 @@
       },
       "candidate_id": "INC002",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INC002",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "industry_ret_5d",
@@ -12818,12 +12818,12 @@
       },
       "candidate_id": "INC003",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INC003",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "industry_breadth",
@@ -12879,12 +12879,12 @@
       },
       "candidate_id": "INC004",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INC004",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "stock_minus_industry_ret",
@@ -12940,12 +12940,12 @@
       },
       "candidate_id": "INC005",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INC005",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "log_mktcap",
@@ -14523,8 +14523,8 @@
       "candidate_alias": "",
       "status": "blocked",
       "blocker": {
-        "code": "eligibility_semantics",
-        "reason": "Observed margin balance presence is not authoritative margin eligibility; no qualification flag is fabricated."
+        "code": "excluded_by_user",
+        "reason": "Explicitly removed from requested scope: last-high age is not required; observed margin balance remains a separate feature and is not relabeled eligibility."
       },
       "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
     },
@@ -16452,12 +16452,12 @@
       },
       "candidate_id": "INM001",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INM001",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "industry_ret_60d",
@@ -16513,12 +16513,12 @@
       },
       "candidate_id": "INM002",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INM002",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "industry_ret_120d",
@@ -16574,12 +16574,12 @@
       },
       "candidate_id": "INM003",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INM003",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "industry_breadth_20d",
@@ -16635,12 +16635,12 @@
       },
       "candidate_id": "INM004",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INM004",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "industry_breadth_60d",
@@ -16696,12 +16696,12 @@
       },
       "candidate_id": "INM005",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INM005",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "industry_new_high_ratio",
@@ -16768,12 +16768,12 @@
       },
       "candidate_id": "INM006",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INM006",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "industry_top_stock_momentum",
@@ -16829,12 +16829,12 @@
       },
       "candidate_id": "INM007",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INM007",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "industry_volume_expansion",
@@ -16901,12 +16901,12 @@
       },
       "candidate_id": "INM008",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INM008",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "stock_minus_industry_ret_20d",
@@ -16962,12 +16962,12 @@
       },
       "candidate_id": "INM009",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INM009",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "stock_minus_industry_ret_60d",
@@ -17023,12 +17023,12 @@
       },
       "candidate_id": "INM010",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INM010",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "stock_industry_ret_corr_60d",
@@ -17084,12 +17084,12 @@
       },
       "candidate_id": "INM011",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "INM011",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     },
     {
       "feature_key": "Log($total_mv+1)",
@@ -18253,12 +18253,12 @@
       },
       "candidate_id": "CFG013",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "historical_industry",
-        "reason": "Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled."
+      "status": "executable",
+      "selection": {
+        "id": "CFG013",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score."
     }
   ]
 }

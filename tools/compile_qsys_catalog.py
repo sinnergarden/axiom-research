@@ -378,6 +378,37 @@ for row in rows:
 for row in rows:
  if row['name']=='$lend_sell_volume':
   register(row,'lend_sell_volume',note='Tushare margin_detail documentation doc_id=59 specifies stock quantities in shares (funds units, bonds lots). Requires Data canonical lend_sell_volume with explicit per-security shares binding for this stock universe; unbound native rqmcl is never relabeled. Existing Raw can be replayed offline with that binding.')
+def sqrt(a):return node('sqrt',[a],{'domain':'missing'},'dimensionless')
+# Supplier historical interval best effort: SW L1 groups, unknown stays missing.
+meta['industry_code']=('dimensionless',0,'base',{'industry_membership_events.l1_code'})
+def indmean(x):return node('cs_mean',[x],dict(group='industry',unknown_group='missing',missing='skip',excluded='missing'))
+def indroll(x,w,minimum):return node('rolling_industry',[x],dict(window=w,min_periods=minimum,inclusive_current=True,reduction='mean',missing='skip',ddof=0,ties='average'))
+for w in (1,3,5):
+ R[f'industry_ret_{w}d']=indmean(ret(c,w))
+ R['stock_minus_industry_ret' + ('' if w==1 else f'_{w}d')]=sub(ret(c,w),R[f'industry_ret_{w}d'])
+R['industry_breadth']=indmean(fl(gt(r1,0)))
+for w in (20,60,120):R[f'industry_ret_{w}d']=indroll(R['industry_ret_1d'],w,max(2,w//4))
+for w in (20,60):
+ R[f'industry_breadth_{w}d']=indroll(R['industry_breadth'],w,max(2,w//4))
+ R[f'stock_minus_industry_ret_{w}d']=sub(ret(c,w),indmean(ret(c,w)))
+for w in (60,120):R[f'rps_industry_{w}d']=node('cs_rank',[ret(c,w)],dict(group='industry',unknown_group='missing',missing='skip',ties='average',excluded='missing'),'dimensionless')
+for name,x in (('amount_log_ind_zscore',node('log1p',[a],{'domain':'missing'},'dimensionless')),('turnover_rate_ind_zscore','turnover_rate')):
+ R[name]=node('cs_zscore',[x],dict(group='industry',unknown_group='missing',missing='skip',ddof=1,epsilon=0,constant='zero',clip=None,excluded='missing'),'dimensionless')
+R['industry_new_high_ratio']=indroll(indmean(fl(gt(div(c,roll(c,120,'max',minimum=60)),.95))),20,5)
+am=roll(a,20,minimum=5)
+R['industry_volume_expansion']=indroll(indmean(div(am,shift(am,20))),20,5)
+r60=filled(ret(c,60));q80=node('cs_winsorize',[r60],dict(group='industry',unknown_group='missing',missing='skip',lower=.8,upper=.8,interpolation='linear',excluded='missing'))
+top=node('not',[lt(r60,q80)],{'missing':'preserve'},'dimensionless','bool')
+R['industry_top_stock_momentum']=indroll(indmean(mul(r60,fl(top))),60,10)
+x=R['industry_ret_1d']
+# Original QSYS name says corr but formula is uncentered cosine similarity.
+R['stock_industry_ret_corr_60d']=div(roll(mul(r1,x),60,minimum=20),mul(sqrt(roll(mul(r1,r1),60,minimum=20)),sqrt(roll(mul(x,x),60,minimum=20))))
+R['$industry']='industry_code'
+for row in rows:
+ if row['name'] in R and (row['name']=='$industry' or 'industry' in row['name'] or row['name'] in ('amount_log_ind_zscore','turnover_rate_ind_zscore')) and int(row['inventory_row']) not in new:
+  register(row,R[row['name']],note='v2 SW L1 supplier-interval best effort, not strict publication PIT. Missing/ambiguous membership remains unknown; frozen interval evidence and reference pool bind identity. Industry rolling follows industry/session series, not a changing stock label. Missing return predicates remain missing; source-explicit top60-return fill-zero retained. corr_60d preserves original uncentered cosine formula. Numeric $industry is a categorical code, not an ordinal score.')
+  new[int(row['inventory_row'])]['dependencies']=sorted(set(new[int(row['inventory_row'])]['dependencies'])|{'industry_membership_events.l1_code'})
+  new[int(row['inventory_row'])]['semantic_version']='2.0.0'
 # Definitions preserve all old records. Registry records certified aliases separately.
 allids={f['id']:f for f in cat['features']}
 registry=[]
@@ -388,7 +419,8 @@ for r in rows:
  elif i in (384,387):
   fid='LIQ001' if i==384 else 'ALP001';entry.update(status='alias',selection={'id':fid,'semantic_version':'1.0.0'},semantic_review='Certified exact passthrough/whitespace alias in migrated input semantics.')
  else:
-  if i==179:code='supplier_quantity_unit';reason='rqmcl/lending sell native quantity has not been proven to be shares; no unit relabeling.'
+  if i in (189,312):code='excluded_by_user';reason='Explicitly removed from requested scope: last-high age is not required; observed margin balance remains a separate feature and is not relabeled eligibility.'
+  elif i==179:code='supplier_quantity_unit';reason='rqmcl/lending sell native quantity has not been proven to be shares; no unit relabeling.'
   elif i in (274,276):code='ambiguous_valuation_name';reason='QSYS TTM-named feature reads non-TTM pe/ps. Supplier fields are distinct; no silent replacement or misleading name admitted.'
   elif i==388 or 'industry' in r['name'] or i in (204,205,249,250):code='historical_industry';reason='Historical taxonomy, membership intervals and publication cutoffs are not bound; current classifications cannot be backfilled.'
   elif i in (227,228,261,262,263,266):code='index_session_binding';reason='Index identity/calendar and one-row-per-session return calculation must be bound; QSYS repeated-row pct_change is not certified.'

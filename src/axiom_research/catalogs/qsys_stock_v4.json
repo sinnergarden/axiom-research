@@ -101,6 +101,16 @@
       "id": "SHR",
       "name": "v3a_shareholder",
       "numbering_policy": "sparse_reserved_never_renumber"
+    },
+    {
+      "id": "INC",
+      "name": "industry_context",
+      "numbering_policy": "sparse_reserved_never_renumber"
+    },
+    {
+      "id": "INM",
+      "name": "industry_momentum",
+      "numbering_policy": "sparse_reserved_never_renumber"
     }
   ],
   "input_contract": {
@@ -18439,6 +18449,952 @@
         "stage": "cross_sectional",
         "missing": "preserve"
       }
+    },
+    {
+      "name": "_qsys_0719",
+      "op": "cs_mean",
+      "version": "1",
+      "inputs": [
+        "_qsys_0211"
+      ],
+      "params": {
+        "group": "industry",
+        "unknown_group": "missing",
+        "missing": "skip",
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0719",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0720",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_qsys_0211",
+        "_qsys_0719"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0720",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0721",
+      "op": "cs_mean",
+      "version": "1",
+      "inputs": [
+        "_qsys_0248"
+      ],
+      "params": {
+        "group": "industry",
+        "unknown_group": "missing",
+        "missing": "skip",
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0721",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0722",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_qsys_0248",
+        "_qsys_0721"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0722",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0723",
+      "op": "cs_mean",
+      "version": "1",
+      "inputs": [
+        "_qsys_0249"
+      ],
+      "params": {
+        "group": "industry",
+        "unknown_group": "missing",
+        "missing": "skip",
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0723",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0724",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_qsys_0249",
+        "_qsys_0723"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0724",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0725",
+      "op": "cs_mean",
+      "version": "1",
+      "inputs": [
+        "_qsys_0214"
+      ],
+      "params": {
+        "group": "industry",
+        "unknown_group": "missing",
+        "missing": "skip",
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0725",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0726",
+      "op": "rolling_industry",
+      "version": "1",
+      "inputs": [
+        "_qsys_0719"
+      ],
+      "params": {
+        "window": 20,
+        "min_periods": 5,
+        "inclusive_current": true,
+        "reduction": "mean",
+        "missing": "skip",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0726",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0727",
+      "op": "rolling_industry",
+      "version": "1",
+      "inputs": [
+        "_qsys_0719"
+      ],
+      "params": {
+        "window": 60,
+        "min_periods": 15,
+        "inclusive_current": true,
+        "reduction": "mean",
+        "missing": "skip",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0727",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0728",
+      "op": "rolling_industry",
+      "version": "1",
+      "inputs": [
+        "_qsys_0719"
+      ],
+      "params": {
+        "window": 120,
+        "min_periods": 30,
+        "inclusive_current": true,
+        "reduction": "mean",
+        "missing": "skip",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0728",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0729",
+      "op": "rolling_industry",
+      "version": "1",
+      "inputs": [
+        "_qsys_0725"
+      ],
+      "params": {
+        "window": 20,
+        "min_periods": 5,
+        "inclusive_current": true,
+        "reduction": "mean",
+        "missing": "skip",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0729",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0730",
+      "op": "cs_mean",
+      "version": "1",
+      "inputs": [
+        "_qsys_0250"
+      ],
+      "params": {
+        "group": "industry",
+        "unknown_group": "missing",
+        "missing": "skip",
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0730",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0731",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_qsys_0250",
+        "_qsys_0730"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0731",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0732",
+      "op": "rolling_industry",
+      "version": "1",
+      "inputs": [
+        "_qsys_0725"
+      ],
+      "params": {
+        "window": 60,
+        "min_periods": 15,
+        "inclusive_current": true,
+        "reduction": "mean",
+        "missing": "skip",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0732",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0733",
+      "op": "cs_mean",
+      "version": "1",
+      "inputs": [
+        "_qsys_0251"
+      ],
+      "params": {
+        "group": "industry",
+        "unknown_group": "missing",
+        "missing": "skip",
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0733",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0734",
+      "op": "sub",
+      "version": "1",
+      "inputs": [
+        "_qsys_0251",
+        "_qsys_0733"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0734",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0735",
+      "op": "cs_rank",
+      "version": "1",
+      "inputs": [
+        "_qsys_0251"
+      ],
+      "params": {
+        "group": "industry",
+        "unknown_group": "missing",
+        "missing": "skip",
+        "ties": "average",
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0735",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0736",
+      "op": "cs_rank",
+      "version": "1",
+      "inputs": [
+        "_qsys_0252"
+      ],
+      "params": {
+        "group": "industry",
+        "unknown_group": "missing",
+        "missing": "skip",
+        "ties": "average",
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0736",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0737",
+      "op": "log1p",
+      "version": "1",
+      "inputs": [
+        "_a01_0015"
+      ],
+      "params": {
+        "domain": "missing"
+      },
+      "column": {
+        "name": "_qsys_0737",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0738",
+      "op": "cs_zscore",
+      "version": "1",
+      "inputs": [
+        "_qsys_0737"
+      ],
+      "params": {
+        "group": "industry",
+        "unknown_group": "missing",
+        "missing": "skip",
+        "ddof": 1,
+        "epsilon": 0,
+        "constant": "zero",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0738",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0739",
+      "op": "cs_zscore",
+      "version": "1",
+      "inputs": [
+        "turnover_rate"
+      ],
+      "params": {
+        "group": "industry",
+        "unknown_group": "missing",
+        "missing": "skip",
+        "ddof": 1,
+        "epsilon": 0,
+        "constant": "zero",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0739",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0740",
+      "op": "cs_mean",
+      "version": "1",
+      "inputs": [
+        "_qsys_0379"
+      ],
+      "params": {
+        "group": "industry",
+        "unknown_group": "missing",
+        "missing": "skip",
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0740",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0741",
+      "op": "rolling_industry",
+      "version": "1",
+      "inputs": [
+        "_qsys_0740"
+      ],
+      "params": {
+        "window": 20,
+        "min_periods": 5,
+        "inclusive_current": true,
+        "reduction": "mean",
+        "missing": "skip",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0741",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0742",
+      "op": "rolling",
+      "version": "1",
+      "inputs": [
+        "_a01_0015"
+      ],
+      "params": {
+        "window": 20,
+        "min_periods": 5,
+        "inclusive_current": true,
+        "reduction": "mean",
+        "missing": "skip",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0742",
+        "dtype": "float64",
+        "unit": "CNY",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0743",
+      "op": "shift",
+      "version": "1",
+      "inputs": [
+        "_qsys_0742"
+      ],
+      "params": {
+        "periods": 20
+      },
+      "column": {
+        "name": "_qsys_0743",
+        "dtype": "float64",
+        "unit": "CNY",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0744",
+      "op": "divide",
+      "version": "1",
+      "inputs": [
+        "_qsys_0742",
+        "_qsys_0743"
+      ],
+      "params": {
+        "zero": "missing"
+      },
+      "column": {
+        "name": "_qsys_0744",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0745",
+      "op": "cs_mean",
+      "version": "1",
+      "inputs": [
+        "_qsys_0744"
+      ],
+      "params": {
+        "group": "industry",
+        "unknown_group": "missing",
+        "missing": "skip",
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0745",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0746",
+      "op": "rolling_industry",
+      "version": "1",
+      "inputs": [
+        "_qsys_0745"
+      ],
+      "params": {
+        "window": 20,
+        "min_periods": 5,
+        "inclusive_current": true,
+        "reduction": "mean",
+        "missing": "skip",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0746",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0747",
+      "op": "fill",
+      "version": "1",
+      "inputs": [
+        "_qsys_0251"
+      ],
+      "params": {
+        "value": 0
+      },
+      "column": {
+        "name": "_qsys_0747",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0748",
+      "op": "cs_winsorize",
+      "version": "1",
+      "inputs": [
+        "_qsys_0747"
+      ],
+      "params": {
+        "group": "industry",
+        "unknown_group": "missing",
+        "missing": "skip",
+        "lower": 0.8,
+        "upper": 0.8,
+        "interpolation": "linear",
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0748",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0749",
+      "op": "lt",
+      "version": "1",
+      "inputs": [
+        "_qsys_0747",
+        "_qsys_0748"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0749",
+        "dtype": "bool",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0750",
+      "op": "not",
+      "version": "1",
+      "inputs": [
+        "_qsys_0749"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0750",
+        "dtype": "bool",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0751",
+      "op": "to_float",
+      "version": "1",
+      "inputs": [
+        "_qsys_0750"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0751",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0752",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0747",
+        "_qsys_0751"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0752",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0753",
+      "op": "cs_mean",
+      "version": "1",
+      "inputs": [
+        "_qsys_0752"
+      ],
+      "params": {
+        "group": "industry",
+        "unknown_group": "missing",
+        "missing": "skip",
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0753",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0754",
+      "op": "rolling_industry",
+      "version": "1",
+      "inputs": [
+        "_qsys_0753"
+      ],
+      "params": {
+        "window": 60,
+        "min_periods": 10,
+        "inclusive_current": true,
+        "reduction": "mean",
+        "missing": "skip",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0754",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0755",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0211",
+        "_qsys_0719"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0755",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0756",
+      "op": "rolling",
+      "version": "1",
+      "inputs": [
+        "_qsys_0755"
+      ],
+      "params": {
+        "window": 60,
+        "min_periods": 20,
+        "inclusive_current": true,
+        "reduction": "mean",
+        "missing": "skip",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0756",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0757",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0211",
+        "_qsys_0211"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0757",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0758",
+      "op": "rolling",
+      "version": "1",
+      "inputs": [
+        "_qsys_0757"
+      ],
+      "params": {
+        "window": 60,
+        "min_periods": 20,
+        "inclusive_current": true,
+        "reduction": "mean",
+        "missing": "skip",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0758",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0759",
+      "op": "sqrt",
+      "version": "1",
+      "inputs": [
+        "_qsys_0758"
+      ],
+      "params": {
+        "domain": "missing"
+      },
+      "column": {
+        "name": "_qsys_0759",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0760",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0719",
+        "_qsys_0719"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0760",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0761",
+      "op": "rolling",
+      "version": "1",
+      "inputs": [
+        "_qsys_0760"
+      ],
+      "params": {
+        "window": 60,
+        "min_periods": 20,
+        "inclusive_current": true,
+        "reduction": "mean",
+        "missing": "skip",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0761",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0762",
+      "op": "sqrt",
+      "version": "1",
+      "inputs": [
+        "_qsys_0761"
+      ],
+      "params": {
+        "domain": "missing"
+      },
+      "column": {
+        "name": "_qsys_0762",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0763",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0759",
+        "_qsys_0762"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0763",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0764",
+      "op": "divide",
+      "version": "1",
+      "inputs": [
+        "_qsys_0756",
+        "_qsys_0763"
+      ],
+      "params": {
+        "zero": "missing"
+      },
+      "column": {
+        "name": "_qsys_0764",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
     }
   ],
   "features": [
@@ -34997,6 +35953,1013 @@
             "name": "QRA021",
             "dtype": "float64",
             "unit": "shares",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "LIQ",
+      "id": "LIQ008",
+      "name": "amount_log_ind_zscore",
+      "formula": "amount_zscore.mask((ind_std.isna() | ind_std.eq(0)) & out['amount_log'].notna(), 0.0)",
+      "dependencies": [
+        "industry_membership_events.l1_code",
+        "market_daily.amount_cny"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "LIQ008",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0738"
+          ],
+          "params": {},
+          "column": {
+            "name": "LIQ008",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "LIQ",
+      "id": "LIQ009",
+      "name": "turnover_rate_ind_zscore",
+      "formula": "turnover_zscore.mask((tr_std.isna() | tr_std.eq(0)) & out['turnover_rate'].notna(), 0.0)",
+      "dependencies": [
+        "industry_membership_events.l1_code",
+        "valuation_daily.turnover_rate"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "LIQ009",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0739"
+          ],
+          "params": {},
+          "column": {
+            "name": "LIQ009",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "RST",
+      "id": "RST017",
+      "name": "stock_minus_industry_ret_3d",
+      "formula": "out['ret_3d_ind_tmp'] - out['industry_ret_3d']\nout['ret_3d'] - out['industry_ret_3d']",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 4,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "RST017",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0722"
+          ],
+          "params": {},
+          "column": {
+            "name": "RST017",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "RST",
+      "id": "RST018",
+      "name": "stock_minus_industry_ret_5d",
+      "formula": "out['ret_5d_ind_tmp'] - out['industry_ret_5d']\nout['ret_5d'] - out['industry_ret_5d']",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 6,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "RST018",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0724"
+          ],
+          "params": {},
+          "column": {
+            "name": "RST018",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "RST",
+      "id": "RST037",
+      "name": "rps_industry_60d",
+      "formula": "cross_section_rank(out, 'ret_60d', groups)",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 61,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "RST037",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0735"
+          ],
+          "params": {},
+          "column": {
+            "name": "RST037",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "RST",
+      "id": "RST038",
+      "name": "rps_industry_120d",
+      "formula": "cross_section_rank(out, 'ret_120d', groups)",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 121,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "RST038",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0736"
+          ],
+          "params": {},
+          "column": {
+            "name": "RST038",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INC",
+      "id": "INC001",
+      "name": "industry_ret_1d",
+      "formula": "out.groupby(['trade_date', 'industry'])['ret_1d_ind_tmp'].transform('mean')",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 2,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INC001",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0719"
+          ],
+          "params": {},
+          "column": {
+            "name": "INC001",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INC",
+      "id": "INC002",
+      "name": "industry_ret_3d",
+      "formula": "out.groupby(['trade_date', 'industry'])['ret_3d_ind_tmp'].transform('mean')",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 4,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INC002",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0721"
+          ],
+          "params": {},
+          "column": {
+            "name": "INC002",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INC",
+      "id": "INC003",
+      "name": "industry_ret_5d",
+      "formula": "out.groupby(['trade_date', 'industry'])['ret_5d_ind_tmp'].transform('mean')",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 6,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INC003",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0723"
+          ],
+          "params": {},
+          "column": {
+            "name": "INC003",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INC",
+      "id": "INC004",
+      "name": "industry_breadth",
+      "formula": "out.groupby(['trade_date', 'industry'])['ret_1d_ind_tmp'].transform(lambda s: (s > 0).mean())",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 2,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INC004",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0725"
+          ],
+          "params": {},
+          "column": {
+            "name": "INC004",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INC",
+      "id": "INC005",
+      "name": "stock_minus_industry_ret",
+      "formula": "out['ret_1d_ind_tmp'] - out['industry_ret_1d']",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 2,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INC005",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0720"
+          ],
+          "params": {},
+          "column": {
+            "name": "INC005",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INM",
+      "id": "INM001",
+      "name": "industry_ret_20d",
+      "formula": "ind_panel.groupby('industry')['ind_ret'].transform(lambda s: s.rolling(window, min_periods=max(2, window // 4)).mean())",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 21,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INM001",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0726"
+          ],
+          "params": {},
+          "column": {
+            "name": "INM001",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INM",
+      "id": "INM002",
+      "name": "industry_ret_60d",
+      "formula": "ind_panel.groupby('industry')['ind_ret'].transform(lambda s: s.rolling(window, min_periods=max(2, window // 4)).mean())",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 61,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INM002",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0727"
+          ],
+          "params": {},
+          "column": {
+            "name": "INM002",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INM",
+      "id": "INM003",
+      "name": "industry_ret_120d",
+      "formula": "ind_panel.groupby('industry')['ind_ret'].transform(lambda s: s.rolling(window, min_periods=max(2, window // 4)).mean())",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 121,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INM003",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0728"
+          ],
+          "params": {},
+          "column": {
+            "name": "INM003",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INM",
+      "id": "INM004",
+      "name": "industry_breadth_20d",
+      "formula": "ind_panel.groupby('industry')['ind_breadth'].transform(lambda s: s.rolling(window, min_periods=max(2, window // 4)).mean())",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 21,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INM004",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0729"
+          ],
+          "params": {},
+          "column": {
+            "name": "INM004",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INM",
+      "id": "INM005",
+      "name": "industry_breadth_60d",
+      "formula": "ind_panel.groupby('industry')['ind_breadth'].transform(lambda s: s.rolling(window, min_periods=max(2, window // 4)).mean())",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 61,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INM005",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0732"
+          ],
+          "params": {},
+          "column": {
+            "name": "INM005",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INM",
+      "id": "INM006",
+      "name": "industry_new_high_ratio",
+      "formula": "ind_panel.groupby('industry')['ind_near_high'].transform(lambda s: s.rolling(20, min_periods=5).mean())",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 139,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INM006",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0741"
+          ],
+          "params": {},
+          "column": {
+            "name": "INM006",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INM",
+      "id": "INM007",
+      "name": "industry_top_stock_momentum",
+      "formula": "ind_panel.groupby('industry')['_top_ret'].transform(lambda s: s.rolling(60, min_periods=10).mean())",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 120,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INM007",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0754"
+          ],
+          "params": {},
+          "column": {
+            "name": "INM007",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INM",
+      "id": "INM008",
+      "name": "industry_volume_expansion",
+      "formula": "ind_panel.groupby('industry')['ind_vol_ratio'].transform(lambda s: s.rolling(20, min_periods=5).mean())",
+      "dependencies": [
+        "industry_membership_events.l1_code",
+        "market_daily.amount_cny"
+      ],
+      "lookback": 59,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INM008",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0746"
+          ],
+          "params": {},
+          "column": {
+            "name": "INM008",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INM",
+      "id": "INM009",
+      "name": "stock_minus_industry_ret_20d",
+      "formula": "loader/passthrough: stock_minus_industry_ret_20d",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 21,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INM009",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0731"
+          ],
+          "params": {},
+          "column": {
+            "name": "INM009",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INM",
+      "id": "INM010",
+      "name": "stock_minus_industry_ret_60d",
+      "formula": "loader/passthrough: stock_minus_industry_ret_60d",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 61,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INM010",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0734"
+          ],
+          "params": {},
+          "column": {
+            "name": "INM010",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INM",
+      "id": "INM011",
+      "name": "stock_industry_ret_corr_60d",
+      "formula": "_clip_inf(_safe_div(_follow, _ret_var * _ind_var))",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "industry_membership_events.l1_code",
+        "market_daily.close"
+      ],
+      "lookback": 61,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INM011",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0764"
+          ],
+          "params": {},
+          "column": {
+            "name": "INM011",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "CFG",
+      "id": "CFG013",
+      "name": "$industry",
+      "formula": "$industry",
+      "dependencies": [
+        "industry_membership_events.l1_code"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "CFG013",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "industry_code"
+          ],
+          "params": {},
+          "column": {
+            "name": "CFG013",
+            "dtype": "float64",
+            "unit": "dimensionless",
             "stage": "base",
             "missing": "preserve"
           }

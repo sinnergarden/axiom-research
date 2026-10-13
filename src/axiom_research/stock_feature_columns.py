@@ -46,8 +46,8 @@ def feature_column_plan(source, catalog, *, selection=None, normalized=True):
         'member_available':source.manifest['buffers']['member_available']})
     header={'abi':ABI,'semantics':SEMANTICS,'recipe_ref':catalog.recipe_ref(selection,normalized=normalized),
         'calendar_ref':calendar_ref,'reference_ref':reference_ref,
-        'reference_members':{day:{security:None for j,security in enumerate(spec['universe']) if bool(a['member'][i,j])}
-            for i,day in enumerate(spec['read_sessions'])},
+        'reference_members':{day:{security:groups[j] for j,security in enumerate(spec['universe']) if bool(a['member'][i,j])}
+            for i,day in enumerate(spec['read_sessions']) for groups in source.industries([i])},
         'input_schema':source.input_schema(),
         'event_schema':{},'sources':sorted(source.source_bindings(),key=lambda b:b['id']),
         'observation_domain':'sessions','history_policy':'partial','nodes':[],'outputs':[],'obligations':[]}
@@ -91,6 +91,16 @@ class FeatureColumnSource:
         if field in ('raw_open','raw_close','raw_factor'): return (field[4:],)
         if field == 'vwap': return ('amount_cny','volume_shares','factor')
         return (field,'factor') if field in FIELDS[:4] else (field,)
+
+    def industries(self, rows, securities=None):
+        """Decode frozen SW L1 interval inputs; unknown never becomes a group."""
+        import numpy as np
+        columns=list(range(len(self.manifest['spec']['universe']))) if securities is None else securities
+        if 'industry_code' not in self.manifest.get('daily_fields',{}):
+            return np.full((len(rows),len(columns)),None,dtype=object)
+        values=self.arrays['industry_code::values'][np.ix_(rows,columns)]
+        valid=self.arrays['industry_code::validity'][np.ix_(rows,columns)]
+        return np.asarray([[f'SW.L1.{int(v)}' if ok else None for v,ok in zip(vs,oks)] for vs,oks in zip(values,valid)],dtype=object)
 
     def require_coverage(self, fields, securities):
         """Unmaterialized financial securities are outside the source, not null facts."""
@@ -208,6 +218,7 @@ class FeatureColumnSource:
             'values':selected_values,'validity':selected_validity,
             'availability':selected_clocks,'missing_reasons':selected_reasons,
             'member':a['member'],
+            'industry':self.industries(list(range(begin,end)),positions),
             'member_available':np.where(a['member_available_validity'],
                 (a['member_available']+999999)//1000000*1000000,cutoff)}
 
@@ -234,7 +245,7 @@ class FeatureColumnSource:
             values=view['values'],validity=view['validity'],reason_codes={k:v.astype('<i4') for k,v in view['missing_reasons'].items()},
             reason_dictionary=list(REASONS),available_at_utc_us=view['availability'],
             source_codes={field:np.full(shape,i,dtype='<i4') for i,field in enumerate(names) if field in view['values']},
-            source_sets=sets,reference_member=view['member'],reference_industry=np.full(shape,None,dtype=object),
+            source_sets=sets,reference_member=view['member'],reference_industry=view['industry'],
             reference_available_at_utc_us=view['member_available'],reference_source_codes=np.full(shape,len(names),dtype='<i4'),
             input_refs={'source_ref':self.identity,'selection_ref':view['selection_ref']})
         return inputs,view['selection']
@@ -265,14 +276,11 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
     root=Path(destination); root.mkdir(parents=True,exist_ok=True)
     config=_source_config(spec); prepared=prepare_matrix_qlib(data,config=config,destination=root)
     sessions=spec['read_sessions']; symbols=spec['universe']; shape=(len(sessions),len(symbols),len(FIELDS))
-    native=_NativeWindow(prepared['view'].read(fields=FIELDS,symbols=symbols,
-        start=sessions[0],end=sessions[-1]),sessions=sessions,symbols=symbols,
-        instrument_map=prepared['view_reference']['instrument_map'])
-    arrays={'values':np.zeros(shape,dtype='<f8'),'original_values':np.zeros(shape,dtype='<f8'),
-        'validity':np.zeros(shape,dtype=bool),'available':np.zeros(shape,dtype='<i8'),
-        'available_validity':np.zeros(shape,dtype=bool),'reasons':np.zeros(shape,dtype='u1'),
-        'member':np.zeros(shape[:2],dtype=bool),'member_available':np.zeros(shape[:2],dtype='<i8'),
-        'member_available_validity':np.zeros(shape[:2],dtype=bool)}
+    from .feature_input_buffers import allocate_feature_buffer, seal_feature_buffer
+    arrays={name:allocate_feature_buffer(root,dtype=dtype,shape=shape[:2] if name.startswith('member') else shape)
+            for name,dtype in {'values':'<f8','original_values':'<f8','validity':bool,
+                'available':'<i8','available_validity':bool,'reasons':'u1',
+                'member':bool,'member_available':'<i8','member_available_validity':bool}.items()}
     chunks=[]; metrics={'data_read_calls':0,'feature_core_calls':0,'source_rows':0,'native_value_reuses':0,
         'reader_projection_fallback_cells':0,'qlib_prepare_seconds':prepared['seconds']}
     clock_cache={}
@@ -281,6 +289,9 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
         return clock_cache[value]
     for offset in range(0,len(sessions),block_sessions):
         days=sessions[offset:offset+block_sessions]; keys=[(s,d) for d in days for s in symbols]
+        native=_NativeWindow(prepared['view'].read(fields=FIELDS,symbols=symbols,
+            start=days[0],end=days[-1]),sessions=days,symbols=symbols,
+            instrument_map=prepared['view_reference']['instrument_map'])
         expected=set(keys); chunk_shape=(len(days),len(symbols)); evidence=[]
         for base in (prepared['price_query'],prepared['factor_query'],prepared['member_query']):
             query=replace(base,sessions=tuple(days),cutoff_by_session={d:spec['cutoff_by_session'][d] for d in days})
@@ -340,8 +351,7 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
     descriptors={}
     for name,array in arrays.items():
         dtype='bool_u8' if array.dtype.kind=='b' else 'uint8' if array.dtype==np.dtype('u1') else 'int64_le' if array.dtype.kind=='i' else 'float64_le'
-        descriptors[name]=write_buffer(root,array.astype('u1',copy=False).reshape(-1) if dtype=='bool_u8' else array.reshape(-1),
-            dtype=dtype,shape=list(array.shape))
+        descriptors[name],arrays[name]=seal_feature_buffer(root,array,dtype=dtype,shape=list(array.shape))
     implementations=_implementation()
     manifest=seal({'contract_version':SOURCE_VERSION,'spec':spec,'qlib_view':prepared['view_reference'],
         'buffers':descriptors,'chunks':chunks,'reason_codes':list(REASONS),'source_profiles':profiles,

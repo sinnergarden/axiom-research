@@ -133,3 +133,5 @@ for _field,_leaf,_unit,_derivation in (
         'report_type':None,'basis':'reported','unit':_unit,'session_timezone':'Asia/Shanghai',
         'visibility':'strict_before_session_start','outputs':{_leaf:{'derivation':_derivation,'reports_back':0}}}
     CORE_INPUT_CONTRACTS[_leaf]={'domain':'forecast_events','dtype':'float64','unit':_unit}
+
+CORE_INPUT_CONTRACTS['industry_code']={'domain':'industry_membership_events','dtype':'float64','unit':'dimensionless'}
