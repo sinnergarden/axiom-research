@@ -28,3 +28,22 @@ CORE_INPUT_CONTRACTS = {
     'factor': {'domain': 'adjustment_factors', 'dtype': 'float64', 'unit': 'dimensionless'},
     **{field: {**spec, 'dtype': 'float64'} for field, spec in DAILY_FIELD_CONTRACTS.items()},
 }
+
+# Shared by catalog selection and the generic financial materialization bridge.
+# Query scope, symbols and cutoff come from the caller's frozen source scope.
+FINANCIAL_FIELD_CONTRACTS = {
+    'revenue_ttm_yoy': {
+        'domain': 'financial_events', 'field': 'revenue', 'endpoint': 'income',
+        'report_type': '1', 'basis': 'cumulative_ytd', 'unit': 'CNY',
+        'session_timezone': 'Asia/Shanghai',
+        'visibility': 'strict_before_session_start',
+        'outputs': {
+            'ttm_revenue': {'derivation': 'ttm', 'quarters_back': 0},
+            'ttm_revenue_prior_year': {'derivation': 'ttm', 'quarters_back': 4},
+        },
+    },
+}
+CORE_INPUT_CONTRACTS.update({
+    field: {'domain': 'financial_events', 'dtype': 'float64', 'unit': 'CNY'}
+    for field in ('revenue', 'ttm_revenue', 'ttm_revenue_prior_year')
+})

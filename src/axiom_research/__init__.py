@@ -51,6 +51,8 @@ _RUNTIME_EXPORTS = {
     "load_qsys_feature_registry": ".qsys_catalog",
     "select_qsys_features": ".qsys_catalog",
     "qsys_daily_fields": ".qsys_catalog",
+    "qsys_financial_fields": ".qsys_catalog",
+    "qsys_input_requirements": ".qsys_catalog",
     "SavedColumnFeatureSource": ".stock_feature_library",
     "CatalogFeatureLibrary": ".stock_feature_library",
     "load_feature_library_training_view": ".stock_feature_library_adapter",

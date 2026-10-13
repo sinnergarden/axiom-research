@@ -2,11 +2,12 @@
 from datetime import date, timedelta
 import math
 import unittest
+from importlib.resources import files
 
 from axiom_engine.core import ABI, SEMANTICS, FeaturePlan, FactBatch, ExecutionContext, execute_feature_plan
 from axiom_research.a01_catalog import load_a01_feature_catalog
-from axiom_research.feature_catalog import build_feature_plan, load_feature_catalog, load_feature_catalog_ref, FeatureCatalogError
-from axiom_research.qsys_catalog import load_qsys_feature_catalog, load_qsys_feature_registry, select_qsys_features, qsys_daily_fields
+from axiom_research.feature_catalog import build_feature_plan, load_feature_catalog, load_feature_catalog_ref, FeatureCatalogError, FeatureCatalog
+from axiom_research.qsys_catalog import load_qsys_feature_catalog, load_qsys_feature_registry, select_qsys_features, qsys_daily_fields, qsys_input_requirements, qsys_financial_fields
 
 REF = 'sha256:' + 'a' * 64
 
@@ -45,9 +46,9 @@ class QsysCatalogTests(unittest.TestCase):
     def test_388_traceable_rows_and_no_blocked_placeholders(self):
         registry=load_qsys_feature_registry();rows=registry['rows']
         self.assertEqual(len(rows),388)
-        self.assertEqual(sum(r['status']=='executable' for r in rows),270)
+        self.assertEqual(sum(r['status']=='executable' for r in rows),271)
         self.assertEqual(sum(r['status']=='alias' for r in rows),2)
-        self.assertEqual(sum(r['status']=='blocked' for r in rows),116)
+        self.assertEqual(sum(r['status']=='blocked' for r in rows),115)
         for r in rows:
             self.assertTrue(r['expression']);self.assertTrue(r['qsys_source'])
             if r['status']=='blocked':self.assertNotIn('selection',r)
@@ -61,7 +62,7 @@ class QsysCatalogTests(unittest.TestCase):
     def test_all_original_definitions_and_nodes_are_unchanged(self):
         catalog=load_qsys_feature_catalog();actual={f['id']:f for f in catalog.definitions}
         nodes={n['name']:n for n in catalog.to_dict()['shared_nodes']}
-        for old in (load_a01_feature_catalog(),load_feature_catalog()):
+        for old in (load_a01_feature_catalog(),load_feature_catalog(),FeatureCatalog(files("axiom_research").joinpath("catalogs","qsys_stock_v1.json").read_text())):
             for f in old.definitions:self.assertEqual(actual[f['id']],f)
             for n in old.to_dict()['shared_nodes']:self.assertEqual(nodes[n['name']],n)
             self.assertEqual(load_feature_catalog_ref(old.identity).identity,old.identity)
@@ -72,7 +73,7 @@ class QsysCatalogTests(unittest.TestCase):
         from axiom_engine.feature_library import feature_definitions
         catalog=load_qsys_feature_catalog();base,_,_=fixture(2)
         semantics={c['name']:{'unit':c['unit'],'precision':'test-float64'} for c in base.to_dict()['input_schema']}
-        for old in (load_a01_feature_catalog(),load_feature_catalog()):
+        for old in (load_a01_feature_catalog(),load_feature_catalog(),FeatureCatalog(files("axiom_research").joinpath("catalogs","qsys_stock_v1.json").read_text())):
             for normalized in (False,True):
                 before=build_feature_plan(base,old.default_selection,catalog=old,normalized=normalized)
                 after=build_feature_plan(base,old.default_selection,catalog=catalog,normalized=normalized)
@@ -96,7 +97,7 @@ class QsysCatalogTests(unittest.TestCase):
         from axiom_research.stock_feature_columns import FeatureColumnSource
         from axiom_research.qsys_input_contracts import DAILY_FIELD_CONTRACTS, CORE_INPUT_CONTRACTS
         canonical={'market_daily':TUSHARE_DAILY_CONTRACT}
-        for endpoint in ('daily_basic','moneyflow','margin_detail'):
+        for endpoint in ('daily_basic','moneyflow','margin_detail','income'):
             spec=stock_input_source_spec(endpoint,identity_map={'000001.SZ':'A'},
                 next_open_session_by_date={'2020-01-01':'2020-01-02'})
             canonical[spec['domain']]=spec['contract']
@@ -107,7 +108,14 @@ class QsysCatalogTests(unittest.TestCase):
         self.assertEqual(DAILY_FIELD_CONTRACTS['ps']['unit'],'ratio')
         catalog=load_qsys_feature_catalog()
         self.assertNotIn('valuation_daily.ps',{d for f in catalog.definitions for d in f['dependencies']})
-        extensions=qsys_daily_fields()
+        requirements=qsys_input_requirements()
+        extensions=requirements['daily_fields']
+        for bundle in requirements['financial_fields'].values():
+            physical=canonical[bundle['domain']]['fields'][bundle['field']]
+            self.assertEqual((physical['unit'],physical['basis']),(bundle['unit'],bundle['basis']))
+            self.assertEqual(bundle['visibility'],'strict_before_session_start')
+            for leaf in bundle['outputs']:
+                extensions[leaf]={'domain':'materialized_financial_events','dtype':'float64','unit':bundle['unit']}
         source=FeatureColumnSource({'spec':{'read_sessions':[],'universe':[]},'daily_fields':extensions},{})
         schema={c['name']:c for c in source.input_schema()}
         nodes=catalog.to_dict()['shared_nodes']+[n for f in catalog.definitions for n in f['core_nodes']]
@@ -122,11 +130,34 @@ class QsysCatalogTests(unittest.TestCase):
             if field=='vwap' or domain=='adjustment_factors':continue
             self.assertEqual(CORE_INPUT_CONTRACTS[field]['unit'],canonical[domain]['fields'][field]['unit'])
 
+    def test_ttm_yoy_recipe_and_explicit_materialization_requirements(self):
+        catalog=load_qsys_feature_catalog()
+        selection=select_qsys_features(['ttm_revenue_yoy'])
+        definition=catalog.select(selection)[0]
+        self.assertEqual((definition['id'],definition['lookback']),('GRC004',1))
+        self.assertEqual(definition['dependencies'],['financial_events.revenue'])
+        self.assertEqual(qsys_input_requirements(['ttm_revenue_yoy'])['daily_fields'],{})
+        bundle=qsys_financial_fields(['ttm_revenue_yoy'])['revenue_ttm_yoy']
+        self.assertEqual(bundle['outputs'],{'ttm_revenue':{'derivation':'ttm','quarters_back':0},
+            'ttm_revenue_prior_year':{'derivation':'ttm','quarters_back':4}})
+        for names in (None,['ttm_revenue_yoy']):
+            with self.assertRaisesRegex(FeatureCatalogError,'qsys_input_requirements'):
+                qsys_daily_fields(names)
+        for current,previous,expected in ((300.,200.,.5),(100.,-100.,-2.),(100.,0.,None),(None,200.,None),(100.,None,None)):
+            base,facts,context=fixture(2,{('A',1):{'ttm_revenue':current,'ttm_revenue_prior_year':previous}})
+            plan=build_feature_plan(base,selection,catalog=catalog)
+            value=execute_feature_plan(plan,facts,context).to_dict()['rows'][0]['values'][0]
+            if expected is None:self.assertIsNone(value)
+            else:self.assertAlmostEqual(value,expected)
+        # The disputed NaN->0 profitability recipe remains explicitly blocked.
+        with self.assertRaisesRegex(FeatureCatalogError,'blocked'):
+            select_qsys_features(['is_profitable_ttm'])
+
     def test_every_recipe_compiles_and_executes_through_core(self):
         catalog=load_qsys_feature_catalog();base,facts,context=fixture()
         for normalized in (False,True):
             plan=build_feature_plan(base,catalog.default_selection,catalog=catalog,normalized=normalized)
-            self.assertEqual(len(plan.to_dict()['outputs']),287)
+            self.assertEqual(len(plan.to_dict()['outputs']),288)
         plan=build_feature_plan(base,catalog.default_selection,catalog=catalog)
         out=execute_feature_plan(plan,facts,context).to_dict()
         actual={f['name']:v for f,v in zip(catalog.definitions,out['rows'][0]['values'])}

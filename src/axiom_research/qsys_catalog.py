@@ -11,7 +11,8 @@ import json
 from typing import Sequence
 
 from .feature_catalog import FeatureCatalog, FeatureCatalogError, FeatureSelection
-from .qsys_input_contracts import DAILY_FIELD_CONTRACTS
+from .qsys_input_contracts import DAILY_FIELD_CONTRACTS, FINANCIAL_FIELD_CONTRACTS
+from copy import deepcopy
 
 
 QSYS_SOURCE_REVISION = "852bcb73125f8781b7a80618b8188928ef4d38f2"
@@ -20,13 +21,13 @@ QSYS_SOURCE_REVISION = "852bcb73125f8781b7a80618b8188928ef4d38f2"
 def load_qsys_feature_catalog() -> FeatureCatalog:
     """Load executable recipes; this does not assert historical input coverage."""
     return FeatureCatalog(files("axiom_research").joinpath(
-        "catalogs", "qsys_stock_v1.json").read_text(encoding="utf-8"))
+        "catalogs", "qsys_stock_v2.json").read_text(encoding="utf-8"))
 
 
 def load_qsys_feature_registry() -> dict:
     """Return a fresh, validated mapping of all 388 forensic source rows."""
     value = json.loads(files("axiom_research").joinpath(
-        "catalogs", "qsys_registry_v1.json").read_text(encoding="utf-8"))
+        "catalogs", "qsys_registry_v2.json").read_text(encoding="utf-8"))
     if (value["schema_version"] != "qsys_registry_v1" or
             value["source_revision"] != QSYS_SOURCE_REVISION or
             {r["inventory_row"] for r in value["rows"]} != set(range(1, 389)) or
@@ -79,26 +80,68 @@ def select_qsys_features(names: Sequence[str]) -> tuple[FeatureSelection, ...]:
     return tuple(result)
 
 
-def qsys_daily_fields(names: Sequence[str] | None = None) -> dict[str, dict[str, str]]:
-    """Describe only the additional Data columns required by selected recipes.
+def qsys_input_requirements(names: Sequence[str] | None = None) -> dict[str, dict]:
+    """Return all extra input requirements, explicitly partitioned by bridge.
 
-    Pass this mapping to ``extend_feature_column_source(..., daily_fields=...)``.
-    Existing OHLC/amount buffers are reused. VWAP is derived by that adapter
-    from amount, volume and the visible adjustment anchor; it is not a new
-    supplier field. Data's integer volume becomes an exact float64 Core fact.
+    ``daily_fields`` goes to ``extend_feature_column_source``. Each bundle in
+    ``financial_fields`` describes one EventQuery and the ``outputs`` mapping
+    for ``extend_financial_feature_source``. The caller must bind report-range,
+    symbols and frozen source scope; this function performs no preparation.
     """
     catalog = load_qsys_feature_catalog()
     selected = catalog.select(catalog.default_selection if names is None else select_qsys_features(names))
     dependencies = {d for feature in selected for d in feature['dependencies']}
+    nodes = {n['name']: n for n in catalog.to_dict()['shared_nodes']}
+    nodes.update({n['name']: n for feature in selected for n in feature['core_nodes']})
+    leaves, visited = set(), set()
+    def include(name):
+        if name in visited:
+            return
+        visited.add(name)
+        if name not in nodes:
+            leaves.add(name)
+        else:
+            for parent in nodes[name]['inputs']:
+                include(parent)
+    for feature in selected:
+        include(feature['id'])
+    financial = {}
+    bound_event_dependencies = set()
+    for key, contract in FINANCIAL_FIELD_CONTRACTS.items():
+        outputs = {leaf: dict(spec) for leaf, spec in contract['outputs'].items() if leaf in leaves}
+        if outputs:
+            financial[key] = {**deepcopy(contract), 'outputs': outputs}
+            bound_event_dependencies.add(contract['domain'] + '.' + contract['field'])
     if 'market_daily.vwap' in dependencies:
         dependencies.add('market_daily.volume_shares')
-    result = {}
+    daily = {}
     for dependency in sorted(dependencies):
         domain, field = dependency.split('.')
+        if dependency in bound_event_dependencies:
+            continue
         if domain == 'adjustment_factors' or domain == 'market_daily' and field != 'volume_shares':
             continue
         declaration = DAILY_FIELD_CONTRACTS.get(field)
         if declaration is None or declaration['domain'] != domain:
             raise FeatureCatalogError('dependency requires a separately bound input bridge: ' + dependency)
-        result[field] = dict(declaration)
-    return result
+        daily[field] = dict(declaration)
+    return {'daily_fields': daily, 'financial_fields': financial}
+
+
+def qsys_daily_fields(names: Sequence[str] | None = None) -> dict[str, dict[str, str]]:
+    """Return additional daily columns only for an entirely daily selection.
+
+    Existing OHLC/amount buffers are reused; the source derives VWAP from volume,
+    amount and the common anchor. With a financial selection (including the new
+    default all), use ``qsys_input_requirements`` instead: dropping financial
+    inputs silently would make the preparation request incomplete.
+    """
+    requirements = qsys_input_requirements(names)
+    if requirements['financial_fields']:
+        raise FeatureCatalogError('selection requires financial materialization; use qsys_input_requirements() for complete daily_fields and financial_fields')
+    return requirements['daily_fields']
+
+
+def qsys_financial_fields(names: Sequence[str] | None = None) -> dict[str, dict]:
+    """Return explicit event-to-typed-leaf bridge bundles; no fake daily domain."""
+    return qsys_input_requirements(names)['financial_fields']
