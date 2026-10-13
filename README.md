@@ -1,4 +1,25 @@
-# Axiom Research R0
+# Axiom Research
+
+Start with the [current user manual](https://github.com/sinnergarden/axiom-docs/blob/main/docs/user-manual.md)
+for executable configurations, supported scope and saved evidence. The concrete
+entry is [examples/a01_one_year.py](examples/a01_one_year.py). It registers saved
+results through the Research index; accounts use the existing Engine owners.
+
+`load_feature_library_training_view` is a public lazy import. The current v3
+model producer requires normalized cross-sectional Feature inputs. Raw library
+views remain readable but are rejected before fitting this model profile.
+`load_stock_model(path, batch=...)` and `predict_stock_model(..., batch=...)`
+consume v3 through complete saved-fold admission; a live batch shares its owner,
+and a cold call requires the original saved parents. No saved identity is rewritten.
+
+The 2026-10-13 implementation is described in [the closeout record](reports/m1-public-entry-closeout.md),
+including validation and compatibility boundaries. Applicable fixed source versions
+and delivery status are recorded in [Docs versions.json](https://github.com/sinnergarden/axiom-docs/blob/main/versions.json).
+
+## Earlier releases and contracts
+
+The following versioned notes describe their original release scope. Use the
+manual above for the current entry; older v2 limitations do not describe v3.
 
 [Executable saved-input cells](examples/saved_research_cells.py) support the
 existing [ML engineering notebook](https://github.com/sinnergarden/axiom-docs/blob/main/notebooks/ml_engineering_tutorial.ipynb).

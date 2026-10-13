@@ -48,6 +48,7 @@ _RUNTIME_EXPORTS = {
     "load_a01_feature_catalog": ".a01_catalog",
     "SavedColumnFeatureSource": ".stock_feature_library",
     "CatalogFeatureLibrary": ".stock_feature_library",
+    "load_feature_library_training_view": ".stock_feature_library_adapter",
     "compile_stock_periodic_folds": ".stock_periodic_config",
     "stock_evaluation_sessions": ".stock_periodic_config",
     "build_forward_labels": ".labels", "mature_training_rows": ".labels",

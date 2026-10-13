@@ -7,6 +7,7 @@ and budgets, and owns authorization and the public Data/market/source contexts.
 from copy import deepcopy
 from contextlib import nullcontext
 from pathlib import Path
+import time
 
 from .stock_fold_inputs import require
 from .stock_artifacts import digest
@@ -22,6 +23,7 @@ def build_configured_stock_sequential_experiment(data=None,*,configuration_path,
     A changed subset/cohort uses preparation with the
     existing reuse_raw_from_batch path; saved normalized targets are not relabeled.
     """
+    if metrics is None: metrics = {}
     from .stock_experiment_config import load_stock_sequential_configuration
     configuration=load_stock_sequential_configuration(configuration_path);dataset=configuration['dataset']
     from .result_registration import (begin_stock_result_registration, publish_stock_result,
@@ -82,6 +84,10 @@ def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
     multi-model combinations use build_stock_derived_signal with their original
     independently saved parents. No statistics or account execute in this call.
     """
+    started=time.perf_counter()
+    stages={name:0.0 for name in ('prepare_seconds','input_validation_seconds','fit_seconds',
+        'predict_seconds','save_admit_seconds','oos_seconds')}
+    fold_metrics=[]
     from .stock_sequential_api import open_stock_ml_batch_preparation,open_stock_signal_evaluation_freeze
     from .stock_folds import build_stock_ml_fold_from_saved_inputs
     from .stock_derived_signal import build_stock_derived_signal,_parent
@@ -100,8 +106,10 @@ def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
     root=Path(destination).resolve();folds=[];bindings=[];derived=[]
     prepared=None
     if prepared_batch is not None:
+        before=time.perf_counter()
         prepared=_compatible_prepared_batch(prepared_batch,feature_inputs,fold_specs,preparation_options,
             specs['label'],model_feature_selection)
+        stages['input_validation_seconds']+=time.perf_counter()-before
         if metrics is not None:
             metrics.update(prepared_batch_reused=True,prepared_batch_ref=prepared['batch_ref'],
                 data_read_calls=0,supplier_calls=0,feature_core_calls=0,label_core_calls=0,core_calls=0,
@@ -111,16 +119,30 @@ def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
         preparation_options=preparation_options,label_spec=specs['label'],column_source=column_source,
         model_feature_selection=model_feature_selection,metrics=metrics,reuse_raw_from_batch=reuse_raw_from_batch,
         progress=progress) if prepared_batch is None else nullcontext(None))
+    before=time.perf_counter()
     with preparation as owner:
+        stages['prepare_seconds']+=time.perf_counter()-before
         inputs=owner.batch if owner is not None else prepared_batch
         with open_stock_signal_evaluation_freeze(inputs,scope=scope,destination=root/'oos',signal_name='model') as writer:
             for ordinal in range(len(fold_specs)):
                 with owner.operation() if owner is not None else inputs.operation():
+                    before=time.perf_counter()
                     item=owner.next_fold() if owner is not None else prepared['folds'][ordinal]
+                    stages['prepare_seconds']+=time.perf_counter()-before
                     require(item is not None,'prepared fold coverage is incomplete')
+                    one={}; consumed=writer.metrics.get('consume_seconds',0.0)
                     run=build_stock_ml_fold_from_saved_inputs(item['input_manifest'],fold_spec=item['fold_spec'],
                         destination=root/'folds',batch=inputs,training_spec=specs['model'],
-                        model_feature_selection=model_feature_selection)
+                        model_feature_selection=model_feature_selection,metrics=one)
+                    oos=writer.metrics.get('consume_seconds',0.0)-consumed
+                    parts=dict(input_validation_seconds=one.get('saved_input_validation_seconds',0.0),
+                        fit_seconds=one.get('train_seconds',0.0),predict_seconds=one.get('predict_seconds',0.0),
+                        oos_seconds=oos)
+                    parts['save_admit_seconds']=max(0.0,one['total_seconds']-sum(parts.values()))
+                    for name,value in parts.items():stages[name]+=value
+                    fold_metrics.append(dict(fold=ordinal+1,cache_hit=one['cache_hit'],
+                        train_calls=one['train_calls'],predict_calls=one['predict_calls'],
+                        total_seconds=one['total_seconds'],**parts))
                     # Read the builder's actual saved outputs. No fabricated model or
                     # synthetic combined prediction replaces the original fold refs.
                     prediction,binding,_=_parent(run)
@@ -133,16 +155,34 @@ def _build_stock_sequential_experiment(data, *, configuration, feature_inputs,
                     folds.append({'path':str(run.path),'fold_ref':run.identity,
                         'signal_run_ref':prediction['signal_run_ref'],'fold_spec_ref':digest(item['fold_spec'])})
                     run=prediction=binding=None
+                    if progress is not None:
+                        progress(dict(stage='sequential_fold',completed=ordinal+1,total=len(fold_specs),
+                            metrics=deepcopy(fold_metrics[-1])))
+            before=time.perf_counter()
             if owner is not None:
                 require(owner.next_fold() is None,'prepared fold coverage exceeds requested schedule')
             batch=owner.finish() if owner is not None else prepared
+            stages['prepare_seconds']+=time.perf_counter()-before
+            before=time.perf_counter()
             frozen=writer.finish()
+            stages['oos_seconds']+=time.perf_counter()-before
     evaluation_input=frozen
     if derived:
         from .stock_signal_evaluation_derived import save_stock_derived_signal_evaluation_inputs
+        before=time.perf_counter()
         evaluation_input=save_stock_derived_signal_evaluation_inputs(frozen,
             derived_inputs={'derived':[item['path'] for item in derived]},scope=scope,
             destination=root/'joint-oos',maximum_resident_bytes=preparation_options['maximum_resident_bytes'])
+        stages['oos_seconds']+=time.perf_counter()-before
+    total=time.perf_counter()-started
+    stages['control_seconds']=max(0.0,total-sum(stages.values()))
+    if metrics is not None:
+        metrics['sequential']={'contract_version':'stock_sequential_metrics_v1',
+            'scope':'shared preparation through frozen OOS; excludes caller Feature cold load and result publication',
+            'timing_relationship':'stage seconds are disjoint; fold entries are children, not additional costs',
+            'stages':stages,'total_seconds':total,'folds':fold_metrics,
+            'train_calls':sum(f['train_calls'] for f in fold_metrics),
+            'predict_calls':sum(f['predict_calls'] for f in fold_metrics)}
     return {'configuration_ref':config['configuration_ref'],'spec_refs':config['spec_refs'],
         'batch_manifest':batch,'folds':folds,'derived_signals':derived,
         'prediction_bindings':bindings,'raw_signal_evaluation_input':frozen,'signal_evaluation_input':evaluation_input}

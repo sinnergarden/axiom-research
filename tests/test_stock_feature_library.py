@@ -107,8 +107,8 @@ class StockFeatureLibraryTests(unittest.TestCase):
 
     def test_second_experiment_adds_other_source_column_and_rejects_wrong_training_source(self):
         import json
-        from axiom_research.stock_feature_library_adapter import (
-            build_feature_library_training_view,load_feature_library_training_view)
+        from axiom_research.stock_feature_library_adapter import build_feature_library_training_view
+        from axiom_research import load_feature_library_training_view
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); library=FeatureLibrary(root/'features',maximum_working_bytes=8*1024**2)
             catalog=load_a01_feature_catalog(); selection=[{'id':n,'semantic_version':'1.0.0'} for n in ('ALP001','ALP003')]

@@ -183,11 +183,11 @@ def _validate_config(config):
     if _instant(config['evaluation_cutoff'])<=fit: raise ValueError('outcome cutoff must follow fit cutoff')
 
 
-def predict_stock_model(path, feature_rows, *, ordered_features, feature_selection=None):
+def predict_stock_model(path, feature_rows, *, ordered_features, feature_selection=None, batch=None):
     """Independently load a saved native booster and predict ordered finite rows."""
     import lightgbm as lgb
     import numpy as np
-    model=load_stock_model(path)
+    model=load_stock_model(path, batch=batch)
     columns=model['ordered_features']
     if list(ordered_features)!=columns: raise ValueError('prediction feature order differs from saved model')
     if 'feature_selection' in model and feature_selection!=model['feature_selection']:

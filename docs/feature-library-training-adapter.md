@@ -7,7 +7,7 @@ training row facts. It uses the explicit
 view ref, original partition refs, fixed source descriptor, sample membership,
 original cutoff, cell clocks and reasons. This export performs no Feature math.
 
-`load_feature_library_training_view` verifies its actual files, compares the
+The public `axiom_research.load_feature_library_training_view` verifies its actual files, compares the
 exported cells with the original library projection, checks membership against
 the pinned source buffer, and returns the existing StockFeatureView owner handle.
 Both build and cold load verify the registered DAG/input semantics and every
@@ -29,7 +29,14 @@ Its new contract is not a legacy Feature producer artifact. The old Feature
 loaders and already saved normalized matrices retain their existing identities.
 
 The synthetic source test verifies packed-to-training-owner row equivalence.
-Real training, strategy execution and performance evidence are still pending.
+Current executed scope and historical T01 measurements are recorded in the
+[user manual](https://github.com/sinnergarden/axiom-docs/blob/main/docs/user-manual.md)
+and its version ledger. They are separate from this adapter's synthetic checks.
+The adapter preserves raw and normalized layers, while the current v3 model
+producer accepts only dimensionless cross-sectional normalized columns. Passing
+a raw layer now fails before fitting rather than saving a false normalization
+declaration. This tightens admission of a previously misdeclared path; it does
+not normalize values, migrate historical files or validate earlier raw models.
 
 Engine's generic source interface supports new raw facts: register the new fact
 semantics and derived DAG, fingerprint its selected data revisions, then request

@@ -205,9 +205,20 @@ def load_stock_ml_experiment(path):
     return StockMLExperiment(path)
 
 
-def load_stock_model(path):
-    """Return verified saved ModelRelease metadata, without importing LightGBM."""
+def load_stock_model(path, *, batch=None):
+    """Verify saved ModelRelease metadata without importing LightGBM.
+
+    V3 uses the existing complete fold admission, including its LabelSpec,
+    prepared inputs, clocks and booster. A live batch can share that admission;
+    otherwise the original saved parents must remain available.
+    """
     path=Path(path);model=_read(path/'model.json');_verify_ref(model,'model_ref')
+    if model.get('contract_version') == 'stock_model_release_v3':
+        from .stock_fold_artifacts import load_stock_ml_fold
+        admitted = load_stock_ml_fold(path, batch=batch).model()
+        if admitted != model:
+            raise ValueError('saved model changed during fold admission')
+        return admitted
     if model.get('contract_version') not in ('stock_model_release_v1','stock_model_release_v2'):
         raise ValueError('unsupported stock model contract')
     if model['contract_version']=='stock_model_release_v2':

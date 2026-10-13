@@ -14,7 +14,7 @@ import numpy as np
 import yaml
 
 from axiom_research import (build_configured_stock_sequential_experiment, load_stock_feature_view,
-    load_stock_ml_batch_inputs, load_stock_sequential_configuration)
+    load_stock_ml_batch_inputs, load_stock_sequential_configuration, load_stock_model, predict_stock_model)
 from axiom_research.stock_artifacts import _read, file_digest, write_json
 from axiom_research.stock_compact_store import OwnedStore, _view_data, clear_feature_window, feature_training_blocks
 from axiom_research.stock_training_blocks import _training_block_descriptor
@@ -87,7 +87,7 @@ class PreparedReuseTests(unittest.TestCase):
             subset_cfg=variant(root/'subset-config',original,rate=.2,subset=fixture.spec['feature_selection'][:2])
             def registration(name):
                 return dict(request_path=root/name/'.request.json',index_path=root/'index.json',roots={'research':root})
-            first_stats={}; reuse_stats={}; subset_stats={}; control_stats={}
+            first_stats={}; reuse_stats={}; subset_stats={}; control_stats={}; progress=[]
             with patch('axiom_research.feature_catalog.load_feature_catalog',return_value=fixture.catalog), \
                  patch('axiom_research.stock_training.fit_predict_stock_model',side_effect=observed_backend), \
                  patch('axiom_research.stock_training_blocks.write_part',side_effect=observed_proof), \
@@ -95,7 +95,8 @@ class PreparedReuseTests(unittest.TestCase):
                  data.open_column_source(snapshot=snapshot,limits={'cache_bytes':16*1024**2,'max_working_bytes':64*1024**2}) as source:
                 first=build_configured_stock_sequential_experiment(data,configuration_path=first_cfg,feature_inputs=feature,
                     column_source=source,destination=root/'first-run/training',prepared_destination=root/'shared-prepared',
-                    metrics=first_stats,registration=registration('first-run'))
+                    metrics=first_stats,registration=registration('first-run'),progress=progress.append)
+                self.assertEqual([e['completed'] for e in progress if e['stage']=='sequential_fold'],[1,2])
                 self.assertEqual(proofs['first'],1)
                 self.assertGreater(first_stats['shared_execution']['feature']['training_block_descriptor_reuses'],0)
                 pinned={p:(file_digest(p),p.stat().st_mtime_ns) for p in (root/'shared-prepared').rglob('*') if p.is_file()}
@@ -116,14 +117,21 @@ class PreparedReuseTests(unittest.TestCase):
                     self.assertEqual(second['batch_manifest'],first['batch_manifest'])
                     self.assertEqual(proofs['reuse'],0)
                     self.assertEqual(reuse_stats['raw_operator_calls'],0); self.assertEqual(reuse_stats['core_calls'],0)
-                    for a,b in zip(phases['first'],phases['reuse']):
+                    for saved,a,b in zip(second['folds'],phases['first'],phases['reuse']):
                         for key in ('X','y','P'):np.testing.assert_array_equal(a[key],b[key])
                         self.assertNotEqual(a['parameters'],b['parameters'])
-                        oracle_metrics={}
-                        oracle=fit_predict_stock_model(b['X'],b['y'],b['P'],ordered_features=b['ordered_features'],
-                            parameters=b['parameters'],num_boost_round=b['num_boost_round'],metrics=oracle_metrics)
-                        np.testing.assert_array_equal(b['predictions'],oracle[1])
-                        self.assertEqual((oracle_metrics['train_calls'],oracle_metrics['predict_calls']),(1,1))
+                        model=load_stock_model(saved['path'],batch=prepared)
+                        self.assertEqual(model['contract_version'],'stock_model_release_v3')
+                        independent=predict_stock_model(saved['path'],[{'values':r.tolist()} for r in b['P']],
+                            ordered_features=model['ordered_features'],feature_selection=model['feature_selection'],batch=prepared)
+                        np.testing.assert_array_equal(b['predictions'],independent)
+                    # A cold public call follows the same complete fold admission.
+                    cold_model=load_stock_model(second['folds'][0]['path'])
+                    self.assertEqual(cold_model,load_stock_model(second['folds'][0]['path'],batch=prepared))
+                    self.assertEqual(reuse_stats['sequential']['train_calls'],2)
+                    self.assertEqual(reuse_stats['sequential']['predict_calls'],2)
+                    self.assertAlmostEqual(sum(reuse_stats['sequential']['stages'].values()),
+                                           reuse_stats['sequential']['total_seconds'],places=6)
                     with self.assertRaisesRegex(ValueError,'selection/cohort differs'):
                         build_configured_stock_sequential_experiment(None,configuration_path=subset_cfg,feature_inputs=feature,
                             column_source=None,destination=root/'invalid-subset/training',prepared_batch=prepared,
@@ -152,10 +160,23 @@ class PreparedReuseTests(unittest.TestCase):
                     fold_count=2,proof_write_calls=dict(proofs),reuse_preparation_metrics=reuse_stats,
                     subset_preparation_metrics=subset_stats,first_preparation_metrics=first_stats,
                     fit_predict_calls={k:len(v) for k,v in phases.items()},
-                    tiny_oracle_fit_predict_calls=2,normal_CLI_complete_batch_reuse=True,
-                    same_model_inputs_exact=True,reused_predictions_match_tiny_fit_oracle_exact=True,
+                    independent_public_v3_predict_calls=2,normal_CLI_complete_batch_reuse=True,
+                    same_model_inputs_exact=True,reused_predictions_match_saved_model_exact=True,
                     subset_matches_fresh_preparation_exact=True,old_prepared_hash_mtime_unchanged=True,
                     real_Data_reads=0,supplier_calls=0,account_calls=0))
+
+    def test_raw_feature_stage_is_rejected_before_v3_fit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            data,snapshot,fixture,path,config=real_configuration(root,feature_stage='feature')
+            with patch('axiom_research.feature_catalog.load_feature_catalog',return_value=fixture.catalog), \
+                 patch('axiom_research.stock_training.fit_predict_stock_model') as fit, \
+                 data.open_column_source(snapshot=snapshot,limits={'cache_bytes':16*1024**2,'max_working_bytes':64*1024**2}) as source:
+                with self.assertRaisesRegex(ValueError,'raw training is unsupported'):
+                    build_configured_stock_sequential_experiment(data,configuration_path=config,feature_inputs=path,
+                        column_source=source,destination=root/'raw-run/training')
+                fit.assert_not_called()
+            self.assertFalse(list((root/'raw-run').rglob('booster.txt')))
 
 
 if __name__=='__main__':unittest.main()
