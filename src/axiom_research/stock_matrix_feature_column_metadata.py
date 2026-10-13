@@ -130,6 +130,8 @@ def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts
         set(m)=={'domain','dtype','unit'} and m['dtype'] in ('float64','int64','bool') for f,m in extra.items()),
         'typed daily fields required')
     buffer_types=dict(SOURCE_BUFFERS)
+    for name,dtype in {'member_known':'bool_u8','member_pool_complete':'bool_u8','member_reasons':'uint8'}.items():
+        if name in manifest['buffers']: buffer_types[name]=dtype
     for field in extra:
         require(field not in ('open','high','low','close','amount_cny','factor','is_member','vwap'),
                 'daily field shadows existing source')

@@ -260,6 +260,7 @@ class SavedColumnFeatureSource:
                 member=source.arrays['member'][i].copy()
                 member &= np.asarray([s in self._reference_set for s in source.manifest['spec']['universe']],dtype=bool)
                 self._reference_refs[i]=digest({'member':_array_ref(member),
+                    **{k:_array_ref(source.arrays[k][i]) for k in ('member_known','member_pool_complete','member_reasons') if k in source.arrays},
                     'available':_array_ref(source.arrays['member_available'][i]),
                     'available_validity':_array_ref(source.arrays['member_available_validity'][i]),
                     'leaf':self._selected_leaf_refs({'is_member'}|({'industry_code'} if 'industry_code' in source.physical_fields() else set()),{days[i]},source.manifest['spec']['universe'])})
@@ -440,6 +441,8 @@ class _RawCrossSectionSource:
             reference_ref=p['reference_ref'],security_ids=list(securities),
             cutoffs_utc_us=np.asarray([cutoff],dtype='<i8'),
             reference_member=original.arrays['member'][position:position+1],
+            **{target:original.arrays[key][position:position+1] for key,target in
+               (('member_known','reference_member_known'),('member_pool_complete','reference_pool_complete')) if key in original.arrays},
             reference_industry=original.industries([position],[original.security_positions[s] for s in securities]),
             reference_available_at_utc_us=member_clock,
             input_refs={'source_ref':original.identity})

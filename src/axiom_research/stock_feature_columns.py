@@ -218,6 +218,8 @@ class FeatureColumnSource:
             'values':selected_values,'validity':selected_validity,
             'availability':selected_clocks,'missing_reasons':selected_reasons,
             'member':a['member'],
+            'member_known':a.get('member_known',np.ones_like(a['member'],dtype=bool)),
+            'member_pool_complete':a.get('member_pool_complete',np.ones_like(a['member'],dtype=bool)),
             'industry':self.industries(list(range(begin,end)),positions),
             'member_available':np.where(a['member_available_validity'],
                 (a['member_available']+999999)//1000000*1000000,cutoff)}
@@ -246,9 +248,29 @@ class FeatureColumnSource:
             reason_dictionary=list(REASONS),available_at_utc_us=view['availability'],
             source_codes={field:np.full(shape,i,dtype='<i4') for i,field in enumerate(names) if field in view['values']},
             source_sets=sets,reference_member=view['member'],reference_industry=view['industry'],
+            reference_member_known=view['member_known'],reference_pool_complete=view['member_pool_complete'],
             reference_available_at_utc_us=view['member_available'],reference_source_codes=np.full(shape,len(names),dtype='<i4'),
             input_refs={'source_ref':self.identity,'selection_ref':view['selection_ref']})
         return inputs,view['selection']
+
+
+def _membership_masks(series, ordered, meta, days, shape):
+    """Keep UNKNOWN separately; pool closure requires Data's selected state proof."""
+    import numpy as np
+    known=series.notna().to_numpy(dtype=bool).reshape(shape)
+    # False is only the payload for an invalid cell, never a negative assertion.
+    values=series.fillna(False).to_numpy(dtype=bool).reshape(shape)
+    reasons=np.asarray([REASONS.index(r.get('missing_reason')) for r in ordered],dtype='u1').reshape(shape)
+    pools=meta.get('reference_pools',{})
+    complete=np.zeros(shape,dtype=bool)
+    for i,day in enumerate(days):
+        proof=pools.get(day,{})
+        # Count equality closes the requested physical projection against an
+        # explicit Data complete state, never against a guessed index size.
+        complete[i,:]=(proof.get('complete') is True and
+            type(proof.get('member_count')) is int and
+            int(np.count_nonzero(values[i]&known[i]))==proof['member_count'])
+    return values,known,complete,reasons
 
 
 def build_feature_column_source(data, *, spec, destination, block_sessions=20, progress=None):
@@ -274,13 +296,14 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
         profiles['universe_membership']['contract']['contract_id']=='local.tushare_dated_membership.v1',
         'membership source needs stable dated-event identities')
     root=Path(destination); root.mkdir(parents=True,exist_ok=True)
-    config=_source_config(spec); prepared=prepare_matrix_qlib(data,config=config,destination=root)
+    config=_source_config(spec); prepared=prepare_matrix_qlib(data,config=config,destination=root,physical_only=True)
     sessions=spec['read_sessions']; symbols=spec['universe']; shape=(len(sessions),len(symbols),len(FIELDS))
     from .feature_input_buffers import allocate_feature_buffer, seal_feature_buffer
     arrays={name:allocate_feature_buffer(root,dtype=dtype,shape=shape[:2] if name.startswith('member') else shape)
             for name,dtype in {'values':'<f8','original_values':'<f8','validity':bool,
                 'available':'<i8','available_validity':bool,'reasons':'u1',
-                'member':bool,'member_available':'<i8','member_available_validity':bool}.items()}
+                'member':bool,'member_known':bool,'member_pool_complete':bool,'member_reasons':'u1',
+                'member_available':'<i8','member_available_validity':bool}.items()}
     chunks=[]; metrics={'data_read_calls':0,'feature_core_calls':0,'source_rows':0,'native_value_reuses':0,
         'reader_projection_fallback_cells':0,'qlib_prepare_seconds':prepared['seconds']}
     clock_cache={}
@@ -305,7 +328,7 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
                 require(len(by_key)==len(meta['by_key']) and set(by_key)==expected,'complete unique field provenance required')
                 ordered=[by_key[key] for key in keys]
                 for (security,day),row in zip(keys,ordered):
-                    require(row.get('missing_reason')!='not_visible_at_cutoff','later visibility needs a distinct source cohort')
+                    require(field=='is_member' or row.get('missing_reason')!='not_visible_at_cutoff','later visibility needs a distinct source cohort')
                     require(row.get('availability_basis') in (None,'declared_vendor_assumption'),
                         'unproved source selection invariance')
                     require(row.get('usable_from') is None or timestamp(row['usable_from'])<=timestamp(spec['cutoff_by_session'][day]),
@@ -314,8 +337,11 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
                     for r in ordered],dtype='<i8').reshape(chunk_shape)
                 known=np.asarray([r.get('usable_from') is not None for r in ordered],dtype=bool).reshape(chunk_shape)
                 if field=='is_member':
-                    require(not frame[field].isna().any(),'unknown membership cannot become false')
-                    arrays['member'][offset:offset+len(days)]=frame[field].to_numpy(dtype=bool).reshape(chunk_shape)
+                    values, member_known, pool_complete, member_reasons = _membership_masks(frame[field], ordered, meta, days, chunk_shape)
+                    arrays['member'][offset:offset+len(days)]=values
+                    arrays['member_known'][offset:offset+len(days)]=member_known
+                    arrays['member_pool_complete'][offset:offset+len(days)]=pool_complete
+                    arrays['member_reasons'][offset:offset+len(days)]=member_reasons
                     require(all(r.get('source_snapshot_date') is None or r['source_snapshot_date']<=d
                         for (_,d),r in zip(keys,ordered)),'future membership snapshot')
                     arrays['member_available'][offset:offset+len(days)]=clocks

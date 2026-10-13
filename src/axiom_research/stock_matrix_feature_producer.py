@@ -107,7 +107,7 @@ def _guard_resident(owned, *, maximum_resident_bytes, stats, caller_retained_byt
     _require(combined <= maximum_resident_bytes, 'combined producer/caller resident budget exceeded: '+reason)
 
 
-def prepare_matrix_qlib(data, *, config, destination):
+def prepare_matrix_qlib(data, *, config, destination, physical_only=False):
     """Export and activate the original view without loading its native panel."""
     from axiom_data import QuerySpec
     from .qlib_adapter import QlibView
@@ -122,9 +122,10 @@ def prepare_matrix_qlib(data, *, config, destination):
     # Keep the original export namespace/query construction. The new producer
     # implementation enters the opt-in Feature definition independently.
     path = Path(destination)/'qlib'/digest({'snapshot': config['snapshot'],
-        'prices': {k: str(v) for k, v in vars(price).items()}, 'scope_ref': config['scope_ref']})[7:]
+        'prices': {k: str(v) for k, v in vars(price).items()}, 'scope_ref': config['scope_ref'],
+        **({'physical_only': True} if physical_only else {})})[7:]
     data.export_qlib(snapshot=config['snapshot'], queries=(price, factor), destination=path,
-                     universe_query=member, universe_name=config['universe_id'])
+                     universe_query=None if physical_only else member, universe_name=config['universe_id'])
     view = QlibView(path).activate()
     return {'view': view, 'view_reference': view.reference, 'price_query': price,
             'factor_query': factor, 'member_query': member, 'qlib_path': path,
