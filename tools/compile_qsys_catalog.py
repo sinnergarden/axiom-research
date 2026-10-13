@@ -363,6 +363,21 @@ for row in rows:
  if row['name'] in forecast_roots:
   register(row,forecast_roots[row['name']],note='v2 selects latest cutoff-visible announcement, ties by report period, with Data revision selection; future forecast report periods are allowed. Native categories use stable codes, scoring remains Core (2,1,1.5,0.5,-1,-1,-2,-2; unknown supplied category 0). Absent/unknown announcement remains missing, not fabricated 0/999. Presence is 1 only for a visible supplied announcement.')
   new[int(row['inventory_row'])]['semantic_version']='2.0.0'
+# Explicit v2 repairs: negate the amount change BEFORE clipping. The pinned
+# source negated an already nonnegative value, then clipped again, always zero.
+positive_return=fl(gt(roll(r1,20,minimum=10),0))
+for name,reduction in (('volume_contraction_after_rise_60d','mean'),('quiet_accumulation_60d','std')):
+ change=ret(roll(a,20,reduction,minimum=10,ddof=0),10)
+ R[name]=mul(positive_return,clip(mul(filled(change),-1),0))
+R['holder_concentration_volume_contract']=mul(R['holder_concentration_score'],clip(csz(R['volume_contraction_after_rise_60d']),0))
+for row in rows:
+ if row['name'] in ('volume_contraction_after_rise_60d','quiet_accumulation_60d','holder_concentration_volume_contract'):
+  register(row,R[row['name']],formula=('holder_concentration_score * max(cs_zscore(volume_contraction_after_rise_60d@2.0.0), 0)' if row['name']=='holder_concentration_volume_contract' else 'I(mean(daily_return,20,min_periods=10)>0) * max(-fillna(pct_change('+('mean' if row['name']=='volume_contraction_after_rise_60d' else 'std_ddof0')+'(amount,20,min_periods=10),10),0),0)'),note='Explicit v2 fixes pinned source sign/clip ordering (source was identically zero). Mean/std use min_periods=10, std ddof=0; source amount-change fill-zero retained. Unknown return predicate stays missing. Holder composite retains explicit CS fill policy; this is not source-equivalent v1.')
+  new[int(row['inventory_row'])]['semantic_version']='2.0.0'
+  new[int(row['inventory_row'])]['missing_policy']='Return predicate preserves missing; amount-change explicitly fills zero before negation/clipping; holder CS uses explicit source fill-zero. Output validity does not prove complete inputs.'
+for row in rows:
+ if row['name']=='$lend_sell_volume':
+  register(row,'lend_sell_volume',note='Tushare margin_detail documentation doc_id=59 specifies stock quantities in shares (funds units, bonds lots). Requires Data canonical lend_sell_volume with explicit per-security shares binding for this stock universe; unbound native rqmcl is never relabeled. Existing Raw can be replayed offline with that binding.')
 # Definitions preserve all old records. Registry records certified aliases separately.
 allids={f['id']:f for f in cat['features']}
 registry=[]

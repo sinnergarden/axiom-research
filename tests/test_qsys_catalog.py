@@ -42,13 +42,13 @@ class QsysCatalogTests(unittest.TestCase):
     def test_388_traceable_rows_and_no_blocked_placeholders(self):
         registry=load_qsys_feature_registry();rows=registry['rows']
         self.assertEqual(len(rows),388)
-        self.assertEqual(sum(r['status']=='executable' for r in rows),357)
+        self.assertEqual(sum(r['status']=='executable' for r in rows),361)
         self.assertEqual(sum(r['status']=='alias' for r in rows),2)
-        self.assertEqual(sum(r['status']=='blocked' for r in rows),29)
+        self.assertEqual(sum(r['status']=='blocked' for r in rows),25)
         for r in rows:
             self.assertTrue(r['expression']);self.assertTrue(r['qsys_source'])
             if r['status']=='blocked':self.assertNotIn('selection',r)
-        for name in ('industry_ret_20d','volume_contraction_after_rise_60d','$lend_sell_volume'):
+        for name in ('industry_ret_20d','margin_eligible','days_since_252d_high'):
             with self.subTest(name=name),self.assertRaisesRegex(FeatureCatalogError,'blocked'):
                 select_qsys_features([name])
         self.assertEqual(select_qsys_features(['($close - $open) / $open'])[0].id,'ALP001')
@@ -169,7 +169,7 @@ class QsysCatalogTests(unittest.TestCase):
         catalog=load_qsys_feature_catalog();base,facts,context=fixture()
         for normalized in (False,True):
             plan=build_feature_plan(base,catalog.default_selection,catalog=catalog,normalized=normalized)
-            self.assertEqual(len(plan.to_dict()['outputs']),374)
+            self.assertEqual(len(plan.to_dict()['outputs']),378)
         plan=build_feature_plan(base,catalog.default_selection,catalog=catalog)
         out=execute_feature_plan(plan,facts,context).to_dict()
         actual={f['name']:v for f,v in zip(catalog.definitions,out['rows'][0]['values'])}

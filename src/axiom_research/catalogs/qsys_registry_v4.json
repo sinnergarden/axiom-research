@@ -8537,12 +8537,12 @@
       },
       "candidate_id": "QRA021",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "supplier_quantity_unit",
-        "reason": "rqmcl/lending sell native quantity has not been proven to be shares; no unit relabeling."
+      "status": "executable",
+      "selection": {
+        "id": "QRA021",
+        "semantic_version": "1.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Tushare margin_detail documentation doc_id=59 specifies stock quantities in shares (funds units, bonds lots). Requires Data canonical lend_sell_volume with explicit per-security shares binding for this stock universe; unbound native rqmcl is never relabeled. Existing Raw can be replayed offline with that binding."
     },
     {
       "feature_key": "$lend_repay_volume",
@@ -15883,12 +15883,12 @@
       },
       "candidate_id": "PVM011",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "source_formula_defect",
-        "reason": "Source clips negative of a nonnegative series to nonnegative, yielding zero; meaningful corrected formula requires separately versioned decision."
+      "status": "executable",
+      "selection": {
+        "id": "PVM011",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Explicit v2 fixes pinned source sign/clip ordering (source was identically zero). Mean/std use min_periods=10, std ddof=0; source amount-change fill-zero retained. Unknown return predicate stays missing. Holder composite retains explicit CS fill policy; this is not source-equivalent v1."
     },
     {
       "feature_key": "quiet_accumulation_60d",
@@ -15939,12 +15939,12 @@
       },
       "candidate_id": "PVM012",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "source_formula_defect",
-        "reason": "Source clips negative of a nonnegative series to nonnegative, yielding zero; meaningful corrected formula requires separately versioned decision."
+      "status": "executable",
+      "selection": {
+        "id": "PVM012",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Explicit v2 fixes pinned source sign/clip ordering (source was identically zero). Mean/std use min_periods=10, std ddof=0; source amount-change fill-zero retained. Unknown return predicate stays missing. Holder composite retains explicit CS fill policy; this is not source-equivalent v1."
     },
     {
       "feature_key": "amount_stability_60d",
@@ -16253,12 +16253,12 @@
       },
       "candidate_id": "INT003",
       "candidate_alias": "",
-      "status": "blocked",
-      "blocker": {
-        "code": "blocked_formula_dependency",
-        "reason": "Depends on volume_contraction_after_rise_60d, whose original formula is provably constant zero and needs an explicit corrected definition."
+      "status": "executable",
+      "selection": {
+        "id": "INT003",
+        "semantic_version": "2.0.0"
       },
-      "semantic_review": "No executable placeholder is installed. Preserve source expression for future versioned migration."
+      "semantic_review": "Explicit v2 fixes pinned source sign/clip ordering (source was identically zero). Mean/std use min_periods=10, std ddof=0; source amount-change fill-zero retained. Unknown return predicate stays missing. Holder composite retains explicit CS fill policy; this is not source-equivalent v1."
     },
     {
       "feature_key": "margin_holder_trend_confirm",

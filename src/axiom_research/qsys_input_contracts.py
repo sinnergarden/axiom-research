@@ -19,7 +19,7 @@ DAILY_FIELD_CONTRACTS = {
     **{field: {'domain': 'margin_daily', 'dtype': 'float64', 'unit': 'CNY'}
        for field in ('margin_balance', 'margin_buy_amount', 'margin_repay_amount', 'margin_total_balance')},
     **{field: {'domain': 'margin_daily', 'dtype': 'float64', 'unit': 'shares'}
-       for field in ('lend_volume', 'lend_repay_volume')},
+       for field in ('lend_volume', 'lend_repay_volume', 'lend_sell_volume')},
 }
 CORE_INPUT_CONTRACTS = {
     **{field: {'domain': 'market_daily', 'dtype': 'float64', 'unit': 'CNY/share'}

@@ -18113,6 +18113,332 @@
         "stage": "base",
         "missing": "preserve"
       }
+    },
+    {
+      "name": "_qsys_0702",
+      "op": "rolling",
+      "version": "1",
+      "inputs": [
+        "_qsys_0211"
+      ],
+      "params": {
+        "window": 20,
+        "min_periods": 10,
+        "inclusive_current": true,
+        "reduction": "mean",
+        "missing": "skip",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0702",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0703",
+      "op": "gt",
+      "version": "1",
+      "inputs": [
+        "_qsys_0702",
+        "_qsys_0212"
+      ],
+      "params": {
+        "missing": "preserve"
+      },
+      "column": {
+        "name": "_qsys_0703",
+        "dtype": "bool",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0704",
+      "op": "to_float",
+      "version": "1",
+      "inputs": [
+        "_qsys_0703"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0704",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0705",
+      "op": "pct_change",
+      "version": "1",
+      "inputs": [
+        "_qsys_0263"
+      ],
+      "params": {
+        "periods": 10,
+        "fill_method": "none",
+        "zero": "missing"
+      },
+      "column": {
+        "name": "_qsys_0705",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0706",
+      "op": "fill",
+      "version": "1",
+      "inputs": [
+        "_qsys_0705"
+      ],
+      "params": {
+        "value": 0
+      },
+      "column": {
+        "name": "_qsys_0706",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0707",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0706",
+        "_qsys_0235"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0707",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0708",
+      "op": "clip",
+      "version": "1",
+      "inputs": [
+        "_qsys_0707"
+      ],
+      "params": {
+        "lower": 0,
+        "upper": null
+      },
+      "column": {
+        "name": "_qsys_0708",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0709",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0704",
+        "_qsys_0708"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0709",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0710",
+      "op": "rolling",
+      "version": "1",
+      "inputs": [
+        "_a01_0015"
+      ],
+      "params": {
+        "window": 20,
+        "min_periods": 10,
+        "inclusive_current": true,
+        "reduction": "std",
+        "missing": "skip",
+        "ddof": 0,
+        "ties": "average"
+      },
+      "column": {
+        "name": "_qsys_0710",
+        "dtype": "float64",
+        "unit": "CNY",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0711",
+      "op": "pct_change",
+      "version": "1",
+      "inputs": [
+        "_qsys_0710"
+      ],
+      "params": {
+        "periods": 10,
+        "fill_method": "none",
+        "zero": "missing"
+      },
+      "column": {
+        "name": "_qsys_0711",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0712",
+      "op": "fill",
+      "version": "1",
+      "inputs": [
+        "_qsys_0711"
+      ],
+      "params": {
+        "value": 0
+      },
+      "column": {
+        "name": "_qsys_0712",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0713",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0712",
+        "_qsys_0235"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0713",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0714",
+      "op": "clip",
+      "version": "1",
+      "inputs": [
+        "_qsys_0713"
+      ],
+      "params": {
+        "lower": 0,
+        "upper": null
+      },
+      "column": {
+        "name": "_qsys_0714",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0715",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0704",
+        "_qsys_0714"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0715",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "base",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0716",
+      "op": "cs_zscore",
+      "version": "1",
+      "inputs": [
+        "_qsys_0709"
+      ],
+      "params": {
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "fill_zero",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "zero",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "column": {
+        "name": "_qsys_0716",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0717",
+      "op": "clip",
+      "version": "1",
+      "inputs": [
+        "_qsys_0716"
+      ],
+      "params": {
+        "lower": 0,
+        "upper": null
+      },
+      "column": {
+        "name": "_qsys_0717",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
+    },
+    {
+      "name": "_qsys_0718",
+      "op": "mul",
+      "version": "1",
+      "inputs": [
+        "_qsys_0653",
+        "_qsys_0717"
+      ],
+      "params": {},
+      "column": {
+        "name": "_qsys_0718",
+        "dtype": "float64",
+        "unit": "dimensionless",
+        "stage": "cross_sectional",
+        "missing": "preserve"
+      }
     }
   ],
   "features": [
@@ -34495,6 +34821,182 @@
             "name": "GRC003",
             "dtype": "float64",
             "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "PVM",
+      "id": "PVM011",
+      "name": "volume_contraction_after_rise_60d",
+      "formula": "I(mean(daily_return,20,min_periods=10)>0) * max(-fillna(pct_change(mean(amount,20,min_periods=10),10),0),0)",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "market_daily.amount_cny",
+        "market_daily.close"
+      ],
+      "lookback": 30,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "Return predicate preserves missing; amount-change explicitly fills zero before negation/clipping; holder CS uses explicit source fill-zero. Output validity does not prove complete inputs.",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "PVM011",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0709"
+          ],
+          "params": {},
+          "column": {
+            "name": "PVM011",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "PVM",
+      "id": "PVM012",
+      "name": "quiet_accumulation_60d",
+      "formula": "I(mean(daily_return,20,min_periods=10)>0) * max(-fillna(pct_change(std_ddof0(amount,20,min_periods=10),10),0),0)",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "market_daily.amount_cny",
+        "market_daily.close"
+      ],
+      "lookback": 30,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "Return predicate preserves missing; amount-change explicitly fills zero before negation/clipping; holder CS uses explicit source fill-zero. Output validity does not prove complete inputs.",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "PVM012",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0715"
+          ],
+          "params": {},
+          "column": {
+            "name": "PVM012",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "base",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "INT",
+      "id": "INT003",
+      "name": "holder_concentration_volume_contract",
+      "formula": "holder_concentration_score * max(cs_zscore(volume_contraction_after_rise_60d@2.0.0), 0)",
+      "dependencies": [
+        "adjustment_factors.factor",
+        "market_daily.amount_cny",
+        "market_daily.close",
+        "shareholder_count_events.holder_num",
+        "top_holders_reports.top10_ratio"
+      ],
+      "lookback": 30,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "Return predicate preserves missing; amount-change explicitly fills zero before negation/clipping; holder CS uses explicit source fill-zero. Output validity does not prove complete inputs.",
+      "semantic_version": "2.0.0",
+      "core_nodes": [
+        {
+          "name": "INT003",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "_qsys_0718"
+          ],
+          "params": {},
+          "column": {
+            "name": "INT003",
+            "dtype": "float64",
+            "unit": "dimensionless",
+            "stage": "cross_sectional",
+            "missing": "preserve"
+          }
+        }
+      ]
+    },
+    {
+      "group": "QRA",
+      "id": "QRA021",
+      "name": "$lend_sell_volume",
+      "formula": "$lend_sell_volume",
+      "dependencies": [
+        "margin_daily.lend_sell_volume"
+      ],
+      "lookback": 1,
+      "normalization": {
+        "op": "cs_zscore",
+        "reference": "reference_members",
+        "group": "session",
+        "unknown_group": "reject",
+        "missing": "skip",
+        "ddof": 0,
+        "epsilon": 1e-12,
+        "constant": "missing",
+        "clip": null,
+        "excluded": "missing"
+      },
+      "missing_policy": "preserve missing; no implicit forward-fill or missing-to-zero; zero denominators missing; rolling policy explicit in DAG; frozen reference_members for CS",
+      "semantic_version": "1.0.0",
+      "core_nodes": [
+        {
+          "name": "QRA021",
+          "op": "identity",
+          "version": "1",
+          "inputs": [
+            "lend_sell_volume"
+          ],
+          "params": {},
+          "column": {
+            "name": "QRA021",
+            "dtype": "float64",
+            "unit": "shares",
             "stage": "base",
             "missing": "preserve"
           }
