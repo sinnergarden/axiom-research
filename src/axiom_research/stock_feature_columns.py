@@ -436,7 +436,7 @@ def load_feature_column_source(path):
 
 
 def extend_feature_column_source(data, *, source, daily_fields, destination, block_sessions=20,
-                                 maximum_added_bytes=512*1024**2, snapshot=None):
+                                 maximum_added_bytes=512*1024**2, snapshot=None, progress=None):
     """Append explicitly typed daily facts without reading or rewriting old fields.
 
     daily_fields maps canonical names to {domain, dtype, unit}. Only daily Data
@@ -453,7 +453,7 @@ def extend_feature_column_source(data, *, source, daily_fields, destination, blo
     require(bool(daily_fields) and type(daily_fields) is dict,'explicit daily fields required')
     manifest=deepcopy(source.manifest); spec=manifest['spec']
     require(spec['pit_policy']=='best_effort_vendor_v1','daily extension needs proved vendor selection invariance')
-    previous=manifest.get('daily_fields',{})
+    existing_daily_fields=manifest.get('daily_fields',{})
     require(not (set(daily_fields)&set(source.physical_fields())) and 'vwap' not in daily_fields,
             'daily extension cannot replace existing or derived fields')
     for field,meta in daily_fields.items():
@@ -516,10 +516,13 @@ def extend_feature_column_source(data, *, source, daily_fields, destination, blo
     kinds={'values':('<f8','float64_le'),'original_values':('<f8','float64_le'),
         'validity':(bool,'bool_u8'),'available':('<i8','int64_le'),
         'available_validity':(bool,'bool_u8'),'reasons':('u1','uint8')}
-    for field in daily_fields:
-        for kind,(dtype,_) in kinds.items(): arrays[field+'::'+kind]=allocate_feature_buffer(root,dtype=dtype,shape=shape)
-    chunks=[]
-    for offset in range(0,len(days),block_sessions):
+    from .feature_input_checkpoint import extension_checkpoint, atomic_json
+    from .feature_input_evidence import check_input_disk
+    staging,arrays=extension_checkpoint(root,source=source,fields=daily_fields,kinds=kinds,sessions=days,
+        block_sessions=block_sessions,binding={'daily_fields':daily_fields,'snapshot':spec['snapshot']},metrics=metrics)
+    chunks=list(staging.state['chunks']);metrics=dict(staging.state['metrics'])
+    for offset in range(staging.state['completed_dates'],len(days),block_sessions):
+        check_input_disk(root,min(block_sessions,len(days)-offset)*sum(a.shape[1]*a.dtype.itemsize for a in staging.arrays.values()))
         selected=days[offset:offset+block_sessions]; keys=[(s,d) for d in selected for s in symbols]
         expected=set(keys); chunk_shape=(len(selected),len(symbols)); evidence=[]
         for domain,fields in domains.items():
@@ -574,12 +577,14 @@ def extend_feature_column_source(data, *, source, daily_fields, destination, blo
                 'field_meta':batch.field_meta,'fields':fields,'sessions':selected},'evidence_ref')
             evidence.append(write_part(root,child,'evidence_ref'))
         chunks.append({'sessions':selected,'evidence':evidence})
+        staging.commit(offset+len(selected),chunks,metrics)
+        if progress is not None: progress({'completed_dates':offset+len(selected),'total_dates':len(days),**metrics})
     for field in daily_fields:
         for kind,(_,dtype) in kinds.items():
             name=field+'::'+kind; value=arrays[name]
-            manifest['buffers'][name],arrays[name]=seal_feature_buffer(root,value,dtype=dtype,shape=shape)
-    manifest['daily_fields']={**previous,**deepcopy(daily_fields)}
+            manifest['buffers'][name],arrays[name]=seal_feature_buffer(root,value,dtype=dtype,shape=shape,retain_staging=True)
+    manifest['daily_fields']={**existing_daily_fields,**deepcopy(daily_fields)}
     manifest.setdefault('daily_extensions',[]).append({'fields':list(daily_fields),'chunks':chunks})
     manifest.pop('source_ref'); manifest=seal(manifest,'source_ref')
-    write_json(root/'source.json',manifest)
+    atomic_json(root/'source.json',manifest)
     return FeatureColumnSource(manifest,arrays),metrics

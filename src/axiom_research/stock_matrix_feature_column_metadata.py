@@ -177,10 +177,24 @@ def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts
             if known is None:
                 child=_saved_json(desc,'evidence_ref',store)
                 _verify_ref(child,'evidence_ref')
-                _fields(child,{'contract_version','context','field_meta','fields','sessions','evidence_ref'},
+                compact=child['contract_version']=='reader_column_evidence_v2'
+                _fields(child,{'contract_version','context','field_meta','fields','sessions','evidence_ref'} | ({'shared_rows'} if compact else set()),
                         'exact column source provenance required')
-                require(child['contract_version']=='reader_column_evidence_v1' and child['sessions']==chunk_days and
+                require(child['contract_version'] in ('reader_column_evidence_v1','reader_column_evidence_v2') and child['sessions']==chunk_days and
                         child['evidence_ref']==desc['evidence_ref'], 'column source provenance closure mismatch')
+                shared_objects={}
+                if compact:
+                    from .feature_input_evidence import shared_evidence_descriptors, materialize_evidence_rows
+                    for item in shared_evidence_descriptors(child):
+                        proof=item['buffer']
+                        _fields(proof,{'path','file_digest','dtype','shape','buffer_digest'},'exact shared evidence buffer required')
+                        require(proof['dtype']=='uint8' and len(proof['shape'])==1 and proof['buffer_digest']==proof['file_digest'], 'shared evidence buffer mismatch')
+                        if proof['path'] in shared_objects: continue
+                        shared_objects[proof['path']]=proof
+                        _physical(proof,store)
+                        require(Path(proof['path']).stat().st_size==proof['shape'][0], 'shared evidence buffer size mismatch')
+                        reachable.update((proof['file_digest'],item['value_ref']))
+                    child=materialize_evidence_rows(child)
                 if expected_fields is not None:
                     require(set(child['fields'])==set(child['field_meta']) and
                             set(child['fields'])<=set(expected_fields), 'daily evidence fields mismatch')
@@ -202,10 +216,13 @@ def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts
                     store.drop_json(desc,'evidence_ref')
                     # The existing Store charges this small receipt; it still
                     # fingerprints every referenced file on each admission.
-                    store._retain_entry(store.content,token,(tuple(chunk_days),tuple(child['fields'])))
+                    store._retain_entry(store.content,token,(tuple(chunk_days),tuple(child['fields']),tuple(shared_objects.values())))
                 del child
             else:
                 require(known[0]==tuple(chunk_days),'cached source provenance date mismatch')
+                for proof in known[2]:
+                    _physical(proof,store)
+                    reachable.add(proof['file_digest'])
                 if expected_fields is not None: seen_fields.extend(known[1])
             reachable.update((desc['evidence_ref'],desc['file_digest']))
         if expected_fields is not None:

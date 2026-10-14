@@ -89,7 +89,7 @@ def validate_financial_materializations(manifest, child=None):
 
 def extend_financial_feature_source(data, *, source, query, field, outputs, unit,
         destination, event_snapshot, session_timezone='Asia/Shanghai', block_sessions=20,
-        maximum_added_bytes=64*1024**2, maximum_event_cache_bytes=64*1024**2):
+        maximum_added_bytes=64*1024**2, maximum_event_cache_bytes=64*1024**2, progress=None):
     """Append reported/TTM/single-quarter leaves without rebuilding existing columns.
 
     ``outputs`` maps leaf name to {derivation, quarters_back}. Every leaf uses
@@ -130,15 +130,19 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
     kinds={'values':('<f8','float64_le'),'original_values':('<f8','float64_le'),
            'validity':(bool,'bool_u8'),'available':('<i8','int64_le'),
            'available_validity':(bool,'bool_u8'),'reasons':('u1','uint8')}
-    for name in outputs:
-        for kind,(dtype,_) in kinds.items(): arrays[name+'::'+kind]=allocate_feature_buffer(root,dtype=dtype,shape=shape)
     declarations={name:{**projection,'source_domain':query.domain,'source_field':field,
         'endpoint':query.filters.get('endpoint'),'report_type':query.filters.get('report_type'),'basis':actual.get('basis','reported'),
         'unit':unit,'selection':selection,'session_timezone':session_timezone,'recipe_version':FINANCIAL_RECIPE_VERSION,
         'report_start':query.start,'report_end':query.end,'event_snapshot':event_snapshot,
         'coverage_security_ids':list(query.symbols)} for name,projection in outputs.items()}
     chunks=[]; metrics={'event_blocks':0,'event_cutoff_selections':0,'existing_field_reads':0,'added_fields':len(outputs)}
-    for start in range(0,len(days),block_sessions):
+    from .feature_input_checkpoint import extension_checkpoint, atomic_json
+    from .feature_input_evidence import check_input_disk
+    staging,arrays=extension_checkpoint(root,source=source,fields=outputs,kinds=kinds,sessions=days,
+        block_sessions=block_sessions,binding={'declarations':declarations},metrics=metrics)
+    chunks=list(staging.state['chunks']);metrics=dict(staging.state['metrics'])
+    for start in range(staging.state['completed_dates'],len(days),block_sessions):
+        check_input_disk(root,min(block_sessions,len(days)-start)*sum(a.shape[1]*a.dtype.itemsize for a in staging.arrays.values()))
         selected=days[start:start+block_sessions]; metadata={n:{'dtype':'float64','unit':unit,'by_key':[]} for n in outputs}
         contexts=[]
         for si in range(0,len(query.symbols),256):
@@ -227,10 +231,12 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
                         'financial_materializations':{**manifest.get('financial_materializations',{}),**declarations}}
         validate_financial_materializations(check_manifest,child)
         chunks.append({'sessions':selected,'evidence':[write_part(root,child,'evidence_ref')]})
+        staging.commit(start+len(selected),chunks,metrics)
+        if progress is not None: progress({'completed_dates':start+len(selected),'total_dates':len(days),**metrics})
     for name in outputs:
         for kind,(_,dtype) in kinds.items():
             value=arrays[name+'::'+kind]
-            manifest['buffers'][name+'::'+kind],arrays[name+'::'+kind]=seal_feature_buffer(root,value,dtype=dtype,shape=shape)
+            manifest['buffers'][name+'::'+kind],arrays[name+'::'+kind]=seal_feature_buffer(root,value,dtype=dtype,shape=shape,retain_staging=True)
     manifest.setdefault('daily_fields',{}).update({n:{'domain':DOMAIN,'dtype':'float64','unit':unit} for n in outputs})
     manifest.setdefault('financial_materializations',{}).update(declarations)
     manifest.setdefault('daily_extensions',[]).append({'fields':list(outputs),'chunks':chunks})
@@ -250,5 +256,5 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
         profile=merged
     manifest['source_profiles'][DOMAIN]=profile
     validate_financial_materializations(manifest)
-    manifest.pop('source_ref');manifest=seal(manifest,'source_ref');write_json(root/'source.json',manifest)
+    manifest.pop('source_ref');manifest=seal(manifest,'source_ref');atomic_json(root/'source.json',manifest)
     return FeatureColumnSource(manifest,arrays),metrics

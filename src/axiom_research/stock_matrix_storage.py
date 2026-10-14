@@ -14,10 +14,18 @@ def _verify_written(path, expected, marks=None):
     return _engine_verify_written(path, expected, marks, _file_hasher=file_digest)
 
 def write_buffer(root, values, *, dtype, shape, _verified_marks=None):
+    from .feature_input_evidence import check_input_disk
+    check_input_disk(root, shape_size(list(shape))*DTYPES[dtype][1])
     return _write_buffer(root, values, dtype=dtype, shape=shape,
         _verified_marks=_verified_marks, _file_hasher=file_digest)
 
 def write_part(root, value, ref_key, *, _verified_marks=None):
+    from .feature_input_evidence import compact_reader_evidence, check_input_disk
+    import json
+    check_input_disk(root)
+    if ref_key=='evidence_ref' and value.get('contract_version')=='reader_column_evidence_v1':
+        value=compact_reader_evidence(root,value)
+    check_input_disk(root,len(json.dumps(value,ensure_ascii=False,separators=(',',':')).encode())+1)
     return _write_part(root, value, ref_key, _verified_marks=_verified_marks, _file_hasher=file_digest)
 
 

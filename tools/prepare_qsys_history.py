@@ -12,6 +12,8 @@ from collections import defaultdict
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--config',type=Path,required=True)
     args=parser.parse_args();cfg=json.loads(args.config.read_text());root=Path(cfg['destination']);root.mkdir(parents=True,exist_ok=True)
+    from axiom_research.feature_input_evidence import configure_input_disk_reserve
+    configure_input_disk_reserve(cfg.get('minimum_free_bytes',15*1024**3))
     from axiom_data import Data
     from axiom_data.storage import LocalStore
     from axiom_data.stock_input_sources import stock_input_source_spec, NORMALIZER
@@ -146,7 +148,8 @@ def main():
         if path.exists():source=load_source(path);continue
         progress('daily_inputs',domain=domain)
         source,_=extend_feature_column_source(data,source=source,daily_fields={k:v for k,v in daily.items() if v['domain']==domain},
-            destination=path.parent,block_sessions=2,maximum_added_bytes=8*1024**3)
+            destination=path.parent,block_sessions=2,maximum_added_bytes=8*1024**3,
+            progress=lambda p:progress('daily_inputs',domain=domain,detail=p))
     # One public subset per financial bundle provides durable input checkpoints.
     from axiom_data import EventQuery
     from axiom_research.financial_feature_columns import extend_financial_feature_source
@@ -160,13 +163,15 @@ def main():
             outputs[-1]+'T20:30:00+08:00','best_effort_vendor_v1','report_period',filters)
         source,_=extend_financial_feature_source(data,source=source,query=query,field=bundle['field'],outputs=bundle['outputs'],unit=bundle['unit'],
             destination=path.parent,event_snapshot=base,session_timezone=bundle['session_timezone'],block_sessions=2,
-            maximum_added_bytes=2*1024**3,maximum_event_cache_bytes=64*1024**2)
+            maximum_added_bytes=2*1024**3,maximum_event_cache_bytes=64*1024**2,
+            progress=lambda p:progress('financial_inputs',bundle=key,detail=p))
     from axiom_research.benchmark_feature_columns import extend_benchmark_feature_source
     from axiom_research.industry_feature_columns import extend_industry_feature_source
     for kind,fn,kw in [('benchmark',extend_benchmark_feature_source,{'benchmark_security_id':cfg['benchmark_security_id']}),('industry',extend_industry_feature_source,{})]:
         path=root/'inputs'/kind/'source.json'
         if path.exists():source=load_source(path);continue
-        progress(kind+'_inputs');source,_=fn(data,source=source,snapshot=base,destination=path.parent,block_sessions=2,maximum_added_bytes=512*1024**2,**kw)
+        progress(kind+'_inputs');source,_=fn(data,source=source,snapshot=base,destination=path.parent,block_sessions=2,maximum_added_bytes=512*1024**2,
+            progress=lambda p:progress(kind+'_inputs',detail=p),**kw)
     source_path=root/'inputs/industry/source.json';del source;data.clear_cache()
     # Existing private cache can be safely imported as immutable objects. Any
     # differing reference cohort or dependency identity is recomputed by ensure.

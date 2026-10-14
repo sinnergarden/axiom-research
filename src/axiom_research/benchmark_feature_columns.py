@@ -10,7 +10,7 @@ from .stock_feature_columns import FeatureColumnSource, REASONS
 
 def extend_benchmark_feature_source(data, *, source, snapshot, benchmark_security_id,
                                     destination, block_sessions=20,
-                                    maximum_added_bytes=512*1024**2):
+                                    maximum_added_bytes=512*1024**2, progress=None):
     """Read one benchmark observation per session, then broadcast to stock rows.
 
     No implicit index, stock-to-index alias, forward fill, or price adjustment.
@@ -33,9 +33,14 @@ def extend_benchmark_feature_source(data, *, source, snapshot, benchmark_securit
     kinds={'values':('<f8','float64_le'),'original_values':('<f8','float64_le'),
            'validity':(bool,'bool_u8'),'available':('<i8','int64_le'),
            'available_validity':(bool,'bool_u8'),'reasons':('u1','uint8')}
-    for kind,(dtype,_) in kinds.items():arrays[field+'::'+kind]=allocate_feature_buffer(root,dtype=dtype,shape=shape)
-    chunks=[];calls=0
-    for start in range(0,len(days),block_sessions):
+    from .feature_input_checkpoint import extension_checkpoint, atomic_json
+    from .feature_input_evidence import check_input_disk
+    staging,arrays=extension_checkpoint(root,source=source,fields=[field],kinds=kinds,sessions=days,
+        block_sessions=block_sessions,binding={'snapshot':snapshot,'benchmark_security_id':benchmark_security_id},
+        metrics={'data_read_calls':0,'added_fields':1,'existing_field_reads':0})
+    chunks=list(staging.state['chunks']);calls=staging.state['metrics']['data_read_calls']
+    for start in range(staging.state['completed_dates'],len(days),block_sessions):
+        check_input_disk(root,min(block_sessions,len(days)-start)*sum(a.shape[1]*a.dtype.itemsize for a in staging.arrays.values()))
         selected=days[start:start+block_sessions]
         query=QuerySpec('benchmark_daily',('close',),(benchmark_security_id,),tuple(selected),
                         spec['pit_policy'],{d:spec['cutoff_by_session'][d] for d in selected})
@@ -62,14 +67,17 @@ def extend_benchmark_feature_source(data, *, source, snapshot, benchmark_securit
             'field_meta':{field:{'dtype':'float64','unit':'index points','by_key':evidence}},
             'fields':[field],'sessions':selected},'evidence_ref')
         chunks.append({'sessions':selected,'evidence':[write_part(root,child,'evidence_ref')]})
+        metrics={'data_read_calls':calls,'added_fields':1,'existing_field_reads':0}
+        staging.commit(start+len(selected),chunks,metrics)
+        if progress is not None: progress({'completed_dates':start+len(selected),'total_dates':len(days),**metrics})
     for kind,(_,dtype) in kinds.items():
         value=arrays[field+'::'+kind]
-        manifest['buffers'][field+'::'+kind],arrays[field+'::'+kind]=seal_feature_buffer(root,value,dtype=dtype,shape=shape)
+        manifest['buffers'][field+'::'+kind],arrays[field+'::'+kind]=seal_feature_buffer(root,value,dtype=dtype,shape=shape,retain_staging=True)
     manifest.setdefault('daily_fields',{})[field]={'domain':domain,'dtype':'float64','unit':'index points'}
     manifest['source_profiles'][domain]={'contract':{'contract_id':'research.benchmark_broadcast.v1',
         'logical_key':['security_id','session'],'fields':{field:{'dtype':'float64','unit':'index points'}}},
         'source_profile':{'id':'research.benchmark_broadcast.v1','benchmark_security_id':benchmark_security_id,
             'projection':'same_session_broadcast_v1','native_contract':native['contract'],'native_profile':native['source_profile']}}
     manifest.setdefault('daily_extensions',[]).append({'fields':[field],'chunks':chunks})
-    manifest.pop('source_ref');manifest=seal(manifest,'source_ref');write_json(root/'source.json',manifest)
+    manifest.pop('source_ref');manifest=seal(manifest,'source_ref');atomic_json(root/'source.json',manifest)
     return FeatureColumnSource(manifest,arrays),{'data_read_calls':calls,'added_fields':1,'existing_field_reads':0}

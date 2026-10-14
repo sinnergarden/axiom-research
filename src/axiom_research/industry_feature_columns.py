@@ -11,7 +11,7 @@ from .feature_input_buffers import allocate_feature_buffer, seal_feature_buffer
 
 
 def extend_industry_feature_source(data, *, source, snapshot, destination,
-                                   block_sessions=5, maximum_added_bytes=512*1024**2):
+                                   block_sessions=5, maximum_added_bytes=512*1024**2, progress=None):
     """Bind L1 by [in_date,out_date); missing/conflicting dates stay unknown.
 
     Dates are supplier effective-date assumptions, NOT publication timestamps.
@@ -38,15 +38,19 @@ def extend_industry_feature_source(data, *, source, snapshot, destination,
     kinds={'values':('<f8','float64_le'),'original_values':('<f8','float64_le'),
            'validity':(bool,'bool_u8'),'available':('<i8','int64_le'),
            'available_validity':(bool,'bool_u8'),'reasons':('u1','uint8')}
-    for kind,(dtype,_) in kinds.items():arrays[field+'::'+kind]=allocate_feature_buffer(root,dtype=dtype,shape=shape)
     profile={'id':'research.sw_l1_intervals.v1','policy':native['qualification'],
              'boundary':'in_date inclusive, out_date exclusive; supplier-boundary assumption',
              'taxonomy':'supplier-returned L1; historical taxonomy vintage not certified',
              'clock':'effective_from local midnight assumption; NOT publication PIT',
              'snapshot_id':snapshot,'native':native['domain'],'unknown':'missing or conflicting dated L1 interval',
              'numeric_code':'digits of native L1 .SI code; categorical, never ordinal'}
-    chunks=[];counts=Counter()
-    for start in range(0,len(days),block_sessions):
+    from .feature_input_checkpoint import extension_checkpoint, atomic_json
+    from .feature_input_evidence import check_input_disk
+    staging,arrays=extension_checkpoint(root,source=source,fields=[field],kinds=kinds,sessions=days,
+        block_sessions=block_sessions,binding={'snapshot':snapshot,'profile':profile},metrics={'coverage':{}})
+    chunks=list(staging.state['chunks']);counts=Counter(staging.state['metrics']['coverage'])
+    for start in range(staging.state['completed_dates'],len(days),block_sessions):
+        check_input_disk(root,min(block_sessions,len(days)-start)*sum(a.shape[1]*a.dtype.itemsize for a in staging.arrays.values()))
         selected=days[start:start+block_sessions];evidence=[]
         for offset,day in enumerate(selected):
             for j,security in enumerate(symbols):
@@ -68,11 +72,13 @@ def extend_industry_feature_source(data, *, source, snapshot, destination,
             'context':{'domain':domain,'snapshot_id':snapshot,'projection':profile},
             'field_meta':{field:{'dtype':'float64','unit':'dimensionless','by_key':evidence}},'fields':[field],'sessions':selected},'evidence_ref')
         chunks.append({'sessions':selected,'evidence':[write_part(root,child,'evidence_ref')]})
+        staging.commit(start+len(selected),chunks,{'coverage':dict(counts)})
+        if progress is not None: progress({'completed_dates':start+len(selected),'total_dates':len(days),'coverage':dict(counts)})
     for kind,(_,dtype) in kinds.items():
-        manifest['buffers'][field+'::'+kind],arrays[field+'::'+kind]=seal_feature_buffer(root,arrays[field+'::'+kind],dtype=dtype,shape=shape)
+        manifest['buffers'][field+'::'+kind],arrays[field+'::'+kind]=seal_feature_buffer(root,arrays[field+'::'+kind],dtype=dtype,shape=shape,retain_staging=True)
     manifest.setdefault('daily_fields',{})[field]={'domain':domain,'dtype':'float64','unit':'dimensionless'}
     manifest['source_profiles'][domain]={'contract':{'contract_id':'research.sw_l1_intervals.v1','logical_key':['security_id','session'],
         'fields':{field:{'dtype':'float64','unit':'dimensionless'}}},'source_profile':profile}
     manifest.setdefault('daily_extensions',[]).append({'fields':[field],'chunks':chunks})
-    manifest.pop('source_ref');manifest=seal(manifest,'source_ref');write_json(root/'source.json',manifest)
+    manifest.pop('source_ref');manifest=seal(manifest,'source_ref');atomic_json(root/'source.json',manifest)
     return FeatureColumnSource(manifest,arrays),{'added_fields':1,'interval_rows':len(native['records']),'coverage':dict(counts),'invalid_intervals':dict(invalid),'publication_pit':False}

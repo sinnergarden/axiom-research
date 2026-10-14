@@ -15,6 +15,8 @@ from .stock_fold_inputs import require, seal
 
 
 def atomic_json(path, value):
+    from .feature_input_evidence import check_input_disk
+    check_input_disk(Path(path).parent,len(json.dumps(value).encode())+1)
     path=Path(path); temporary=path.with_name(path.name+'.tmp')
     with temporary.open('w') as stream:
         json.dump(value,stream,sort_keys=True,separators=(',',':'),allow_nan=False)
@@ -55,6 +57,10 @@ class FeatureInputCheckpoint:
                 for evidence in chunk['evidence']:
                     path=Path(evidence['path'])
                     require(path.is_file() and file_digest(path)==evidence['file_digest'],'input checkpoint evidence missing/changed')
+                    from .feature_input_evidence import shared_evidence_descriptors
+                    for item in shared_evidence_descriptors(json.loads(path.read_text())):
+                        proof=Path(item['buffer']['path'])
+                        require(proof.is_file() and not proof.is_symlink() and file_digest(proof)==item['buffer']['file_digest'],'checkpoint shared evidence missing/changed')
             self.state={k:v for k,v in state.items() if k!='checkpoint_ref'}
         else:
             self.arrays={name:allocate_feature_buffer(self.root,dtype=item['dtype'],shape=tuple(item['shape']))
@@ -65,16 +71,37 @@ class FeatureInputCheckpoint:
             self.commit(0,[],metrics)
 
     def commit(self, completed, chunks, metrics):
+        from .feature_input_evidence import check_input_disk
+        check_input_disk(self.root)
         # The receipt is durable only after all numeric writes and evidence files.
         for array in self.arrays.values():
             array.flush()
             with open(array.filename,'rb') as stream: os.fsync(stream.fileno())
+        from .feature_input_evidence import shared_evidence_descriptors
+        synced=set()
         for chunk in chunks[len(self.state['chunks']):]:
             for item in chunk['evidence']:
                 with open(item['path'],'rb') as stream: os.fsync(stream.fileno())
+                for proof in shared_evidence_descriptors(json.loads(Path(item['path']).read_text())):
+                    path=proof['buffer']['path']
+                    if path not in synced:
+                        with open(path,'rb') as stream: os.fsync(stream.fileno())
+                        synced.add(path)
         blocks=list(self.state['buffer_blocks']); start=self.state['completed_dates']
         if completed>start:
             blocks.append({'start':start,'stop':completed,'digests':{name:
                 sha256(memoryview(array[start:completed]).cast('B')).hexdigest() for name,array in self.arrays.items()}})
         self.state={**self.state,'completed_dates':completed,'chunks':list(chunks),'buffer_blocks':blocks,'metrics':dict(metrics)}
         atomic_json(self.path,seal(self.state,'checkpoint_ref'))
+
+
+def extension_checkpoint(root, *, source, fields, kinds, sessions, block_sessions, binding, metrics):
+    """Reuse the physical producer's existing committed-prefix receipt for extensions."""
+    import numpy as np
+    layout={field+'::'+kind:{'dtype':np.dtype(dtype).str,
+            'shape':[len(sessions),len(source.manifest['spec']['universe'])]}
+            for field in fields for kind,(dtype,_) in kinds.items()}
+    checkpoint=FeatureInputCheckpoint(root,binding={'source_ref':source.identity,'extension':binding,
+        'block_sessions':block_sessions,'evidence_encoding':'reader_column_evidence_v2'},
+        layout=layout,sessions=sessions,metrics=metrics)
+    return checkpoint,{**source.arrays,**checkpoint.arrays}
