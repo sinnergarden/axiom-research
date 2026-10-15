@@ -16,9 +16,32 @@ from .stock_fold_inputs import require, seal
 from .stock_matrix_storage import instant_us, write_buffer, write_part
 
 POLICY = 'latest_visible_report_strict_before_local_session_v1'
+QUARTER_POLICY = 'latest_visible_calendar_quarter_strict_before_local_session_v2'
 DOMAIN = 'materialized_financial_events'
 FORECAST_POLICY='latest_visible_announcement_then_report_period_v1'
 FORECAST_CODES={'预增':1,'略增':2,'扭亏':3,'续盈':4,'预减':5,'略减':6,'首亏':7,'续亏':8}
+
+
+def _quarter_projection(batch, event_rows, tokens, day):
+    """Project already PIT-selected revisions; never select an older nonnull value.
+
+    Native observations remain intact. Quarter anchors, formula inputs and
+    dependency tokens share this exact eligible set, including missing fields.
+    """
+    from axiom_data import DataBatch
+    rows=[r for r in event_rows if r['report_period']<=day and
+          r['report_period'][5:] in ('03-31','06-30','09-30','12-31')]
+    keys=batch.context['logical_key']
+    wanted={tuple(str(r[k]) for k in keys) for r in rows}
+    if len(rows)==len(event_rows):
+        frame=batch.frame;meta=batch.field_meta
+    else:
+        mask=[tuple(str(r[k]) for k in keys) in wanted for r in event_rows]
+        frame=batch.frame.loc[mask]
+        meta={field:{**value,'by_key':[r for r in value['by_key']
+              if tuple(str(r[k]) for k in keys) in wanted]} for field,value in batch.field_meta.items()}
+    selected_tokens={s:{k:v for k,v in values.items() if k in wanted} for s,values in tokens.items()}
+    return DataBatch(frame,meta,{**batch.context,'financial_selection':QUARTER_POLICY}),rows,selected_tokens
 
 
 def _period_back(period, quarters):
@@ -112,7 +135,7 @@ def _memoized_results(batch,event_rows,tokens,targets_by_name,outputs,field,quer
             # Owner fixes field, profile, basis, unit, stream, policy and recipe
             # version. Tokens include selected revision values/status/provenance
             # and availability; missing periods are explicit, never numeric equality.
-            key=(recipe,security,period,tuple((p,identities.get((security,p),('MISSING',)))
+            key=(batch.context.get('financial_selection',POLICY),recipe,security,period,tuple((p,identities.get((security,p),('MISSING',)))
                                             for p in _dependencies(period,recipe)))
             cached=memo.get(key)
             if cached is None:missing[(security,period)]=key
@@ -158,14 +181,14 @@ def validate_financial_materializations(manifest, child=None):
                 set(coverage)<=set(manifest['spec']['universe']),'financial coverage must be explicit sorted source subset')
         require(type(spec.get('event_snapshot')) is str and spec['event_snapshot'] not in ('','current','latest'),
                 'financial Snapshot must be pinned')
-        require(field in manifest.get('daily_fields',{}) and spec['selection'] in (POLICY,FORECAST_POLICY) and
+        require(field in manifest.get('daily_fields',{}) and spec['selection'] in (POLICY,QUARTER_POLICY,FORECAST_POLICY) and
                 _projection_valid(spec) and (spec['derivation'] in ('reported','report_observation','report_announcement_ordinal','forecast_category_code') or spec['basis']=='cumulative_ytd'), 'financial materialization declaration')
         require(manifest['daily_fields'][field]=={'domain':DOMAIN,'dtype':'float64','unit':spec['unit']},
                 'financial materialization typed leaf mismatch')
     if child is None: return
     financial = set(child['fields']) & set(declarations)
     if not financial: return
-    require(child['context'].get('domain')==DOMAIN and child['context'].get('selection') in (POLICY,FORECAST_POLICY),
+    require(child['context'].get('domain')==DOMAIN and child['context'].get('selection') in (POLICY,QUARTER_POLICY,FORECAST_POLICY),
             'financial evidence selection required')
     component_clocks={}
     for field in financial:
@@ -219,11 +242,12 @@ def _extend_financial_feature_source(data, *, source, query, field, outputs, uni
     """Append reported/TTM/single-quarter leaves without rebuilding existing columns.
 
     ``outputs`` maps leaf name to {derivation, quarters_back}. Every leaf uses
-    the latest visible current report and an explicit fiscal-quarter offset.
+    the latest visible eligible calendar-quarter report and an exact quarter offset.
+    Observation/forecast recipes retain their distinct disclosed-report semantics.
     A bounded block shares original event partitions across all daily cutoffs
     and both current/prior-year derivations. Revision selection is Data-owned.
     Missing/retracted components remain null; original statuses/revisions are
-    retained in cell evidence, with generic source_missing in the packed ABI.
+    retained through typed missing reasons and block-level source declarations.
     This version accepts the saved source's best_effort_vendor_v1 policy only.
     This writes only destination. It does not publish a Data Snapshot, fetch
     suppliers, calculate a Feature, or claim historical coverage/performance.
@@ -244,6 +268,9 @@ def _extend_financial_feature_source(data, *, source, query, field, outputs, uni
     require(type(outputs) is dict and outputs and not set(outputs)&set(source.physical_fields()),'new financial outputs required')
     for name,projection in outputs.items():
         require(name.isidentifier() and set(projection)==({'derivation','reports_back'} if projection.get('derivation') in ('report_observation','report_announcement_ordinal','forecast_category_code') else {'derivation','quarters_back'}) and _projection_valid(projection),'explicit financial output recipe required')
+    quarterly=any('quarters_back' in p for p in outputs.values())
+    require(not quarterly or all('quarters_back' in p for p in outputs.values()),'separate quarterly and observation projections required')
+    if quarterly:selection=QUARTER_POLICY
     require(event_snapshot not in ('','current','latest'),'pinned independent financial Snapshot required')
     native=event_owner.manifest['domains'][query.domain]
     actual=native['contract']['fields'][field]
@@ -290,6 +317,9 @@ def _extend_financial_feature_source(data, *, source, query, field, outputs, uni
                         instant_us(batch.context['query']['cutoff'])==instant_us(cutoffs[offset]),'financial selected batch binding')
                 derive_started=time.monotonic()
                 event_rows=event_owner.selected_records
+                selected_tokens=event_owner.selected_tokens
+                if quarterly:
+                    batch,event_rows,selected_tokens=_quarter_projection(batch,event_rows,selected_tokens,day)
                 latest={}
                 for row in event_rows:
                     require(row['security_id'] in subset and ('endpoint' not in query.filters or row.get('endpoint')==query.filters['endpoint']) and
@@ -313,7 +343,7 @@ def _extend_financial_feature_source(data, *, source, query, field, outputs, uni
                         targets_by_name[name]={s:periods[-1-offset_back] for s,periods in visible_periods.items() if len(periods)>offset_back}
                     else:
                         targets_by_name[name]={s:_period_back(p,projection['quarters_back']) for s,p in latest.items()}
-                derived_by_recipe=_memoized_results(batch,event_rows,event_owner.selected_tokens,
+                derived_by_recipe=_memoized_results(batch,event_rows,selected_tokens,
                     targets_by_name,outputs,field,query,unit,memo)
                 metrics['derive_seconds']+=time.monotonic()-derive_started
                 evidence_started=time.monotonic()

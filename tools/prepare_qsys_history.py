@@ -133,6 +133,10 @@ def run(cfg, *, observer=None):
             destination=reuse_path.parent,event_cache_bytes=cfg.get('event_cache_bytes',64*1024**2),
             progress=lambda detail:progress('input_reuse',detail=detail))
     source_path=reuse_path
+    from axiom_research.financial_feature_columns import QUARTER_POLICY
+    if any('quarters_back' in d and d['selection']!=QUARTER_POLICY
+           for d in source.manifest.get('financial_materializations',{}).values()):
+        raise ValueError('old quarterly inputs require preparation under the current quarter selection rule')
     atomic_json(root/'input-reuse.json',reuse_metrics)
     # Stage receipts bind both request and parent source. A path alone is never
     # evidence that the current request or newly requested fields are complete.
@@ -171,6 +175,8 @@ def run(cfg, *, observer=None):
     for key,bundle in requirements['financial_fields'].items():
         fields={k:v for k,v in bundle['outputs'].items() if k not in source.physical_fields()}
         if not fields:continue
+        if any('quarters_back' in p for p in fields.values()) and bundle.get('selection')!=QUARTER_POLICY:
+            raise ValueError('quarter input declaration differs from producer selection rule')
         path=root/'inputs'/key/'source.json';binding={'request':request_ref,'parent':source.identity,'bundle':bundle,'snapshot':base}
         cached=resume(path,binding)
         if cached is not None:source=cached;source_path=path;continue

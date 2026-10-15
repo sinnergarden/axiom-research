@@ -135,3 +135,9 @@ for _field,_leaf,_unit,_derivation in (
     CORE_INPUT_CONTRACTS[_leaf]={'domain':'forecast_events','dtype':'float64','unit':_unit}
 
 CORE_INPUT_CONTRACTS['industry_code']={'domain':'industry_membership_events','dtype':'float64','unit':'dimensionless'}
+
+# These leaves are quarterly observations, including reported direct values.
+# Keep disclosure-observation recipes outside this eligibility rule.
+for _contract in FINANCIAL_FIELD_CONTRACTS.values():
+    if any('quarters_back' in p for p in _contract['outputs'].values()):
+        _contract['selection']='latest_visible_calendar_quarter_strict_before_local_session_v2'

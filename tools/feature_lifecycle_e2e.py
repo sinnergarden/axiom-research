@@ -39,12 +39,35 @@ def _performance_acceptance(cfg,run):
     counts=defaultdict(int);recent=defaultdict(list);phase={};validation_seconds=0.0
     original_iter=EventReadOwner.iter_cutoffs
     original_memo=financial._memoized_results
+    original_projection=financial._quarter_projection
     original_compact=evidence.compact_reader_evidence
     original_materialize=evidence.materialize_evidence_rows
     original_receipt=evidence.input_block_receipt
     def compare(left,right):
         assert left.frame.equals(right.frame)
         assert left.field_meta==right.field_meta and left.context==right.context
+    def projection(batch,rows,tokens,day):
+        nonlocal validation_seconds
+        projected,eligible,selected_tokens=original_projection(batch,rows,tokens,day)
+        security='cnstock.003040.SZ.20210322'
+        if batch.context['domain']=='financial_events' and 'revenue' in batch.field_meta and security in tokens and day in ('2017-07-03','2017-07-04'):
+            started=time.monotonic()
+            original=[r for r in rows if r['security_id']==security]
+            irregular=[r for r in original if r['report_period']=='2017-01-31']
+            if day=='2017-07-03':
+                assert not irregular
+                counts['nonquarter_case_before_visibility']+=1
+            else:
+                assert len(irregular)==1 and irregular[0]['revenue']==81660000.0
+                kept=[r for r in eligible if r['security_id']==security]
+                anchor=max(r['report_period'] for r in kept)
+                assert anchor=='2016-12-31'
+                assert next(r for r in kept if r['report_period']==anchor)['revenue']==1163950000.0
+                assert all(r['report_period']!='2017-01-31' for r in projected.field_meta['revenue']['by_key'] if r['security_id']==security)
+                assert all('2017-01-31' not in key for key in selected_tokens[security])
+                counts['nonquarter_case_eligible_anchor']+=1
+            validation_seconds+=time.monotonic()-started
+        return projected,eligible,selected_tokens
     def cutoffs(owner,*,query,cutoffs,_borrow_context=False):
         nonlocal validation_seconds
         identity=(query.domain,query.fields)
@@ -106,6 +129,21 @@ def _performance_acceptance(cfg,run):
             assert original_memo(batch,event_rows,tokens,targets_by_name,outputs,field,query,unit,owner)==result
             assert owner.metrics['hits']>before or not any(result.values())
             counts['memo_hit_comparisons']+=1
+            if counts['missing_quarter_control']==0:
+                for recipe,values in result.items():
+                    if recipe!='ttm' or not values:continue
+                    pair=next((pair for pair in values if any(r['security_id']==pair[0] and r['report_period']==pair[1] for r in event_rows)),None)
+                    if pair is None:continue
+                    security,period=pair
+                    keep=(batch.frame['security_id']==security)&(batch.frame['report_period']!=period)
+                    missing=DataBatch(batch.frame.loc[keep],
+                        {field:{**batch.field_meta[field],'by_key':[r for r in batch.field_meta[field]['by_key'] if r['security_id']==security and r['report_period']!=period]}},
+                        {**batch.context,'query':{**batch.context['query'],'symbols':[security]}})
+                    control=ttm(missing,field=field,endpoint=query.filters['endpoint'],report_type=query.filters['report_type'],basis='cumulative_ytd',unit=unit,periods=[period],_borrow_context=True)
+                    proof=control.field_meta[field]['by_key'][0]
+                    assert proof['status']=='source_missing' and proof['missing_reason']=='missing_quarter'
+                    counts['missing_quarter_control']+=1
+                    break
             if counts['same_value_revision_invalidation']==0:
                 from copy import deepcopy
                 for name,targets in targets_by_name.items():
@@ -156,17 +194,20 @@ def _performance_acceptance(cfg,run):
         if detail.get('completed_dates',0)>=8:
             recent[bundle].append(detail['last_block_seconds']*2/cfg.get('input_block_sessions',2))
             recent[bundle]=recent[bundle][-3:]
-            if len(recent[bundle])==3 and sum(recent[bundle])/3>=cfg['maximum_financial_block_seconds']:
+            if cfg.get('maximum_financial_block_seconds') is not None and len(recent[bundle])==3 and sum(recent[bundle])/3>=cfg['maximum_financial_block_seconds']:
                 raise RuntimeError('FINANCIAL_THROUGHPUT_STOP: three two-session blocks exceed declared threshold')
     EventReadOwner.iter_cutoffs=cutoffs;financial._memoized_results=memo;evidence.compact_reader_evidence=forbidden_proof
+    financial._quarter_projection=projection
     evidence.materialize_evidence_rows=forbidden_proof;evidence.input_block_receipt=receipt
     try:
         result=run(cfg,observer=observe)
         assert counts['real_revision_boundary_cutoffs']>0 and counts['financial_reference_cells']>0
         assert counts['same_value_revision_invalidation']==1 and counts['block_receipts']>0 and counts['legacy_proof_calls']==0
+        assert counts['nonquarter_case_before_visibility']>0 and counts['nonquarter_case_eligible_anchor']>0 and counts['missing_quarter_control']==1
         return result,{'checks':{str(k):v for k,v in counts.items()},'validation_seconds':validation_seconds,'financial_phases':phase}
     finally:
         EventReadOwner.iter_cutoffs=original_iter;financial._memoized_results=original_memo;evidence.compact_reader_evidence=original_compact
+        financial._quarter_projection=original_projection
         evidence.materialize_evidence_rows=original_materialize;evidence.input_block_receipt=original_receipt
         Path(cfg['destination'],'performance-validation.json').write_text(json.dumps({
             'checks':{str(k):v for k,v in counts.items()},'validation_seconds':validation_seconds,
@@ -306,6 +347,7 @@ def main():
         receipt={'status':'FAIL','error':type(exc).__name__,'message':str(exc),
                  'traceback':traceback.format_exc(),'elapsed_seconds':time.monotonic()-started,
                  'peak_rss_bytes':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+                 'footprint':footprint(root),
                  'retry_performed':False}
         (root/'e2e-result.json').write_text(json.dumps(receipt,indent=2))
         print(json.dumps(receipt),flush=True)
