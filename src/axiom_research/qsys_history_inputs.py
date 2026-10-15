@@ -127,6 +127,9 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
     from .feature_input_checkpoint import atomic_json
     root=Path(destination);root.mkdir(parents=True,exist_ok=True)
     old=source.manifest['spec'];days=spec['read_sessions'];symbols=spec['universe']
+    from .stock_feature_inputs import _spec
+    universe_id=_spec(spec)
+    require(_spec(old)==universe_id,'existing membership universe differs from request')
     require(old['pit_policy']==spec['pit_policy'] and all(
         old['cutoff_by_session'][d]==spec['cutoff_by_session'][d] for d in set(days)&set(old['read_sessions'])),
         'existing input policy/cutoffs differ from request')
@@ -207,10 +210,20 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
         for domain,fields in groups:
             definitions={};bindings={}
             for field in fields:
-                definitions[field]=manifest['source_profiles'][domain]['contract']['fields'][field]
+                profile=manifest['source_profiles'][domain]
+                if domain=='universe_membership' and field=='is_member':
+                    # Data Reader projects dated membership for the requested
+                    # universe; is_member is not a native contract field.
+                    definitions[field]={'dtype':'bool','unit':None}
+                    field_profile={'native_profile':profile,
+                        'projection':{'domain':domain,'fields':['is_member'],
+                                      'universe_id':universe_id}}
+                else:
+                    definitions[field]=profile['contract']['fields'][field]
+                    field_profile=SavedColumnFeatureSource._field_profile(profile,field)
                 bindings[field]=digest({'contract':'imported_local_input_v1',
                     'source_snapshot':old['snapshot'],'field':field,'policy':old['pit_policy'],
-                    'profile':SavedColumnFeatureSource._field_profile(manifest['source_profiles'][domain],field)})
+                    'profile':field_profile})
             group_metadata.append((definitions,bindings))
         for start in range(0,len(days),32):
             selected=days[start:start+32];proofs=[]
