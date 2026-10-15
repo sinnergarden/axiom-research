@@ -48,7 +48,6 @@ def extend_benchmark_feature_source(data, *, source, snapshot, benchmark_securit
         records={r['session']:r for r in batch.frame.to_dict('records')}
         metas={r['session']:r for r in batch.field_meta['close']['by_key']}
         require(len(records)==len(selected) and set(records)==set(metas)==set(selected),'one benchmark row per session required')
-        evidence=[]
         for i,day in enumerate(selected):
             row=records[day];meta=metas[day]
             require(row['security_id']==meta['security_id']==benchmark_security_id,'benchmark identity mismatch')
@@ -60,12 +59,10 @@ def extend_benchmark_feature_source(data, *, source, snapshot, benchmark_securit
             payload={'values':value,'original_values':value,'validity':valid,'available':clock,
                      'available_validity':bool(clock),'reasons':REASONS.index(meta.get('missing_reason'))}
             for kind,value in payload.items():arrays[field+'::'+kind][start+i,:]=value
-            evidence.extend({**deepcopy(meta),'security_id':s,'benchmark_security_id':benchmark_security_id} for s in symbols)
-        child=seal({'contract_version':'reader_column_evidence_v1',
-            'context':{'domain':domain,'snapshot_id':snapshot,'benchmark_security_id':benchmark_security_id,
-                       'native_context':batch.context,'projection':'same_session_broadcast_v1'},
-            'field_meta':{field:{'dtype':'float64','unit':'index points','by_key':evidence}},
-            'fields':[field],'sessions':selected},'evidence_ref')
+        from .feature_input_evidence import input_block_receipt
+        child=input_block_receipt(spec=spec,sessions=selected,fields=[field],
+            context={'domain':domain,'snapshot_id':snapshot,'benchmark_security_id':benchmark_security_id},
+            definitions={field:{'dtype':'float64','unit':'index points'}})
         chunks.append({'sessions':selected,'evidence':[write_part(root,child,'evidence_ref')]})
         metrics={'data_read_calls':calls,'added_fields':1,'existing_field_reads':0}
         staging.commit(start+len(selected),chunks,metrics)

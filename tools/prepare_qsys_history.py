@@ -210,7 +210,7 @@ def run(cfg, *, observer=None):
     library=FeatureLibrary(root/'library',maximum_working_bytes=cfg.get('working_bytes',2*1024**3),
                            maximum_source_bytes=cfg.get('maximum_source_bytes',256*1024**3))
     views=[]
-    with SavedColumnFeatureSource(source_descriptor(source_path),maximum_source_bytes=cfg.get('maximum_source_bytes',256*1024**3),
+    with library.execution_session(), SavedColumnFeatureSource(source_descriptor(source_path),maximum_source_bytes=cfg.get('maximum_source_bytes',256*1024**3),
                                  maximum_working_bytes=cfg.get('working_bytes',2*1024**3)) as admitted:
         owner=CatalogFeatureLibrary(library,admitted,catalog)
         block=cfg.get('output_block_sessions',5)
@@ -237,7 +237,7 @@ def run(cfg, *, observer=None):
         'dates':len(outputs),'bounds':[outputs[0],outputs[-1]],'columns':len(selection),'securities':len(spec['universe']),
         'read_dates':len(spec['read_sessions']),'warmup':max(f['lookback'] for f in catalog.select(selection))-1,
         'feature_view':full,'training_view':training,'source':source_descriptor(source_path),
-        'timings':timings,'elapsed_seconds':time.monotonic()-started,'input_reuse':reuse_metrics,
+        'coverage_owner_metrics':dict(library.coverage_metrics),'timings':timings,'elapsed_seconds':time.monotonic()-started,'input_reuse':reuse_metrics,
         'supplier_calls':0,'training_calls':0,'industry_policy':'sw_supplier_intervals_best_effort_v1',
         'capacity_target_bytes':200_000_000_000,'capacity_target_verified':False,'full_history_12h_verified':False}
     atomic_json(root/'result.json',result)

@@ -49,9 +49,11 @@ def extend_industry_feature_source(data, *, source, snapshot, destination,
     staging,arrays=extension_checkpoint(root,source=source,fields=[field],kinds=kinds,sessions=days,
         block_sessions=block_sessions,binding={'snapshot':snapshot,'profile':profile},metrics={'coverage':{}})
     chunks=list(staging.state['chunks']);counts=Counter(staging.state['metrics']['coverage'])
+    reason_codes=list(manifest['reason_codes'])
+    if len(reason_codes)<len(REASONS):reason_codes.extend(REASONS[len(reason_codes):])
     for start in range(staging.state['completed_dates'],len(days),block_sessions):
         check_input_disk(root,min(block_sessions,len(days)-start)*sum(a.shape[1]*a.dtype.itemsize for a in staging.arrays.values()))
-        selected=days[start:start+block_sessions];evidence=[]
+        selected=days[start:start+block_sessions]
         for offset,day in enumerate(selected):
             for j,security in enumerate(symbols):
                 candidates=[r for begin,end,code,r in intervals[security] if begin<=day and (not end or day<end)]
@@ -62,20 +64,19 @@ def extend_industry_feature_source(data, *, source, snapshot, destination,
                 value=float(next(iter(codes))[:-3]) if valid else 0.
                 clock=max((instant_us(r['effective_from']+'T00:00:00+08:00') for r in candidates),default=0)
                 require(not clock or clock<=instant_us(spec['cutoff_by_session'][day]),'future industry interval')
-                payload={'values':value,'original_values':value,'validity':valid,'available':clock,'available_validity':bool(clock),'reasons':REASONS.index(reason)}
+                payload={'values':value,'original_values':value,'validity':valid,'available':clock,'available_validity':bool(clock),'reasons':reason_codes.index(None if valid else detail)}
                 for kind,v in payload.items():arrays[field+'::'+kind][start+offset,j]=v
-                evidence.append({'security_id':security,'session':day,'missing_reason':reason,
-                    'interval_status':detail,'selected_intervals':candidates,
-                    'usable_from':max((r['effective_from'] for r in candidates),default=day)+'T00:00:00+08:00',
-                    'qualification':native['qualification']})
-        child=seal({'contract_version':'reader_column_evidence_v1',
-            'context':{'domain':domain,'snapshot_id':snapshot,'projection':profile},
-            'field_meta':{field:{'dtype':'float64','unit':'dimensionless','by_key':evidence}},'fields':[field],'sessions':selected},'evidence_ref')
+        from .feature_input_evidence import input_block_receipt
+        child=input_block_receipt(spec=spec,sessions=selected,fields=[field],
+            context={'domain':domain,'snapshot_id':snapshot,'qualification':native['qualification']},
+            definitions={field:{'dtype':'float64','unit':'dimensionless'}},
+            bindings={field:digest(profile)})
         chunks.append({'sessions':selected,'evidence':[write_part(root,child,'evidence_ref')]})
         staging.commit(start+len(selected),chunks,{'coverage':dict(counts)})
         if progress is not None: progress({'completed_dates':start+len(selected),'total_dates':len(days),'coverage':dict(counts)})
     for kind,(_,dtype) in kinds.items():
         manifest['buffers'][field+'::'+kind],arrays[field+'::'+kind]=seal_feature_buffer(root,arrays[field+'::'+kind],dtype=dtype,shape=shape,retain_staging=True)
+    manifest['reason_codes']=reason_codes
     manifest.setdefault('daily_fields',{})[field]={'domain':domain,'dtype':'float64','unit':'dimensionless'}
     manifest['source_profiles'][domain]={'contract':{'contract_id':'research.sw_l1_intervals.v1','logical_key':['security_id','session'],
         'fields':{field:{'dtype':'float64','unit':'dimensionless'}}},'source_profile':profile}

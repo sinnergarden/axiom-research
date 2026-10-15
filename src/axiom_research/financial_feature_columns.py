@@ -80,6 +80,10 @@ class _FinancialMemo:
 def _stable_result(value,meta,recipe):
     """Construct invariant components, clocks and revision digest once."""
     valid=meta['status']=='value' and value is not None
+    require((meta['status']=='value')==valid,'financial value/status mismatch')
+    require(all(c['provenance'] is None or c['provenance'].get('revision_id') and
+                c['provenance'].get('usable_from') for c in meta['components']),
+            'financial component revision/clock required')
     if valid and recipe=='report_announcement_ordinal':
         from datetime import date
         value=float(date.fromisoformat(str(value)[:10]).toordinal())
@@ -87,8 +91,10 @@ def _stable_result(value,meta,recipe):
     else:value=float(value) if valid else None
     clocks=[c['provenance']['usable_from'] for c in meta['components'] if c['provenance'] is not None]
     clock=max(clocks,key=instant_us) if clocks else None
-    bases=sorted({c['provenance']['availability_basis'] for c in meta['components'] if c['provenance'] is not None})
-    return value,valid,meta,clock,bases,digest(meta),instant_us(clock) if clock else None
+    # Provenance is checked while deriving, then discarded. The pinned source
+    # and formula declaration permit a small diagnostic recomputation.
+    summary={'status':meta['status'],'missing_reason':meta['missing_reason']}
+    return value,valid,summary,clock,instant_us(clock) if clock else None
 
 
 def _memoized_results(batch,event_rows,tokens,targets_by_name,outputs,field,query,unit,memo):
@@ -255,21 +261,23 @@ def _extend_financial_feature_source(data, *, source, query, field, outputs, uni
         'unit':unit,'selection':selection,'session_timezone':session_timezone,'recipe_version':FINANCIAL_RECIPE_VERSION,
         'report_start':query.start,'report_end':query.end,'event_snapshot':event_snapshot,
         'coverage_security_ids':list(query.symbols)} for name,projection in outputs.items()}
-    chunks=[]; metrics={'event_blocks':0,'event_cutoff_selections':0,'existing_field_reads':0,'added_fields':len(outputs)}
+    reason_codes=list(manifest['reason_codes'])
+    if len(reason_codes)<len(REASONS):reason_codes.extend(REASONS[len(reason_codes):])
+    chunks=[]; metrics={'reason_codes':reason_codes,'event_blocks':0,'event_cutoff_selections':0,'existing_field_reads':0,'added_fields':len(outputs)}
     from .feature_input_checkpoint import extension_checkpoint, atomic_json
-    from .feature_input_evidence import check_input_disk, EvidenceEncodingOwner, compact_reader_evidence
+    from .feature_input_evidence import check_input_disk, input_block_receipt
     staging,arrays=extension_checkpoint(root,source=source,fields=outputs,kinds=kinds,sessions=days,
         block_sessions=block_sessions,binding={'declarations':declarations},metrics=metrics)
     chunks=list(staging.state['chunks']);metrics=dict(staging.state['metrics'])
-    memo=_FinancialMemo();encoding=EvidenceEncodingOwner(root)
+    reason_codes=list(metrics['reason_codes']);metrics['reason_codes']=reason_codes
+    memo=_FinancialMemo()
     for metric in ('derive_seconds','evidence_seconds','encode_write_seconds','checkpoint_seconds'):
         metrics.setdefault(metric,0.0)
     empty=_stable_result(None,{'components':[],'status':'source_missing','missing_reason':'no_visible_report'},'reported')
     for start in range(staging.state['completed_dates'],len(days),block_sessions):
         check_input_disk(root,min(block_sessions,len(days)-start)*sum(a.shape[1]*a.dtype.itemsize for a in staging.arrays.values()))
         block_started=time.monotonic()
-        selected=days[start:start+block_sessions]; metadata={n:{'dtype':'float64','unit':unit,'by_key':[]} for n in outputs}
-        contexts=[]
+        selected=days[start:start+block_sessions]
         for si in range(0,len(query.symbols),256):
             subset=list(query.symbols[si:si+256])
             cutoffs=[_cutoff(d,spec['cutoff_by_session'][d],session_timezone) for d in selected]
@@ -280,7 +288,6 @@ def _extend_financial_feature_source(data, *, source, query, field, outputs, uni
                 metrics['event_cutoff_selections']+=1
                 require(batch.context['snapshot_id']==event_snapshot and
                         instant_us(batch.context['query']['cutoff'])==instant_us(cutoffs[offset]),'financial selected batch binding')
-                contexts.append(batch.context)
                 derive_started=time.monotonic()
                 event_rows=event_owner.selected_records
                 latest={}
@@ -296,6 +303,9 @@ def _extend_financial_feature_source(data, *, source, query, field, outputs, uni
                     if query.domain=='forecast_events' or record['report_period']<=day:
                         ordered[record['security_id']].append(record)
                 visible_periods={security:[r['report_period'] for r in sorted(records,key=lambda r:(r['announcement_date'],r['report_period']) if query.domain=='forecast_events' else (r['report_period'],))] for security,records in ordered.items()}
+                if any(p['derivation'] in ('report_observation','report_announcement_ordinal','forecast_category_code') for p in outputs.values()):
+                    require(all(len(periods)==len(set(periods)) for periods in visible_periods.values()),
+                            'distinct visible report periods required')
                 targets_by_name={}
                 for name,projection in outputs.items():
                     if projection['derivation'] in ('report_observation','report_announcement_ordinal','forecast_category_code'):
@@ -314,32 +324,31 @@ def _extend_financial_feature_source(data, *, source, query, field, outputs, uni
                     payload={kind:[] for kind in kinds}
                     for security in subset:
                         period=targets.get(security)
-                        value,valid,meta,component_clock,bases,revision,component_us=by.get((security,period),empty)
+                        value,valid,meta,component_clock,component_us=by.get((security,period),empty)
                         clock=component_clock or cutoffs[offset]
-                        evidence={'security_id':security,'session':day,'report_period':period,'current_report_period':latest.get(security),
-                            'selection':selection,'query_cutoff':cutoffs[offset],'status':meta['status'],
-                            'financial_missing_reason':meta['missing_reason'],'missing_reason':None if valid else 'source_missing',
-                            'usable_from':clock,'availability_basis':bases[0] if len(bases)==1 else 'derived_component_max' if bases else 'no_visible_report_at_query_cutoff',
-                            'component_availability_bases':bases,
-                            'components':meta['components'],'selected_value':value,'revision_id':revision}
-                        if projection['derivation'] in ('report_observation','report_announcement_ordinal','forecast_category_code'):evidence['visible_report_periods']=visible_periods[security]
-                        metadata[name]['by_key'].append(evidence)
+                        require(component_us is None or component_us<=instant_us(cutoffs[offset]),
+                                'future financial component')
+                        require(not valid or np.isfinite(value),'nonfinite financial input')
+                        reason=None if valid else meta['missing_reason']
+                        require(reason is None or isinstance(reason,str) and bool(reason),'invalid financial missing state')
+                        if reason not in reason_codes:reason_codes.append(reason)
+                        require(len(reason_codes)<=256,'financial reason dictionary exceeds uint8')
                         for kind,v in {'values':value if valid else 0,'original_values':value if valid else 0,
                             'validity':valid,'available':component_us if component_us is not None else instant_us(clock),'available_validity':True,
-                            'reasons':0 if valid else REASONS.index('source_missing')}.items():payload[kind].append(v)
+                            'reasons':reason_codes.index(reason)}.items():payload[kind].append(v)
                     for kind,values in payload.items():arrays[name+'::'+kind][start+offset,positions]=values
                 metrics['evidence_seconds']+=time.monotonic()-evidence_started
         encode_started=time.monotonic()
-        child={'contract_version':'reader_column_evidence_v1','context':{'domain':DOMAIN,'selection':selection,
-            'snapshot_id':event_snapshot,'event_contexts':contexts},'field_meta':metadata,'fields':list(outputs),'sessions':selected}
-        check_manifest={**manifest,'daily_fields':{**manifest.get('daily_fields',{}),**{n:{'domain':DOMAIN,'dtype':'float64','unit':unit} for n in outputs}},
-                        'financial_materializations':{**manifest.get('financial_materializations',{}),**declarations}}
-        validate_financial_materializations(check_manifest,child)
-        child=compact_reader_evidence(root,child,_owner=encoding)
+        child=input_block_receipt(spec=spec,sessions=selected,fields=outputs,
+            context={'domain':DOMAIN,'selection':selection,'snapshot_id':event_snapshot},
+            definitions={name:{'dtype':'float64','unit':unit} for name in outputs},
+            bindings={name:digest({k:v for k,v in declaration.items() if k not in
+                ('report_start','report_end','coverage_security_ids')}) for name,declaration in declarations.items()})
         chunks.append({'sessions':selected,'evidence':[write_part(root,child,'evidence_ref')]})
         metrics['encode_write_seconds']+=time.monotonic()-encode_started
         metrics['event_reader']=dict(event_owner.metrics);metrics['financial_memo']=dict(memo.metrics)
-        metrics['evidence_encoding']=dict(encoding.metrics)
+        metrics['saved_cell_proof_rows']=0
+        metrics['block_receipt_bytes']=metrics.get('block_receipt_bytes',0)+Path(chunks[-1]['evidence'][0]['path']).stat().st_size
         checkpoint_started=time.monotonic()
         staging.commit(start+len(selected),chunks,metrics)
         metrics['checkpoint_seconds']+=time.monotonic()-checkpoint_started
@@ -349,6 +358,7 @@ def _extend_financial_feature_source(data, *, source, query, field, outputs, uni
         for kind,(_,dtype) in kinds.items():
             value=arrays[name+'::'+kind]
             manifest['buffers'][name+'::'+kind],arrays[name+'::'+kind]=seal_feature_buffer(root,value,dtype=dtype,shape=shape,retain_staging=True)
+    manifest['reason_codes']=reason_codes
     manifest.setdefault('daily_fields',{}).update({n:{'domain':DOMAIN,'dtype':'float64','unit':unit} for n in outputs})
     manifest.setdefault('financial_materializations',{}).update(declarations)
     manifest.setdefault('daily_extensions',[]).append({'fields':list(outputs),'chunks':chunks})

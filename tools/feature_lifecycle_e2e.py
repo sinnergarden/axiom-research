@@ -40,6 +40,8 @@ def _performance_acceptance(cfg,run):
     original_iter=EventReadOwner.iter_cutoffs
     original_memo=financial._memoized_results
     original_compact=evidence.compact_reader_evidence
+    original_materialize=evidence.materialize_evidence_rows
+    original_receipt=evidence.input_block_receipt
     def compare(left,right):
         assert left.frame.equals(right.frame)
         assert left.field_meta==right.field_meta and left.context==right.context
@@ -129,39 +131,43 @@ def _performance_acceptance(cfg,run):
                                               {name:outputs[name]},field,query,unit,owner)
                         assert owner.metrics['misses']>before
                         assert revised[recipe][security,period][0:2]==result[recipe][security,period][0:2]
-                        assert revised[recipe][security,period][5]!=result[recipe][security,period][5]
+                        # A same-value revision invalidates computation; no
+                        # per-cell provenance digest is persisted in the new format.
                         counts['same_value_revision_invalidation']+=1
                         break
             counts[('financial',identity)]+=1
             validation_seconds+=time.monotonic()-started
         return result
-    def compact(root,child,*,_owner=None):
-        nonlocal validation_seconds
-        value=original_compact(root,child,_owner=_owner)
-        if counts['codec_equivalence']==0:
-            started=time.monotonic()
-            # One small real proof, including all stable coverage references.
-            sample={**child,'context':{**child['context'],'event_contexts':child['context']['event_contexts'][:1]},
-                'field_meta':{f:{**m,'by_key':m['by_key'][:1]} for f,m in child['field_meta'].items()}}
-            assert original_compact(root,sample,_owner=_owner)==original_compact(root,sample)
-            counts['codec_equivalence']+=1;validation_seconds+=time.monotonic()-started
+    def forbidden_proof(*args,**kwargs):
+        counts['legacy_proof_calls']+=1
+        raise AssertionError('new input path constructed or expanded legacy cell proofs')
+    def receipt(**kwargs):
+        value=original_receipt(**kwargs)
+        assert value['contract_version']=='reader_column_block_v1'
+        assert all('by_key' not in meta for meta in value['field_meta'].values())
+        size=len(json.dumps(value).encode())
+        assert size<64*1024
+        counts['block_receipts']+=1
+        counts['maximum_block_receipt_bytes']=max(counts['maximum_block_receipt_bytes'],size)
         return value
     def observe(record):
         if record['stage']!='financial_inputs' or 'detail' not in record:return
         detail=record['detail'];bundle=record['bundle'];phase[bundle]=detail
         if detail.get('completed_dates',0)>=8:
-            recent[bundle].append(detail['last_block_seconds'])
+            recent[bundle].append(detail['last_block_seconds']*2/cfg.get('input_block_sessions',2))
             recent[bundle]=recent[bundle][-3:]
             if len(recent[bundle])==3 and sum(recent[bundle])/3>=cfg['maximum_financial_block_seconds']:
                 raise RuntimeError('FINANCIAL_THROUGHPUT_STOP: three two-session blocks exceed declared threshold')
-    EventReadOwner.iter_cutoffs=cutoffs;financial._memoized_results=memo;evidence.compact_reader_evidence=compact
+    EventReadOwner.iter_cutoffs=cutoffs;financial._memoized_results=memo;evidence.compact_reader_evidence=forbidden_proof
+    evidence.materialize_evidence_rows=forbidden_proof;evidence.input_block_receipt=receipt
     try:
         result=run(cfg,observer=observe)
         assert counts['real_revision_boundary_cutoffs']>0 and counts['financial_reference_cells']>0
-        assert counts['same_value_revision_invalidation']==1 and counts['codec_equivalence']==1
+        assert counts['same_value_revision_invalidation']==1 and counts['block_receipts']>0 and counts['legacy_proof_calls']==0
         return result,{'checks':{str(k):v for k,v in counts.items()},'validation_seconds':validation_seconds,'financial_phases':phase}
     finally:
         EventReadOwner.iter_cutoffs=original_iter;financial._memoized_results=original_memo;evidence.compact_reader_evidence=original_compact
+        evidence.materialize_evidence_rows=original_materialize;evidence.input_block_receipt=original_receipt
         Path(cfg['destination'],'performance-validation.json').write_text(json.dumps({
             'checks':{str(k):v for k,v in counts.items()},'validation_seconds':validation_seconds,
             'financial_phases':phase,'maximum_financial_block_seconds':cfg['maximum_financial_block_seconds']},indent=2))
@@ -266,11 +272,23 @@ def acceptance(cfg):
     staging=[str(p) for p in (root/'inputs').rglob('.feature-input-*')
              if p.name!='.feature-input-checkpoint.json']
     assert not staging,staging[:5]
+    manifest=json.loads(Path(result['source']['path']).read_text())
+    receipts=[e for c in manifest['chunks'] for e in c['evidence']]
+    receipts.extend(e for ext in manifest.get('daily_extensions',[]) for c in ext['chunks'] for e in c['evidence'])
+    proof_bytes=0
+    for desc in receipts:
+        path=Path(desc['path']);proof_bytes+=path.stat().st_size
+        proof=json.loads(path.read_text())
+        assert proof['contract_version']=='reader_column_block_v1'
+        assert all('by_key' not in meta for meta in proof['field_meta'].values())
+    assert result['input_reuse']['buffer_copy_bytes']==0 and result['input_reuse']['old_value_recomputations']==0
     return {'status':'PASS','run':result,'performance':performance,'warm_overlap':warm,'requested_normalized_subset':norm,
         'consumer_seconds':time.monotonic()-consumer_started,'consumer_metrics':consumer_metrics,
         'physical_cells':cells_count,'valid_cells':valid_count,'subset_training_rows':training_rows,
         'unknown_membership_cells_preserved':unknown,'unpublished_staging_files':staging,
-        'native_consumer_ancestor_calls':0,'label_boundary_controls':4,
+        'native_consumer_ancestor_calls':0,'input_block_receipt_bytes':proof_bytes,
+        'input_block_receipt_count':len(receipts),'saved_cell_proof_rows':0,
+        'coverage_owner_metrics':library.coverage_metrics,'label_boundary_controls':4,
         'label_scope':'maturity controls only; no real Label generation/model fit/account replay',
         'footprint':footprint(root),'peak_rss_bytes':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
         'full_history_capacity_or_12h_acceptance':False}

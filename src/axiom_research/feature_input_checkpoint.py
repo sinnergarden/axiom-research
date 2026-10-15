@@ -153,6 +153,6 @@ def extension_checkpoint(root, *, source, fields, kinds, sessions, block_session
             'shape':[len(sessions),len(source.manifest['spec']['universe'])]}
             for field in fields for kind,(dtype,_) in kinds.items()}
     checkpoint=FeatureInputCheckpoint(root,binding={'source_ref':source.identity,'extension':binding,
-        'block_sessions':block_sessions,'evidence_encoding':'reader_column_evidence_v2'},
+        'block_sessions':block_sessions,'evidence_encoding':'reader_column_block_v1'},
         layout=layout,sessions=sessions,metrics=metrics)
     return checkpoint,{**source.arrays,**checkpoint.arrays}

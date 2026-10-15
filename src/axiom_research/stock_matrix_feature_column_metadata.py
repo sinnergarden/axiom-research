@@ -114,6 +114,11 @@ def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts
             manifest['contract_version']=='research_feature_column_source_v1', 'column source identity/version mismatch')
     require(manifest['implementation_ref']==digest(manifest['implementation_sources']),
             'column source implementation binding mismatch')
+    from .stock_feature_columns import REASONS
+    reasons=manifest['reason_codes']
+    require(type(reasons) is list and 0<len(reasons)<=256 and len(reasons)==len(set(reasons)) and
+            reasons[:len(REASONS)]==list(REASONS[:len(reasons)]) and
+            all(isinstance(r,str) and bool(r) for r in reasons[1:]),'input reason dictionary mismatch')
     spec=manifest['spec']; days=ordered(spec['read_sessions'],'column source dates')
     securities=ordered(spec['universe'],'column source securities')
     for day in days: _session(day)
@@ -187,11 +192,22 @@ def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts
             if known is None:
                 child=_saved_json(desc,'evidence_ref',store)
                 _verify_ref(child,'evidence_ref')
+                light=child['contract_version']=='reader_column_block_v1'
                 compact=child['contract_version']=='reader_column_evidence_v2'
-                _fields(child,{'contract_version','context','field_meta','fields','sessions','evidence_ref'} | ({'shared_rows'} if compact else set()),
-                        'exact column source provenance required')
-                require(child['contract_version'] in ('reader_column_evidence_v1','reader_column_evidence_v2') and child['sessions']==chunk_days and
-                        child['evidence_ref']==desc['evidence_ref'], 'column source provenance closure mismatch')
+                _fields(child,{'contract_version','context','field_meta','fields','sessions','evidence_ref'} |
+                    ({'shared_rows'} if compact else {'security_axis_ref'} if light else set()),
+                    'exact column source provenance required')
+                require(child['contract_version'] in ('reader_column_evidence_v1','reader_column_evidence_v2','reader_column_block_v1') and
+                        child['sessions']==chunk_days and child['evidence_ref']==desc['evidence_ref'],
+                        'column source provenance closure mismatch')
+                if light:
+                    require(child['security_axis_ref']==digest(securities) and
+                            set(child['fields'])==set(child['field_meta']),'input block axes/fields mismatch')
+                    require(child['context'].get('snapshot_id') not in (None,'','current','latest'),
+                            'pinned input block source required')
+                    for field,metadata in child['field_meta'].items():
+                        _fields(metadata,{'dtype','unit','source_binding'},'input block metadata required')
+                        require(_ref(metadata['source_binding']),'input block source version required')
                 shared_objects={}
                 if compact:
                     from .feature_input_evidence import shared_evidence_descriptors, materialize_evidence_rows
@@ -213,12 +229,13 @@ def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts
                         require(child['context']['domain']==declaration['domain'] and
                                 meta['dtype']==declaration['dtype'] and meta['unit']==declaration['unit'],
                                 'daily evidence domain/type/unit mismatch')
-                        keys=[(r['security_id'],r['session']) for r in meta['by_key']]
-                        covered_securities=financial[field]['coverage_security_ids'] if field in financial else securities
-                        require(len(keys)==len(set(keys)) and set(keys)=={(s,d) for d in chunk_days for s in covered_securities},
-                                'daily evidence key coverage mismatch')
+                        if not light:
+                            keys=[(r['security_id'],r['session']) for r in meta['by_key']]
+                            covered_securities=financial[field]['coverage_security_ids'] if field in financial else securities
+                            require(len(keys)==len(set(keys)) and set(keys)=={(s,d) for d in chunk_days for s in covered_securities},
+                                    'daily evidence key coverage mismatch')
                     seen_fields.extend(child['fields'])
-                if financial:
+                if financial and not light:
                     validate_financial_materializations(manifest,child=child)
                 if _dependency_receipts is not None:
                     _dependency_receipts(child)

@@ -11,13 +11,15 @@ from .stock_artifacts import digest, file_digest, write_json, _verify_ref
 from .stock_fold_inputs import require, seal
 from .stock_matrix_storage import instant_us, write_buffer, write_part
 from .stock_matrix_feature_producer import FIELDS, prepare_matrix_qlib, _NativeWindow
+from .feature_input_evidence import input_block_receipt
 
 
 SOURCE_VERSION = 'research_feature_column_source_v1'
 REASONS = (None, 'source_missing', 'not_visible_at_cutoff', 'not_provided',
            'price_missing', 'invalid_price', 'missing_anchor_factor',
            'invalid_anchor_factor', 'missing_factor', 'invalid_factor',
-           'invalid_adjusted_value')
+           'invalid_adjusted_value', 'retracted', 'parse_error', 'missing_quarter',
+           'no_visible_report', 'conflicting_intervals', 'no_dated_interval')
 
 
 def _hash_array(value):
@@ -246,7 +248,7 @@ class FeatureColumnSource:
             sessions=list(view['sessions']),security_ids=list(view['universe']),
             cutoffs_utc_us=np.full(len(view['sessions']),instant_us(view['selection']['knowledge_cutoff'])//1000000*1000000,dtype='<i8'),
             values=view['values'],validity=view['validity'],reason_codes={k:v.astype('<i4') for k,v in view['missing_reasons'].items()},
-            reason_dictionary=list(REASONS),available_at_utc_us=view['availability'],
+            reason_dictionary=list(self.manifest['reason_codes']),available_at_utc_us=view['availability'],
             source_codes={field:np.full(shape,i,dtype='<i4') for i,field in enumerate(names) if field in view['values']},
             source_sets=sets,reference_member=view['member'],reference_industry=view['industry'],
             reference_member_known=view['member_known'],reference_pool_complete=view['member_pool_complete'],
@@ -385,8 +387,8 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
                 arrays['available'][offset:offset+len(days),:,index]=clocks
                 arrays['available_validity'][offset:offset+len(days),:,index]=known
                 arrays['reasons'][offset:offset+len(days),:,index]=reasons
-            child=seal({'contract_version':'reader_column_evidence_v1','context':batch.context,
-                'field_meta':batch.field_meta,'fields':list(query.fields),'sessions':list(days)},'evidence_ref')
+            child=input_block_receipt(spec=spec,sessions=days,fields=query.fields,
+                context=batch.context,definitions=batch.field_meta)
             evidence.append(write_part(root,child,'evidence_ref')); del batch,frame,child,ordered,by_key
         chunks.append({'sessions':list(days),'evidence':evidence}); metrics['source_rows']+=len(keys)
         if staging is not None: staging.commit(offset+len(days),chunks,metrics)
@@ -404,7 +406,7 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
             wire=array.view('u1') if dtype=='bool_u8' else array
             descriptors[name]=write_buffer(root,wire.reshape(-1),dtype=dtype,shape=list(array.shape))
             arrays[name]=np.memmap(descriptors[name]['path'],mode='r',dtype=array.dtype,shape=array.shape)
-    manifest=seal({'contract_version':SOURCE_VERSION,'spec':spec,'qlib_view':prepared['view_reference'],
+    manifest=seal({'contract_version':SOURCE_VERSION,'evidence_mode':'block_receipts_v1','spec':spec,'qlib_view':prepared['view_reference'],
         'buffers':descriptors,'chunks':chunks,'reason_codes':list(REASONS),'source_profiles':profiles,
         'selection_invariance':'declared_vendor_release_visible_at_each_historical_row_cutoff',
         'implementation_sources':implementations,'implementation_ref':digest(implementations),
@@ -420,7 +422,7 @@ def load_feature_column_source(path):
     import json
     import numpy as np
     path=Path(path); manifest=json.loads(path.read_text()); _verify_ref(manifest,'source_ref')
-    require(manifest['contract_version']==SOURCE_VERSION and manifest['reason_codes']==list(REASONS),
+    require(manifest['contract_version']==SOURCE_VERSION and manifest['reason_codes'][:len(REASONS)]==list(REASONS[:len(manifest['reason_codes'])]),
         'column source version/reason dictionary mismatch')
     arrays={}; types={'float64_le':'<f8','int64_le':'<i8','bool_u8':'u1','uint8':'u1'}
     for name,desc in manifest['buffers'].items():
@@ -575,8 +577,8 @@ def extend_feature_column_source(data, *, source, daily_fields, destination, blo
                     'available_validity':np.asarray([r.get('usable_from') is not None for r in rows]).reshape(chunk_shape),
                     'reasons':reasons}
                 for kind,value in payload.items(): arrays[field+'::'+kind][offset:offset+len(selected)]=value
-            child=seal({'contract_version':'reader_column_evidence_v1','context':batch.context,
-                'field_meta':batch.field_meta,'fields':fields,'sessions':selected},'evidence_ref')
+            child=input_block_receipt(spec=spec,sessions=selected,fields=fields,
+                context=batch.context,definitions=batch.field_meta)
             evidence.append(write_part(root,child,'evidence_ref'))
         chunks.append({'sessions':selected,'evidence':evidence})
         staging.commit(offset+len(selected),chunks,metrics)

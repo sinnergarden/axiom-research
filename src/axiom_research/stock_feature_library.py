@@ -76,7 +76,7 @@ class SavedColumnFeatureSource:
     def __init__(self, descriptor, *, reference_security_ids=None, maximum_source_bytes=8*1024**3,
                  maximum_working_bytes=512*1024**2):
         self._leaf_cache_bytes=0
-        self._leaf_spool=tempfile.TemporaryFile(mode="w+b")
+        self._leaf_spool=None
         self.store=VerifiedMatrixStore(maximum_source_bytes=maximum_source_bytes,
             maximum_matrix_bytes=maximum_working_bytes,
             _caller_retained_bytes=lambda:self._leaf_cache_bytes)
@@ -116,6 +116,19 @@ class SavedColumnFeatureSource:
         self._charge_leaf_cache(amount);mapping[key]=value
 
     def _capture_leaf_refs(self, child):
+        if child['contract_version']=='reader_column_block_v1':
+            manifest=self.source.manifest
+            for field,metadata in child['field_meta'].items():
+                symbols=tuple(manifest.get('financial_materializations',{}).get(field,{}).get(
+                    'coverage_security_ids',manifest['spec']['universe']))
+                symbols=self._leaf_axis(symbols)
+                for day in child['sessions']:
+                    key=(field,day)
+                    if key not in self._leaf_refs:
+                        self._retain_leaf(self._leaf_refs,key,(symbols,metadata['source_binding'],
+                            metadata['dtype'],metadata['unit'],None,0))
+            return
+        if self._leaf_spool is None:self._leaf_spool=tempfile.TemporaryFile(mode="w+b")
         base=self.store._native_caller_bytes(child)-self._leaf_cache_bytes
         original_bytes=max(self.store.fingerprints[path][2] for path,descriptor in self.store.descriptors.items()
                            if descriptor.get("evidence_ref")==child["evidence_ref"])
@@ -232,7 +245,12 @@ class SavedColumnFeatureSource:
             for day in sorted(days):
                 symbols,full,dtype,unit,packed,raw_bytes=self._leaf_refs[field,day]
                 require(set(securities)<=set(symbols), 'source leaf security axes mismatch')
-                if axis==symbols: result[field][day]=full
+                if packed is None:
+                    result[field][day]=digest({'contract_version':'block_input_dependency_v1',
+                        'source_binding':full,'field':field,'dtype':dtype,'unit':unit,
+                        'security_ids':securities,'session':day,
+                        'cutoff':self.source.manifest['spec']['cutoff_by_session'][day]})
+                elif axis==symbols: result[field][day]=full
                 else:
                     key=(field,day,axis)
                     if key not in self._leaf_subsets:
@@ -371,7 +389,8 @@ class SavedColumnFeatureSource:
         return FeaturePlan.from_dict(p)
 
     def close(self):
-        self.source.arrays.clear(); self.store.close(); self._leaf_spool.close()
+        self.source.arrays.clear(); self.store.close()
+        if self._leaf_spool is not None:self._leaf_spool.close()
         self._leaf_cache_bytes=0
         for cache in (self._leaf_refs,self._leaf_axes,self._leaf_subsets,self._dependencies,
                       self._buffer_refs,self._reference_refs,self._axis_positions): cache.clear()

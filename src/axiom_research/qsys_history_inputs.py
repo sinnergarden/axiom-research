@@ -101,9 +101,12 @@ def _project_chunks(chunks, days, symbols, root):
             require(file_digest(desc['path'])==desc['file_digest'],'reused evidence changed')
             child=json.loads(Path(desc['path']).read_text());_verify_ref(child,'evidence_ref')
             child['sessions']=chosen
-            child['field_meta']={f:{**m,'by_key':[r for r in m['by_key']
-                if r['session'] in selected and (symbols is None or r['security_id'] in wanted)]}
-                for f,m in child['field_meta'].items()}
+            if child['contract_version']=='reader_column_block_v1':
+                if symbols is not None:child['security_axis_ref']=digest(symbols)
+            else:
+                child['field_meta']={f:{**m,'by_key':[r for r in m['by_key']
+                    if r['session'] in selected and (symbols is None or r['security_id'] in wanted)]}
+                    for f,m in child['field_meta'].items()}
             child.pop('evidence_ref');child=seal(child,'evidence_ref')
             proofs.append(write_part(root,child,'evidence_ref'))
         result.append({'sessions':chosen,'evidence':proofs})
@@ -183,22 +186,78 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
                 target[dst_row,list(dst_cols)]=value[src_row,list(src_cols)]
         manifest['buffers'][name],arrays[name]=seal_feature_buffer(root,target,dtype=desc['dtype'],shape=shape)
         metrics['buffer_copy_bytes']+=int(np.prod(shape))*original.dtype.itemsize
-    # Reuse whole proofs when their date and security axes already match.
-    manifest['chunks']=[]
-    for part in sources:
-        axis=part.manifest['spec']['universe']
-        manifest['chunks'].extend(_project_chunks(part.manifest['chunks'],days,None if axis==symbols else symbols,root))
-    manifest['chunks'].sort(key=lambda c:c['sessions'][0])
-    extensions=[]
-    for old_ext in source.manifest.get('daily_extensions',[]):
-        fields=old_ext['fields'];chunks=[]
+    if source.manifest.get('evidence_mode')!='block_receipts_v1':
+        require(not source.manifest.get('financial_materializations') and not any(
+            item['domain']=='materialized_industry_intervals' for item in source.manifest.get('daily_fields',{}).values()),
+            'legacy financial/industry detail remains in old proofs; keep its old reader or explicitly prepare those fields from pinned sources')
+        # Import published numeric inputs once. Check the selected local arrays,
+        # bind fixed source versions, and discard old proof ancestry references.
+        # No old per-cell proof is decoded or reconstructed.
+        from .feature_input_evidence import input_block_receipt
+        from .stock_feature_columns import FeatureColumnSource,FIELDS,REASONS
+        from .stock_feature_library import SavedColumnFeatureSource
+        from .stock_matrix_storage import instant_us
+        imported=FeatureColumnSource(manifest,arrays)
+        groups=[('market_daily',list(FIELDS[:-1])),('adjustment_factors',['factor']),
+                ('universe_membership',['is_member'])]
+        extensions=source.manifest.get('daily_extensions',[])
+        groups.extend((manifest['daily_fields'][ext['fields'][0]]['domain'],ext['fields']) for ext in extensions)
+        manifest['chunks']=[];manifest['daily_extensions']=[{'fields':ext['fields'],'chunks':[]} for ext in extensions]
+        group_metadata=[]
+        for domain,fields in groups:
+            definitions={};bindings={}
+            for field in fields:
+                definitions[field]=manifest['source_profiles'][domain]['contract']['fields'][field]
+                bindings[field]=digest({'contract':'imported_local_input_v1',
+                    'source_snapshot':old['snapshot'],'field':field,'policy':old['pit_policy'],
+                    'profile':SavedColumnFeatureSource._field_profile(manifest['source_profiles'][domain],field)})
+            group_metadata.append((definitions,bindings))
+        for start in range(0,len(days),32):
+            selected=days[start:start+32];proofs=[]
+            for group_index,(domain,fields) in enumerate(groups):
+                definitions,bindings=group_metadata[group_index]
+                for field in fields:
+                    cutoff=np.asarray([instant_us(spec['cutoff_by_session'][d]) for d in selected],dtype='<i8')[:,None]
+                    if field=='is_member':
+                        member=arrays['member'][start:start+len(selected)];known=arrays['member_known'][start:start+len(selected)]
+                        require(not bool((member & ~known).any()),'unknown membership cannot be true')
+                        clocks=arrays['member_available'][start:start+len(selected)]
+                        clock_known=arrays['member_available_validity'][start:start+len(selected)]
+                    else:
+                        values=imported.field_array(field,'values')[start:start+len(selected)]
+                        valid=imported.field_array(field,'validity')[start:start+len(selected)]
+                        reasons=imported.field_array(field,'reasons')[start:start+len(selected)]
+                        require(bool(np.isfinite(values[valid]).all()) and not bool((valid & (reasons!=0)).any()),'invalid imported input cells')
+                        require(bool((reasons<len(manifest['reason_codes'])).all()),'unknown imported reason code')
+                        clocks=imported.field_array(field,'available')[start:start+len(selected)]
+                        clock_known=imported.field_array(field,'available_validity')[start:start+len(selected)]
+                    require(not bool((clock_known & (clocks>cutoff)).any()),'future imported input')
+                child=input_block_receipt(spec=spec,sessions=selected,fields=fields,
+                    context={'domain':domain,'snapshot_id':old['snapshot']},definitions=definitions,bindings=bindings)
+                desc=write_part(root,child,'evidence_ref')
+                if group_index<3:proofs.append(desc)
+                else:manifest['daily_extensions'][group_index-3]['chunks'].append({'sessions':selected,'evidence':[desc]})
+            manifest['chunks'].append({'sessions':selected,'evidence':proofs})
+        manifest['evidence_mode']='block_receipts_v1';manifest['reason_codes']=list(REASONS)
+        metrics['imported_block_receipts']=len(manifest['chunks'])*len(groups)
+        metrics['legacy_cell_proof_decodes']=0
+    else:
+        # Reuse whole proofs when their date and security axes already match.
+        manifest['chunks']=[]
         for part in sources:
-            for ext in part.manifest.get('daily_extensions',[]):
-                if set(ext['fields'])==set(fields):chunks.extend(_project_chunks(ext['chunks'],days,None if part.manifest['spec']['universe']==symbols else symbols,root))
-                elif set(ext['fields'])&set(fields):
-                    raise ValueError('gap extension grouping differs; explicit field projection required')
-        chunks.sort(key=lambda c:c['sessions'][0]);extensions.append({'fields':fields,'chunks':chunks})
-    manifest['daily_extensions']=extensions
+            axis=part.manifest['spec']['universe']
+            manifest['chunks'].extend(_project_chunks(part.manifest['chunks'],days,None if axis==symbols else symbols,root))
+        manifest['chunks'].sort(key=lambda c:c['sessions'][0])
+        extensions=[]
+        for old_ext in source.manifest.get('daily_extensions',[]):
+            fields=old_ext['fields'];chunks=[]
+            for part in sources:
+                for ext in part.manifest.get('daily_extensions',[]):
+                    if set(ext['fields'])==set(fields):chunks.extend(_project_chunks(ext['chunks'],days,None if part.manifest['spec']['universe']==symbols else symbols,root))
+                    elif set(ext['fields'])&set(fields):
+                        raise ValueError('gap extension grouping differs; explicit field projection required')
+            chunks.sort(key=lambda c:c['sessions'][0]);extensions.append({'fields':fields,'chunks':chunks})
+        manifest['daily_extensions']=extensions
     for decl in manifest.get('financial_materializations',{}).values():
         decl['coverage_security_ids']=[s for s in decl['coverage_security_ids'] if s in set(symbols)]
     manifest.pop('source_ref');manifest=seal(manifest,'source_ref')
