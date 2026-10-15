@@ -28,7 +28,57 @@ def check_input_disk(root, pending_bytes=0):
         raise RuntimeError('DISK_RESERVE_REACHED: committed input checkpoints retained')
 
 
-def compact_reader_evidence(root, child):
+class EvidenceEncodingOwner:
+    """Bounded reuse for producer-owned immutable objects in the existing codec.
+
+    Callers must not mutate borrowed objects until this owner is discarded.
+    Strong references prevent identity reuse; file epochs guard saved buffers.
+    This changes no bytes, descriptors, hashes or persisted format.
+    """
+    def __init__(self, root, maximum_bytes=128*1024**2):
+        from collections import OrderedDict
+        self.root=Path(root).parent/'.shared-input-evidence'
+        self.root.mkdir(parents=True,exist_ok=True)
+        self.maximum_bytes=maximum_bytes;self.retained=0;self.entries=OrderedDict()
+        self.metrics={'hits':0,'encodes':0,'peak_retained_bytes':0}
+
+    @staticmethod
+    def _mark(path):
+        stat=Path(path).stat()
+        return stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns
+
+    def encode(self, value):
+        from .stock_matrix_reader import _resident_size
+        key=id(value)
+        cached=self.entries.get(key)
+        if cached is not None:
+            original,descriptor,mark,size=cached
+            require(original is value and self._mark(descriptor['buffer']['path'])==mark,
+                    'borrowed shared evidence changed')
+            self.entries.move_to_end(key);self.metrics['hits']+=1
+            return descriptor
+        descriptor=_encode_shared(self.root,value)
+        self.metrics['encodes']+=1
+        size=_resident_size((value,descriptor))+256
+        while self.entries and self.retained+size>self.maximum_bytes:
+            _,old=self.entries.popitem(last=False);self.retained-=old[3]
+        if size<=self.maximum_bytes:
+            self.entries[key]=(value,descriptor,self._mark(descriptor['buffer']['path']),size)
+            self.retained+=size
+            self.metrics['peak_retained_bytes']=max(self.metrics['peak_retained_bytes'],self.retained)
+        return descriptor
+
+
+def _encode_shared(root,value):
+    from .stock_matrix_storage import write_buffer
+    import numpy as np
+    raw=json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()
+    ref='sha256:'+sha256(raw).hexdigest();compressed=zlib.compress(raw)
+    descriptor=write_buffer(root,np.frombuffer(compressed,dtype='u1'),dtype='uint8',shape=[len(compressed)])
+    return {'buffer':descriptor,'value_ref':ref,'decoded_bytes':len(raw),'encoding':'zlib_json_v1'}
+
+
+def compact_reader_evidence(root, child, *, _owner=None):
     from .stock_matrix_storage import write_buffer
     import numpy as np
     shared_root=Path(root).parent/'.shared-input-evidence'
@@ -40,13 +90,18 @@ def compact_reader_evidence(root, child):
         result={}
         for key,item in value.items():
             if key in _SHARED_KEYS and type(item) in (dict,list) and item:
-                raw=json.dumps(item,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()
-                ref='sha256:'+sha256(raw).hexdigest()
-                if ref not in objects:
-                    compressed=zlib.compress(raw)
-                    descriptor=write_buffer(shared_root,np.frombuffer(compressed,dtype='u1'),dtype='uint8',shape=[len(compressed)])
-                    objects[ref]={'buffer':descriptor,'value_ref':ref,'decoded_bytes':len(raw),'encoding':'zlib_json_v1'}
-                result[key]={'shared_evidence':objects[ref]}
+                if _owner is not None:
+                    require(_owner.root==shared_root,'evidence owner root mismatch')
+                    descriptor=_owner.encode(item)
+                else:
+                    raw=json.dumps(item,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()
+                    ref='sha256:'+sha256(raw).hexdigest()
+                    if ref not in objects:
+                        compressed=zlib.compress(raw)
+                        descriptor=write_buffer(shared_root,np.frombuffer(compressed,dtype='u1'),dtype='uint8',shape=[len(compressed)])
+                        objects[ref]={'buffer':descriptor,'value_ref':ref,'decoded_bytes':len(raw),'encoding':'zlib_json_v1'}
+                    descriptor=objects[ref]
+                result[key]={'shared_evidence':descriptor}
             else: result[key]=pack(item)
         return result
     context=pack(child['context']); metadata={}; templates={}

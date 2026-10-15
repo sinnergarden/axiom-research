@@ -4,6 +4,8 @@ Data selects revisions and computes financial bases. Research selects economic
 report periods and stores typed inputs. Core remains the Feature executor.
 """
 from copy import deepcopy
+from collections import OrderedDict
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,6 +44,102 @@ def _projection_valid(spec):
             type(spec.get('quarters_back')) is int and spec['quarters_back']>=0)
 
 
+def _dependencies(period,recipe):
+    """Identity only; arithmetic remains in Data's original financial recipes."""
+    if period is None:return ()
+    if recipe not in ('ttm','single_quarter'):return (period,)
+    needed=[]
+    for back in range(4 if recipe=='ttm' else 1):
+        quarter=_period_back(period,back);needed.append(quarter)
+        if quarter[5:7]!='03':needed.append(_period_back(quarter,1))
+    return tuple(dict.fromkeys(needed))
+
+
+class _FinancialMemo:
+    """One field/stream/Snapshot/rule owner; keys contain actual dependency tokens."""
+    def __init__(self,maximum_bytes=128*1024**2):
+        self.entries=OrderedDict();self.maximum_bytes=maximum_bytes;self.retained=0
+        self.metrics={'hits':0,'misses':0,'formula_calls':0,'peak_retained_bytes':0}
+
+    def get(self,key):
+        entry=self.entries.get(key)
+        if entry is None:self.metrics['misses']+=1;return None
+        self.entries.move_to_end(key);self.metrics['hits']+=1
+        return entry[0]
+
+    def put(self,key,value):
+        from .stock_matrix_reader import _resident_size
+        size=_resident_size((key,value))+256
+        while self.entries and self.retained+size>self.maximum_bytes:
+            _,(_,old)=self.entries.popitem(last=False);self.retained-=old
+        if size<=self.maximum_bytes:
+            self.entries[key]=(value,size);self.retained+=size
+            self.metrics['peak_retained_bytes']=max(self.metrics['peak_retained_bytes'],self.retained)
+
+
+def _stable_result(value,meta,recipe):
+    """Construct invariant components, clocks and revision digest once."""
+    valid=meta['status']=='value' and value is not None
+    if valid and recipe=='report_announcement_ordinal':
+        from datetime import date
+        value=float(date.fromisoformat(str(value)[:10]).toordinal())
+    elif valid and recipe=='forecast_category_code':value=float(FORECAST_CODES.get(value,0))
+    else:value=float(value) if valid else None
+    clocks=[c['provenance']['usable_from'] for c in meta['components'] if c['provenance'] is not None]
+    clock=max(clocks,key=instant_us) if clocks else None
+    bases=sorted({c['provenance']['availability_basis'] for c in meta['components'] if c['provenance'] is not None})
+    return value,valid,meta,clock,bases,digest(meta),instant_us(clock) if clock else None
+
+
+def _memoized_results(batch,event_rows,tokens,targets_by_name,outputs,field,query,unit,memo):
+    from axiom_data import DataBatch,ttm,single_quarter
+    records={(r['security_id'],r['report_period']):r for r in event_rows}
+    provenance={(r['security_id'],r['report_period']):r for r in batch.field_meta[field]['by_key']}
+    identities={(r['security_id'],r['report_period']):tokens[r['security_id']][
+        tuple(str(r[k]) for k in batch.context['logical_key'])] for r in event_rows}
+    results={}
+    for recipe in sorted({p['derivation'] for p in outputs.values()}):
+        requests=sorted({(security,period) for name,target in targets_by_name.items()
+                        if outputs[name]['derivation']==recipe for security,period in target.items()})
+        missing={};by={};results[recipe]=by
+        for security,period in requests:
+            # Owner fixes field, profile, basis, unit, stream, policy and recipe
+            # version. Tokens include selected revision values/status/provenance
+            # and availability; missing periods are explicit, never numeric equality.
+            key=(recipe,security,period,tuple((p,identities.get((security,p),('MISSING',)))
+                                            for p in _dependencies(period,recipe)))
+            cached=memo.get(key)
+            if cached is None:missing[(security,period)]=key
+            else:by[(security,period)]=cached
+        if not missing:continue
+        if recipe in ('ttm','single_quarter'):
+            changed=sorted({security for security,_ in missing});chosen=set(changed)
+            periods=sorted({period for _,period in missing})
+            # Reuse the original recipe with only changed securities. Its
+            # output cross-product may contain extra periods; retain requests only.
+            restricted=DataBatch(batch.frame.loc[batch.frame['security_id'].isin(chosen)],
+                {field:{**batch.field_meta[field],'by_key':[r for r in batch.field_meta[field]['by_key'] if r['security_id'] in chosen]}},
+                {**batch.context,'query':{**batch.context['query'],'symbols':changed}})
+            derived=(ttm if recipe=='ttm' else single_quarter)(restricted,field=field,
+                endpoint=query.filters['endpoint'],report_type=query.filters['report_type'],
+                basis='cumulative_ytd',unit=unit,periods=periods,_borrow_context=True)
+            memo.metrics['formula_calls']+=1
+            derived_records={(r['security_id'],r['report_period']):r for r in derived.frame.to_dict('records')}
+            derived_meta={(r['security_id'],r['report_period']):r for r in derived.field_meta[field]['by_key']}
+        for pair,key in missing.items():
+            if recipe in ('ttm','single_quarter'):
+                meta=derived_meta[pair];value=derived_records[pair][field] if meta['status']=='value' else None
+            elif pair in provenance:
+                item=provenance[pair]
+                meta={'status':item['status'],'missing_reason':item.get('missing_reason'),
+                    'components':[{'security_id':pair[0],'report_period':pair[1],
+                                   'status':item['status'],'provenance':item}]}
+                value=records[pair].get(field)
+            else:meta={'components':[],'status':'source_missing','missing_reason':'no_visible_report'};value=None
+            result=_stable_result(value,meta,recipe);by[pair]=result;memo.put(key,result)
+    return results
+
+
 def validate_financial_materializations(manifest, child=None):
     """Admission hook: derived declarations and every original component clock."""
     declarations = manifest.get('financial_materializations',{})
@@ -63,12 +161,15 @@ def validate_financial_materializations(manifest, child=None):
     if not financial: return
     require(child['context'].get('domain')==DOMAIN and child['context'].get('selection') in (POLICY,FORECAST_POLICY),
             'financial evidence selection required')
+    component_clocks={}
     for field in financial:
         declaration=declarations[field]
+        covered=set(declaration['coverage_security_ids'])
+        cutoffs={day:_cutoff(day,manifest['spec']['cutoff_by_session'][day],declaration['session_timezone']) for day in child['sessions']}
         for row in child['field_meta'][field]['by_key']:
-            require(row['security_id'] in declaration['coverage_security_ids'] and
+            require(row['security_id'] in covered and
                     child['context']['snapshot_id']==declaration['event_snapshot'],'financial evidence source/coverage mismatch')
-            cutoff=_cutoff(row['session'],manifest['spec']['cutoff_by_session'][row['session']],declaration['session_timezone'])
+            cutoff=cutoffs[row['session']]
             require(row['query_cutoff']==cutoff and row['selection']==declaration['selection'],'financial evidence cutoff mismatch')
             if declaration['derivation'] in ('report_observation','report_announcement_ordinal','forecast_category_code'):
                 periods=row['visible_report_periods'];offset=declaration['reports_back']
@@ -76,14 +177,18 @@ def validate_financial_materializations(manifest, child=None):
             else:
                 require(row['report_period'] is None or row['report_period']==_period_back(row['current_report_period'],declaration['quarters_back']),
                         'financial lag must use economic report quarters')
-            clocks=[]
-            for component in row['components']:
-                provenance=component['provenance']
-                if provenance is None: continue
-                require(provenance.get('revision_id') and provenance.get('usable_from'), 'financial component revision/clock required')
-                require(instant_us(provenance['usable_from'])<=instant_us(cutoff),'future financial component')
-                clocks.append(provenance['usable_from'])
-            expected=max(clocks,key=instant_us) if clocks else cutoff
+            components=row['components'];key=id(components)
+            if key not in component_clocks:
+                clocks=[]
+                for component in components:
+                    provenance=component['provenance']
+                    if provenance is None:continue
+                    require(provenance.get('revision_id') and provenance.get('usable_from'), 'financial component revision/clock required')
+                    clocks.append((instant_us(provenance['usable_from']),provenance['usable_from']))
+                component_clocks[key]=max(clocks,key=lambda c:c[0]) if clocks else None
+            maximum=component_clocks[key]
+            require(maximum is None or maximum[0]<=instant_us(cutoff),'future financial component')
+            expected=maximum[1] if maximum is not None else cutoff
             require(row['usable_from']==expected,'financial component max clock mismatch')
 
 
@@ -152,34 +257,40 @@ def _extend_financial_feature_source(data, *, source, query, field, outputs, uni
         'coverage_security_ids':list(query.symbols)} for name,projection in outputs.items()}
     chunks=[]; metrics={'event_blocks':0,'event_cutoff_selections':0,'existing_field_reads':0,'added_fields':len(outputs)}
     from .feature_input_checkpoint import extension_checkpoint, atomic_json
-    from .feature_input_evidence import check_input_disk
+    from .feature_input_evidence import check_input_disk, EvidenceEncodingOwner, compact_reader_evidence
     staging,arrays=extension_checkpoint(root,source=source,fields=outputs,kinds=kinds,sessions=days,
         block_sessions=block_sessions,binding={'declarations':declarations},metrics=metrics)
     chunks=list(staging.state['chunks']);metrics=dict(staging.state['metrics'])
+    memo=_FinancialMemo();encoding=EvidenceEncodingOwner(root)
+    for metric in ('derive_seconds','evidence_seconds','encode_write_seconds','checkpoint_seconds'):
+        metrics.setdefault(metric,0.0)
+    empty=_stable_result(None,{'components':[],'status':'source_missing','missing_reason':'no_visible_report'},'reported')
     for start in range(staging.state['completed_dates'],len(days),block_sessions):
         check_input_disk(root,min(block_sessions,len(days)-start)*sum(a.shape[1]*a.dtype.itemsize for a in staging.arrays.values()))
+        block_started=time.monotonic()
         selected=days[start:start+block_sessions]; metadata={n:{'dtype':'float64','unit':unit,'by_key':[]} for n in outputs}
         contexts=[]
         for si in range(0,len(query.symbols),256):
             subset=list(query.symbols[si:si+256])
             cutoffs=[_cutoff(d,spec['cutoff_by_session'][d],session_timezone) for d in selected]
             batches=iter_event_cutoffs(data,snapshot=event_snapshot,query=replace(query,symbols=tuple(subset),fields=tuple(dict.fromkeys((field,'announcement_date'))) if query.domain=='forecast_events' else query.fields),
-                cutoffs=cutoffs,maximum_cache_bytes=maximum_event_cache_bytes,owner=event_owner)
+                cutoffs=cutoffs,maximum_cache_bytes=maximum_event_cache_bytes,owner=event_owner,_borrow_context=True)
             metrics['event_blocks']+=1
             for offset,(day,batch) in enumerate(zip(selected,batches)):
                 metrics['event_cutoff_selections']+=1
                 require(batch.context['snapshot_id']==event_snapshot and
                         instant_us(batch.context['query']['cutoff'])==instant_us(cutoffs[offset]),'financial selected batch binding')
-                contexts.append(deepcopy(batch.context))
+                contexts.append(batch.context)
+                derive_started=time.monotonic()
+                event_rows=event_owner.selected_records
                 latest={}
-                for row in batch.frame.to_dict('records'):
+                for row in event_rows:
                     require(row['security_id'] in subset and ('endpoint' not in query.filters or row.get('endpoint')==query.filters['endpoint']) and
                             ('report_type' not in query.filters or row.get('report_type')==query.filters['report_type']),'unexpected financial event stream')
                     if query.domain=='forecast_events' or row['report_period']<=day:
                         latest[row['security_id']]=max(latest.get(row['security_id'],row['report_period']),row['report_period'])
                 # Prepare each Data derivation once for the union of current
                 # and prior-year target periods, not once per output leaf.
-                event_rows=batch.frame.to_dict('records')
                 ordered={security:[] for security in subset}
                 for record in event_rows:
                     if query.domain=='forecast_events' or record['report_period']<=day:
@@ -192,61 +303,47 @@ def _extend_financial_feature_source(data, *, source, query, field, outputs, uni
                         targets_by_name[name]={s:periods[-1-offset_back] for s,periods in visible_periods.items() if len(periods)>offset_back}
                     else:
                         targets_by_name[name]={s:_period_back(p,projection['quarters_back']) for s,p in latest.items()}
-                derived_by_recipe={}
-                for recipe in {p['derivation'] for p in outputs.values()}:
-                    periods=sorted({p for name,target in targets_by_name.items()
-                                    if outputs[name]['derivation']==recipe for p in target.values()})
-                    if recipe in ('reported','report_observation','report_announcement_ordinal','forecast_category_code'):
-                        records={(r['security_id'],r['report_period']):r for r in batch.frame.to_dict('records')}
-                        by={}
-                        for item in batch.field_meta[field]['by_key']:
-                            key=(item['security_id'],item['report_period'])
-                            by[key]={'status':item['status'],'missing_reason':item.get('missing_reason'),
-                                     'components':[{'security_id':key[0],'report_period':key[1],
-                                         'status':item['status'],'provenance':deepcopy(item)}]}
-                        derived_by_recipe[recipe]=(records,by)
-                        continue
-                    derived=(ttm if recipe=='ttm' else single_quarter)(batch,field=field,
-                        endpoint=query.filters['endpoint'],report_type=query.filters['report_type'],basis='cumulative_ytd',unit=unit,
-                        periods=periods) if periods else None
-                    records={} if derived is None else {(r['security_id'],r['report_period']):r for r in derived.to_json()['records']}
-                    by={} if derived is None else {(r['security_id'],r['report_period']):r for r in derived.field_meta[field]['by_key']}
-                    derived_by_recipe[recipe]=(records,by)
+                derived_by_recipe=_memoized_results(batch,event_rows,event_owner.selected_tokens,
+                    targets_by_name,outputs,field,query,unit,memo)
+                metrics['derive_seconds']+=time.monotonic()-derive_started
+                evidence_started=time.monotonic()
+                positions=[source.security_positions[security] for security in subset]
                 for name,projection in outputs.items():
                     targets=targets_by_name[name]
-                    records,by=derived_by_recipe[projection['derivation']]
-                    for sj,security in enumerate(subset):
-                        period=targets.get(security); meta=deepcopy(by.get((security,period),{'components':[],'status':'source_missing','missing_reason':'no_visible_report'}))
-                        value=records.get((security,period),{}).get(field);valid=meta['status']=='value' and value is not None
-                        if valid and projection['derivation']=='report_announcement_ordinal':
-                            from datetime import date
-                            value=float(date.fromisoformat(str(value)[:10]).toordinal())
-                        elif valid and projection['derivation']=='forecast_category_code':
-                            value=float(FORECAST_CODES.get(value,0))
-                        else:
-                            value=float(value) if valid else None
-                        clocks=[c['provenance']['usable_from'] for c in meta['components'] if c['provenance'] is not None]
-                        clock=max(clocks,key=instant_us) if clocks else cutoffs[offset]
-                        bases=sorted({c['provenance']['availability_basis'] for c in meta['components'] if c['provenance'] is not None})
+                    by=derived_by_recipe[projection['derivation']]
+                    payload={kind:[] for kind in kinds}
+                    for security in subset:
+                        period=targets.get(security)
+                        value,valid,meta,component_clock,bases,revision,component_us=by.get((security,period),empty)
+                        clock=component_clock or cutoffs[offset]
                         evidence={'security_id':security,'session':day,'report_period':period,'current_report_period':latest.get(security),
                             'selection':selection,'query_cutoff':cutoffs[offset],'status':meta['status'],
                             'financial_missing_reason':meta['missing_reason'],'missing_reason':None if valid else 'source_missing',
                             'usable_from':clock,'availability_basis':bases[0] if len(bases)==1 else 'derived_component_max' if bases else 'no_visible_report_at_query_cutoff',
                             'component_availability_bases':bases,
-                            'components':meta['components'],'selected_value':value,'revision_id':digest(meta)}
+                            'components':meta['components'],'selected_value':value,'revision_id':revision}
                         if projection['derivation'] in ('report_observation','report_announcement_ordinal','forecast_category_code'):evidence['visible_report_periods']=visible_periods[security]
                         metadata[name]['by_key'].append(evidence)
-                        position=(start+offset,source.security_positions[security])
                         for kind,v in {'values':value if valid else 0,'original_values':value if valid else 0,
-                            'validity':valid,'available':instant_us(clock),'available_validity':True,
-                            'reasons':0 if valid else REASONS.index('source_missing')}.items():arrays[name+'::'+kind][position]=v
-        child=seal({'contract_version':'reader_column_evidence_v1','context':{'domain':DOMAIN,'selection':selection,
-            'snapshot_id':event_snapshot,'event_contexts':contexts},'field_meta':metadata,'fields':list(outputs),'sessions':selected},'evidence_ref')
+                            'validity':valid,'available':component_us if component_us is not None else instant_us(clock),'available_validity':True,
+                            'reasons':0 if valid else REASONS.index('source_missing')}.items():payload[kind].append(v)
+                    for kind,values in payload.items():arrays[name+'::'+kind][start+offset,positions]=values
+                metrics['evidence_seconds']+=time.monotonic()-evidence_started
+        encode_started=time.monotonic()
+        child={'contract_version':'reader_column_evidence_v1','context':{'domain':DOMAIN,'selection':selection,
+            'snapshot_id':event_snapshot,'event_contexts':contexts},'field_meta':metadata,'fields':list(outputs),'sessions':selected}
         check_manifest={**manifest,'daily_fields':{**manifest.get('daily_fields',{}),**{n:{'domain':DOMAIN,'dtype':'float64','unit':unit} for n in outputs}},
                         'financial_materializations':{**manifest.get('financial_materializations',{}),**declarations}}
         validate_financial_materializations(check_manifest,child)
+        child=compact_reader_evidence(root,child,_owner=encoding)
         chunks.append({'sessions':selected,'evidence':[write_part(root,child,'evidence_ref')]})
+        metrics['encode_write_seconds']+=time.monotonic()-encode_started
+        metrics['event_reader']=dict(event_owner.metrics);metrics['financial_memo']=dict(memo.metrics)
+        metrics['evidence_encoding']=dict(encoding.metrics)
+        checkpoint_started=time.monotonic()
         staging.commit(start+len(selected),chunks,metrics)
+        metrics['checkpoint_seconds']+=time.monotonic()-checkpoint_started
+        metrics['last_block_seconds']=time.monotonic()-block_started
         if progress is not None: progress({'completed_dates':start+len(selected),'total_dates':len(days),**metrics})
     for name in outputs:
         for kind,(_,dtype) in kinds.items():

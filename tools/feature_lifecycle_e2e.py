@@ -27,6 +27,146 @@ def footprint(root):
     return result
 
 
+def _performance_acceptance(cfg,run):
+    """Checks are part of this one full run, not separate profiling attempts."""
+    from collections import defaultdict
+    from dataclasses import replace
+    from datetime import datetime,timedelta
+    from axiom_data import EventReadOwner,DataBatch,ttm,single_quarter
+    from axiom_data.event_reader import read_events
+    from axiom_research import financial_feature_columns as financial
+    from axiom_research import feature_input_evidence as evidence
+    counts=defaultdict(int);recent=defaultdict(list);phase={};validation_seconds=0.0
+    original_iter=EventReadOwner.iter_cutoffs
+    original_memo=financial._memoized_results
+    original_compact=evidence.compact_reader_evidence
+    def compare(left,right):
+        assert left.frame.equals(right.frame)
+        assert left.field_meta==right.field_meta and left.context==right.context
+    def cutoffs(owner,*,query,cutoffs,_borrow_context=False):
+        nonlocal validation_seconds
+        identity=(query.domain,query.fields)
+        for batch in original_iter(owner,query=query,cutoffs=cutoffs,_borrow_context=_borrow_context):
+            if counts[('events',identity)]==0:
+                started=time.monotonic()
+                # Real revision availability boundary: original selector and
+                # cached grouping at one microsecond before/equal/after.
+                candidates=[(datetime.fromisoformat(row['usable_from']),row['security_id'])
+                            for row in batch.field_meta[query.fields[0]]['by_key']]
+                if candidates:
+                    boundary,security=min(candidates,key=lambda item:abs((item[0]-datetime.fromisoformat(batch.context['query']['cutoff'])).total_seconds()))
+                    probe=replace(query,symbols=(security,))
+                    saved_records=owner.selected_records;saved_tokens=owner.selected_tokens
+                    for delta in (-1,0,1):
+                        cutoff=(boundary+timedelta(microseconds=delta)).isoformat()
+                        selected=read_events(owner,owner.snapshot,replace(probe,cutoff=cutoff),
+                            _snapshot=owner.manifest,_evidence=owner.evidence[query.domain],_owner=owner,_borrow_context=True)
+                        baseline=read_events(owner.store,owner.snapshot,replace(probe,cutoff=cutoff),
+                            _snapshot=owner.manifest,_evidence=owner.evidence[query.domain],_borrow_context=True)
+                        compare(selected,baseline)
+                        counts['real_revision_boundary_cutoffs']+=1
+                    owner.selected_records=saved_records;owner.selected_tokens=saved_tokens
+                    counts[('events',identity)]+=1
+                validation_seconds+=time.monotonic()-started
+            yield batch
+    def memo(batch,event_rows,tokens,targets_by_name,outputs,field,query,unit,owner):
+        nonlocal validation_seconds
+        result=original_memo(batch,event_rows,tokens,targets_by_name,outputs,field,query,unit,owner)
+        identity=(query.domain,field)
+        if counts[('financial',identity)]<2:
+            started=time.monotonic()
+            for recipe,values in result.items():
+                pairs=list(values)[:8]
+                if not pairs:continue
+                securities=sorted({s for s,p in pairs});periods=sorted({p for s,p in pairs});chosen=set(securities)
+                if recipe in ('ttm','single_quarter'):
+                    restricted=DataBatch(batch.frame.loc[batch.frame['security_id'].isin(chosen)],
+                        {field:{**batch.field_meta[field],'by_key':[r for r in batch.field_meta[field]['by_key'] if r['security_id'] in chosen]}},
+                        {**batch.context,'query':{**batch.context['query'],'symbols':securities}})
+                    baseline=(ttm if recipe=='ttm' else single_quarter)(restricted,field=field,
+                        endpoint=query.filters['endpoint'],report_type=query.filters['report_type'],
+                        basis='cumulative_ytd',unit=unit,periods=periods,_borrow_context=True)
+                    rows={(r['security_id'],r['report_period']):r for r in baseline.frame.to_dict('records')}
+                    meta={(r['security_id'],r['report_period']):r for r in baseline.field_meta[field]['by_key']}
+                else:
+                    rows={(r['security_id'],r['report_period']):r for r in event_rows};meta={}
+                    for item in batch.field_meta[field]['by_key']:
+                        pair=(item['security_id'],item['report_period'])
+                        meta[pair]={'status':item['status'],'missing_reason':item.get('missing_reason'),
+                            'components':[{'security_id':pair[0],'report_period':pair[1],'status':item['status'],'provenance':item}]}
+                for pair in pairs:
+                    proof=meta.get(pair,{'components':[],'status':'source_missing','missing_reason':'no_visible_report'})
+                    value=rows.get(pair,{}).get(field) if proof['status']=='value' else None
+                    assert values[pair]==financial._stable_result(value,proof,recipe)
+                    counts['financial_reference_cells']+=1
+            # Repeat identical dependencies to explicitly exercise memo hits.
+            before=owner.metrics['hits']
+            assert original_memo(batch,event_rows,tokens,targets_by_name,outputs,field,query,unit,owner)==result
+            assert owner.metrics['hits']>before or not any(result.values())
+            counts['memo_hit_comparisons']+=1
+            if counts['same_value_revision_invalidation']==0:
+                from copy import deepcopy
+                for name,targets in targets_by_name.items():
+                    recipe=outputs[name]['derivation']
+                    if recipe not in ('ttm','single_quarter'):continue
+                    found=None
+                    for security,period in targets.items():
+                        needed=financial._dependencies(period,recipe)
+                        found=next(((security,period,row) for row in event_rows
+                                    if row['security_id']==security and row['report_period'] in needed),None)
+                        if found:break
+                    if found:
+                        security,period,row=found;native=tuple(str(row[k]) for k in batch.context['logical_key'])
+                        changed_tokens={s:dict(v) for s,v in tokens.items()}
+                        changed_tokens[security][native]=(*tokens[security][native],'same-value-revision-control')
+                        changed_meta=deepcopy(batch.field_meta)
+                        for item in changed_meta[field]['by_key']:
+                            if tuple(str(item[k]) for k in batch.context['logical_key'])==native:
+                                item['revision_id']=str(item['revision_id'])+'-control'
+                        changed=DataBatch(batch.frame,changed_meta,batch.context)
+                        before=owner.metrics['misses']
+                        revised=original_memo(changed,event_rows,changed_tokens,{name:{security:period}},
+                                              {name:outputs[name]},field,query,unit,owner)
+                        assert owner.metrics['misses']>before
+                        assert revised[recipe][security,period][0:2]==result[recipe][security,period][0:2]
+                        assert revised[recipe][security,period][5]!=result[recipe][security,period][5]
+                        counts['same_value_revision_invalidation']+=1
+                        break
+            counts[('financial',identity)]+=1
+            validation_seconds+=time.monotonic()-started
+        return result
+    def compact(root,child,*,_owner=None):
+        nonlocal validation_seconds
+        value=original_compact(root,child,_owner=_owner)
+        if counts['codec_equivalence']==0:
+            started=time.monotonic()
+            # One small real proof, including all stable coverage references.
+            sample={**child,'context':{**child['context'],'event_contexts':child['context']['event_contexts'][:1]},
+                'field_meta':{f:{**m,'by_key':m['by_key'][:1]} for f,m in child['field_meta'].items()}}
+            assert original_compact(root,sample,_owner=_owner)==original_compact(root,sample)
+            counts['codec_equivalence']+=1;validation_seconds+=time.monotonic()-started
+        return value
+    def observe(record):
+        if record['stage']!='financial_inputs' or 'detail' not in record:return
+        detail=record['detail'];bundle=record['bundle'];phase[bundle]=detail
+        if detail.get('completed_dates',0)>=8:
+            recent[bundle].append(detail['last_block_seconds'])
+            recent[bundle]=recent[bundle][-3:]
+            if len(recent[bundle])==3 and sum(recent[bundle])/3>=cfg['maximum_financial_block_seconds']:
+                raise RuntimeError('FINANCIAL_THROUGHPUT_STOP: three two-session blocks exceed declared threshold')
+    EventReadOwner.iter_cutoffs=cutoffs;financial._memoized_results=memo;evidence.compact_reader_evidence=compact
+    try:
+        result=run(cfg,observer=observe)
+        assert counts['real_revision_boundary_cutoffs']>0 and counts['financial_reference_cells']>0
+        assert counts['same_value_revision_invalidation']==1 and counts['codec_equivalence']==1
+        return result,{'checks':{str(k):v for k,v in counts.items()},'validation_seconds':validation_seconds,'financial_phases':phase}
+    finally:
+        EventReadOwner.iter_cutoffs=original_iter;financial._memoized_results=original_memo;evidence.compact_reader_evidence=original_compact
+        Path(cfg['destination'],'performance-validation.json').write_text(json.dumps({
+            'checks':{str(k):v for k,v in counts.items()},'validation_seconds':validation_seconds,
+            'financial_phases':phase,'maximum_financial_block_seconds':cfg['maximum_financial_block_seconds']},indent=2))
+
+
 def acceptance(cfg):
     import numpy as np
     from prepare_qsys_history import run
@@ -42,7 +182,7 @@ def acceptance(cfg):
     root=Path(cfg['destination']);catalog=load_qsys_feature_catalog()
     selection=[s.to_dict() for s in catalog.default_selection]
     assert len(cfg['output_sessions'])==8 and len(selection)==401
-    result=run(cfg)
+    result,performance=_performance_acceptance(cfg,run)
     assert result['dates']==8 and result['columns']==401 and result['securities']==3396
     assert result['warmup']==756 and result['read_dates']==764
     limits={'maximum_source_bytes':cfg['maximum_source_bytes'],
@@ -126,7 +266,7 @@ def acceptance(cfg):
     staging=[str(p) for p in (root/'inputs').rglob('.feature-input-*')
              if p.name!='.feature-input-checkpoint.json']
     assert not staging,staging[:5]
-    return {'status':'PASS','run':result,'warm_overlap':warm,'requested_normalized_subset':norm,
+    return {'status':'PASS','run':result,'performance':performance,'warm_overlap':warm,'requested_normalized_subset':norm,
         'consumer_seconds':time.monotonic()-consumer_started,'consumer_metrics':consumer_metrics,
         'physical_cells':cells_count,'valid_cells':valid_count,'subset_training_rows':training_rows,
         'unknown_membership_cells_preserved':unknown,'unpublished_staging_files':staging,
