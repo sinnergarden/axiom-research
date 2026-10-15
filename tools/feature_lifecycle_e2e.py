@@ -13,7 +13,7 @@ import traceback
 
 
 def footprint(root):
-    seen=set();result={'unique_logical_bytes':0,'allocated_bytes':0,
+    seen=set();result={'unique_logical_bytes':0,'allocated_bytes':0,'private_allocated_bytes':0,
                       'multiply_linked_logical_bytes':0,'files':0}
     for path in root.rglob('*'):
         if not path.is_file() or path.is_symlink():continue
@@ -23,6 +23,7 @@ def footprint(root):
         result['unique_logical_bytes']+=st.st_size
         result['allocated_bytes']+=st.st_blocks*512
         if st.st_nlink>1:result['multiply_linked_logical_bytes']+=st.st_size
+        else:result['private_allocated_bytes']+=st.st_blocks*512
     result['scope']='destination only; hardlinks counted once here; APFS shared extents and whole-platform peak unmeasured'
     return result
 
@@ -38,11 +39,14 @@ def _performance_acceptance(cfg,run):
     from axiom_research import feature_input_evidence as evidence
     counts=defaultdict(int);recent=defaultdict(list);phase={};validation_seconds=0.0
     original_iter=EventReadOwner.iter_cutoffs
+    original_spans=EventReadOwner.iter_security_spans
     original_memo=financial._memoized_results
     original_projection=financial._quarter_projection
     original_compact=evidence.compact_reader_evidence
     original_materialize=evidence.materialize_evidence_rows
     original_receipt=evidence.input_block_receipt
+    disk_peak={'private_allocated_bytes':0,'destination_allocated_bytes':0,'sampled':True};last_disk_sample=0.0
+    source_clocks={}
     def compare(left,right):
         assert left.frame.equals(right.frame)
         assert left.field_meta==right.field_meta and left.context==right.context
@@ -68,6 +72,42 @@ def _performance_acceptance(cfg,run):
                 counts['nonquarter_case_eligible_anchor']+=1
             validation_seconds+=time.monotonic()-started
         return projected,eligible,selected_tokens
+    def spans(owner,*,query,cutoffs,sessions,economic_boundary=True,maximum_group_bytes=None):
+        nonlocal validation_seconds
+        identity=(query.domain,query.fields)
+        for security,start,stop,batch in original_spans(owner,query=query,cutoffs=cutoffs,sessions=sessions,
+                economic_boundary=economic_boundary,maximum_group_bytes=maximum_group_bytes):
+            started=time.monotonic()
+            saved_rows=owner.selected_records;saved_tokens=owner.selected_tokens
+            if counts[('span_selector',identity)]==0 and saved_rows:
+                probe=replace(query,symbols=(security,))
+                field=query.fields[0]
+                boundary=datetime.fromisoformat(batch.field_meta[field]['by_key'][-1]['usable_from'])
+                for delta in (-1,0,1):
+                    cutoff=(boundary+timedelta(microseconds=delta)).isoformat()
+                    selected=read_events(owner,owner.snapshot,replace(probe,cutoff=cutoff),
+                        _snapshot=owner.manifest,_evidence=owner.evidence[query.domain],_owner=owner,_borrow_context=True)
+                    baseline=read_events(owner.store,owner.snapshot,replace(probe,cutoff=cutoff),
+                        _snapshot=owner.manifest,_evidence=owner.evidence[query.domain],_borrow_context=True)
+                    compare(selected,baseline);counts['real_revision_boundary_cutoffs']+=1
+                baseline=read_events(owner.store,owner.snapshot,replace(probe,cutoff=cutoffs[stop-1]),
+                    _snapshot=owner.manifest,_evidence=owner.evidence[query.domain],_borrow_context=True)
+                assert batch.frame.equals(baseline.frame) and batch.field_meta==baseline.field_meta
+                clock=batch.field_meta[field]['by_key'][-1]['usable_from']
+                previous=source_clocks.setdefault(security,{})
+                if any(domain!=query.domain and value!=clock for domain,value in previous.items()):
+                    counts['asynchronous_source_clock_comparisons']+=1
+                previous[query.domain]=clock
+                counts['unchanged_span_end_comparisons']+=1;counts[('span_selector',identity)]+=1
+            if security==query.symbols[0] and start==0:
+                counts['stock_block_boundary_visits']+=1
+            if query.domain=='financial_events' and 'revenue' in query.fields and security=='cnstock.003040.SZ.20210322':
+                if sessions[start]<='2017-07-03'<=sessions[stop-1]:
+                    assert not any(r['report_period']=='2017-01-31' for r in saved_rows)
+                    counts['nonquarter_case_before_visibility']+=1
+            owner.selected_records=saved_rows;owner.selected_tokens=saved_tokens
+            validation_seconds+=time.monotonic()-started
+            yield security,start,stop,batch
     def cutoffs(owner,*,query,cutoffs,_borrow_context=False):
         nonlocal validation_seconds
         identity=(query.domain,query.fields)
@@ -98,7 +138,7 @@ def _performance_acceptance(cfg,run):
         nonlocal validation_seconds
         result=original_memo(batch,event_rows,tokens,targets_by_name,outputs,field,query,unit,owner)
         identity=(query.domain,field)
-        if counts[('financial',identity)]<2:
+        if counts[('financial',identity)]<2 and any(result.values()):
             started=time.monotonic()
             for recipe,values in result.items():
                 pairs=list(values)[:8]
@@ -143,6 +183,18 @@ def _performance_acceptance(cfg,run):
                     proof=control.field_meta[field]['by_key'][0]
                     assert proof['status']=='source_missing' and proof['missing_reason']=='missing_quarter'
                     counts['missing_quarter_control']+=1
+                    # Original financial recipe also preserves a selected
+                    # retraction; it must not fall back to an older value.
+                    from copy import deepcopy
+                    retracted=deepcopy(batch.field_meta[field]);frame=batch.frame.loc[batch.frame['security_id']==security].copy()
+                    retracted['by_key']=[r for r in retracted['by_key'] if r['security_id']==security]
+                    for item in retracted['by_key']:
+                        if item['report_period']==period:item.update(status='retracted',missing_reason='retracted')
+                    frame.loc[frame['report_period']==period,field]=None
+                    control=ttm(DataBatch(frame,{field:retracted},missing.context),field=field,
+                        endpoint=query.filters['endpoint'],report_type=query.filters['report_type'],basis='cumulative_ytd',unit=unit,periods=[period],_borrow_context=True)
+                    assert control.field_meta[field]['by_key'][0]['status']=='retracted'
+                    counts['synthetic_retraction_formula_control']+=1
                     break
             if counts['same_value_revision_invalidation']==0:
                 from copy import deepcopy
@@ -189,6 +241,12 @@ def _performance_acceptance(cfg,run):
         counts['maximum_block_receipt_bytes']=max(counts['maximum_block_receipt_bytes'],size)
         return value
     def observe(record):
+        nonlocal last_disk_sample
+        if time.monotonic()-last_disk_sample>=60:
+            current=footprint(Path(cfg['destination']))
+            disk_peak['private_allocated_bytes']=max(disk_peak['private_allocated_bytes'],current['private_allocated_bytes'])
+            disk_peak['destination_allocated_bytes']=max(disk_peak['destination_allocated_bytes'],current['allocated_bytes'])
+            last_disk_sample=time.monotonic()
         if record['stage']!='financial_inputs' or 'detail' not in record:return
         detail=record['detail'];bundle=record['bundle'];phase[bundle]=detail
         if detail.get('completed_dates',0)>=8:
@@ -198,20 +256,23 @@ def _performance_acceptance(cfg,run):
                 raise RuntimeError('FINANCIAL_THROUGHPUT_STOP: three two-session blocks exceed declared threshold')
     EventReadOwner.iter_cutoffs=cutoffs;financial._memoized_results=memo;evidence.compact_reader_evidence=forbidden_proof
     financial._quarter_projection=projection
+    EventReadOwner.iter_security_spans=spans
     evidence.materialize_evidence_rows=forbidden_proof;evidence.input_block_receipt=receipt
     try:
         result=run(cfg,observer=observe)
         assert counts['real_revision_boundary_cutoffs']>0 and counts['financial_reference_cells']>0
         assert counts['same_value_revision_invalidation']==1 and counts['block_receipts']>0 and counts['legacy_proof_calls']==0
         assert counts['nonquarter_case_before_visibility']>0 and counts['nonquarter_case_eligible_anchor']>0 and counts['missing_quarter_control']==1
-        return result,{'checks':{str(k):v for k,v in counts.items()},'validation_seconds':validation_seconds,'financial_phases':phase}
+        assert counts['unchanged_span_end_comparisons']>0 and counts['stock_block_boundary_visits']>0
+        return result,{'checks':{str(k):v for k,v in counts.items()},'validation_seconds':validation_seconds,'financial_phases':phase,'disk_peak':disk_peak}
     finally:
         EventReadOwner.iter_cutoffs=original_iter;financial._memoized_results=original_memo;evidence.compact_reader_evidence=original_compact
         financial._quarter_projection=original_projection
+        EventReadOwner.iter_security_spans=original_spans
         evidence.materialize_evidence_rows=original_materialize;evidence.input_block_receipt=original_receipt
         Path(cfg['destination'],'performance-validation.json').write_text(json.dumps({
             'checks':{str(k):v for k,v in counts.items()},'validation_seconds':validation_seconds,
-            'financial_phases':phase,'maximum_financial_block_seconds':cfg['maximum_financial_block_seconds']},indent=2))
+            'financial_phases':phase,'disk_peak':disk_peak,'maximum_financial_block_seconds':cfg['maximum_financial_block_seconds']},indent=2))
 
 
 def acceptance(cfg):

@@ -78,6 +78,24 @@ def _dependencies(period,recipe):
     return tuple(dict.fromkeys(needed))
 
 
+def _projection_targets(rows, outputs, symbols, day, *, forecast=False):
+    ordered={s:[] for s in symbols}
+    for row in rows:
+        if forecast or row['report_period']<=day:ordered[row['security_id']].append(row)
+    periods={s:[r['report_period'] for r in sorted(records,key=lambda r:
+        (r['announcement_date'],r['report_period']) if forecast else (r['report_period'],))]
+        for s,records in ordered.items()}
+    targets={}
+    for name,projection in outputs.items():
+        if 'reports_back' in projection:
+            require(all(len(p)==len(set(p)) for p in periods.values()),'distinct visible report periods required')
+            back=projection['reports_back']
+            targets[name]={s:p[-1-back] for s,p in periods.items() if len(p)>back}
+        else:
+            targets[name]={s:_period_back(max(p),projection['quarters_back']) for s,p in periods.items() if p}
+    return targets
+
+
 class _FinancialMemo:
     """One field/stream/Snapshot/rule owner; keys contain actual dependency tokens."""
     def __init__(self,maximum_bytes=128*1024**2):
@@ -320,29 +338,11 @@ def _extend_financial_feature_source(data, *, source, query, field, outputs, uni
                 selected_tokens=event_owner.selected_tokens
                 if quarterly:
                     batch,event_rows,selected_tokens=_quarter_projection(batch,event_rows,selected_tokens,day)
-                latest={}
-                for row in event_rows:
-                    require(row['security_id'] in subset and ('endpoint' not in query.filters or row.get('endpoint')==query.filters['endpoint']) and
-                            ('report_type' not in query.filters or row.get('report_type')==query.filters['report_type']),'unexpected financial event stream')
-                    if query.domain=='forecast_events' or row['report_period']<=day:
-                        latest[row['security_id']]=max(latest.get(row['security_id'],row['report_period']),row['report_period'])
-                # Prepare each Data derivation once for the union of current
-                # and prior-year target periods, not once per output leaf.
-                ordered={security:[] for security in subset}
-                for record in event_rows:
-                    if query.domain=='forecast_events' or record['report_period']<=day:
-                        ordered[record['security_id']].append(record)
-                visible_periods={security:[r['report_period'] for r in sorted(records,key=lambda r:(r['announcement_date'],r['report_period']) if query.domain=='forecast_events' else (r['report_period'],))] for security,records in ordered.items()}
-                if any(p['derivation'] in ('report_observation','report_announcement_ordinal','forecast_category_code') for p in outputs.values()):
-                    require(all(len(periods)==len(set(periods)) for periods in visible_periods.values()),
-                            'distinct visible report periods required')
-                targets_by_name={}
-                for name,projection in outputs.items():
-                    if projection['derivation'] in ('report_observation','report_announcement_ordinal','forecast_category_code'):
-                        offset_back=projection['reports_back']
-                        targets_by_name[name]={s:periods[-1-offset_back] for s,periods in visible_periods.items() if len(periods)>offset_back}
-                    else:
-                        targets_by_name[name]={s:_period_back(p,projection['quarters_back']) for s,p in latest.items()}
+                require(all(row['security_id'] in subset and
+                    ('endpoint' not in query.filters or row.get('endpoint')==query.filters['endpoint']) and
+                    ('report_type' not in query.filters or row.get('report_type')==query.filters['report_type'])
+                    for row in event_rows),'unexpected financial event stream')
+                targets_by_name=_projection_targets(event_rows,outputs,subset,day,forecast=query.domain=='forecast_events')
                 derived_by_recipe=_memoized_results(batch,event_rows,selected_tokens,
                     targets_by_name,outputs,field,query,unit,memo)
                 metrics['derive_seconds']+=time.monotonic()-derive_started
@@ -411,4 +411,198 @@ def _extend_financial_feature_source(data, *, source, query, field, outputs, uni
     manifest.pop('source_ref');manifest=seal(manifest,'source_ref');atomic_json(root/'source.json',manifest)
     staging.retire(manifest)
     metrics['event_reader']=dict(event_owner.metrics)
+    return FeatureColumnSource(manifest,arrays),metrics
+
+
+def extend_financial_feature_sources(data, *, source, bundles, destination,
+        event_snapshot, report_start, report_end, maximum_added_bytes,
+        maximum_event_cache_bytes, maximum_group_bytes, progress=None,
+        stock_block_limit=None):
+    """One stock-block traversal for all required compatible event inputs.
+
+    Published daily ABI and original Data recipes remain unchanged. Only the
+    final complete source is visible; the existing checkpoint commits securities.
+    """
+    import math
+    import numpy as np
+    from axiom_data import DataBatch,EventQuery,EventReadOwner
+    from axiom_data.financial import FINANCIAL_RECIPE_VERSION
+    from .stock_feature_columns import FeatureColumnSource,REASONS
+    from .feature_input_buffers import seal_feature_buffer
+    from .feature_input_checkpoint import FeatureInputCheckpoint,atomic_json
+    from .feature_input_evidence import input_block_receipt,check_input_disk
+    manifest=deepcopy(source.manifest);spec=manifest['spec'];days=spec['read_sessions'];symbols=spec['universe']
+    root=Path(destination);root.mkdir(parents=True,exist_ok=True)
+    require(spec['pit_policy']=='best_effort_vendor_v1','supported financial PIT policy required')
+    streams={};declarations={};field_bundles={}
+    for name,bundle in bundles.items():
+        outputs={n:p for n,p in bundle['outputs'].items() if n not in source.physical_fields()}
+        if not outputs:continue
+        quarterly=any('quarters_back' in p for p in outputs.values())
+        require(not quarterly or all('quarters_back' in p for p in outputs.values()),'separate quarterly/observation recipes')
+        require(all(_projection_valid(p) for p in outputs.values()),'explicit financial projections required')
+        selection=QUARTER_POLICY if quarterly else FORECAST_POLICY if bundle['domain']=='forecast_events' else POLICY
+        if quarterly:require(bundle.get('selection')==selection,'quarter declaration differs from producer rule')
+        filters={k:bundle[k] for k in ('endpoint','report_type') if bundle[k] is not None}
+        key=(event_snapshot,bundle['domain'],tuple(sorted(filters.items())),report_start,report_end,
+             spec['pit_policy'],bundle['session_timezone'],quarterly)
+        stream=streams.setdefault(key,{'domain':bundle['domain'],'filters':filters,'fields':[],
+            'bundles':[],'zone':bundle['session_timezone'],'quarterly':quarterly})
+        fields=[bundle['field']]+(['announcement_date'] if bundle['domain']=='forecast_events' else [])
+        stream['fields']=list(dict.fromkeys(stream['fields']+fields))
+        stream['bundles'].append(name);field_bundles[name]={**bundle,'outputs':outputs,'selection':selection}
+        for output,projection in outputs.items():
+            require(output not in declarations,'duplicate financial output')
+            declarations[output]={**projection,'source_domain':bundle['domain'],'source_field':bundle['field'],
+                'endpoint':bundle['endpoint'],'report_type':bundle['report_type'],'basis':bundle['basis'],
+                'unit':bundle['unit'],'selection':selection,'session_timezone':bundle['session_timezone'],
+                'recipe_version':FINANCIAL_RECIPE_VERSION,'report_start':report_start,'report_end':report_end,
+                'event_snapshot':event_snapshot,'coverage_security_ids':list(symbols)}
+    require(declarations,'missing event outputs required')
+    require(len(days)*len(symbols)*27*len(declarations)<=maximum_added_bytes,'financial output buffer budget exceeded')
+    kinds={'values':('<f8','float64_le'),'original_values':('<f8','float64_le'),
+        'validity':(bool,'bool_u8'),'available':('<i8','int64_le'),
+        'available_validity':(bool,'bool_u8'),'reasons':('u1','uint8')}
+    layout={name+'::'+kind:{'dtype':np.dtype(dtype).str,'shape':[len(days),len(symbols)]}
+            for name in declarations for kind,(dtype,_) in kinds.items()}
+    reasons=list(manifest['reason_codes'])
+    if len(reasons)<len(REASONS):reasons.extend(REASONS[len(reasons):])
+    metrics={'reason_codes':reasons,'completed_securities':0,'total_securities':len(symbols),
+        'total_dates':len(days),'added_fields':len(declarations),'compatible_streams':len(streams),
+        'derive_seconds':0.0,'fill_seconds':0.0,'encode_write_seconds':0.0,'checkpoint_seconds':0.0,
+        'derived_spans':0,'broadcast_cells':0,'saved_cell_proof_rows':0,'stock_blocks':[],
+        'memo_hits':0,'memo_misses':0,'formula_calls':0}
+    staging=FeatureInputCheckpoint(root,binding={'source_ref':source.identity,'declarations':declarations,
+        'execution':'stock_block_event_spans_v1'},layout=layout,sessions=symbols,metrics=metrics,axis=1)
+    arrays={**source.arrays,**staging.arrays};metrics=staging.state['metrics'];reasons=metrics['reason_codes']
+    started=time.monotonic();last_report=started
+    with EventReadOwner(data,snapshot=event_snapshot,maximum_cache_bytes=maximum_event_cache_bytes,
+                        maximum_partition_rows=max(1,maximum_event_cache_bytes//64)) as owner:
+        # Estimate stock width from the largest compatible projected stream,
+        # not fixed source/field counts. Actual decoded bytes are checked by Data.
+        largest=1
+        for stream in streams.values():
+            native=owner.manifest['domains'][stream['domain']]
+            rows=sum(p['rows'] for p in native['partitions'] if
+                not p.get('partition','').startswith('period-') or report_start[:4]<=p['partition'][7:]<=report_end[:4])
+            width=len(stream['fields'])+len(native['contract']['logical_key'])+12
+            largest=max(largest,math.ceil(rows/max(1,len(symbols)))*width*256)
+            for name in stream['bundles']:
+                bundle=field_bundles[name];actual=native['contract']['fields'][bundle['field']]
+                require(actual.get('unit')==bundle['unit'] or
+                    actual.get('dtype')=='string' and bundle['unit']=='dimensionless' or
+                    actual.get('dtype')=='date' and bundle['unit']=='days','financial source unit mismatch')
+                require(all(p['derivation'] not in ('ttm','single_quarter') for p in bundle['outputs'].values()) or
+                    actual.get('basis')=='cumulative_ytd','financial source basis mismatch')
+        width=max(1,min(len(symbols),maximum_group_bytes//largest))
+        if stock_block_limit is not None:
+            require(type(stock_block_limit) is int and stock_block_limit>0,'positive stock block limit')
+            width=min(width,stock_block_limit)
+        metrics['planned_stock_block_size']=width;metrics['estimated_group_bytes_per_security']=largest
+        first=staging.state['completed_dates']
+        while first<len(symbols):
+            settings=root/'resource-settings.json'
+            if settings.exists():
+                import json
+                requested=json.loads(settings.read_text())['stock_block_size']
+                require(type(requested) is int and 0<requested<=len(symbols),'valid stock resource setting required')
+                if requested!=width:
+                    metrics.setdefault('resource_adjustments',[]).append({'completed_securities':first,'before':width,'after':requested,
+                        'group_budget_bytes':maximum_group_bytes,'basis':'explicit resource-settings.json; actual decoded budget remains enforced'})
+                    width=requested
+            stop=min(first+width,len(symbols));subset=symbols[first:stop];block_started=time.monotonic()
+            check_input_disk(root)
+            for stream in streams.values():
+                cutoffs=[_cutoff(d,spec['cutoff_by_session'][d],stream['zone']) for d in days]
+                cutoff_us=np.asarray([instant_us(c) for c in cutoffs],dtype='<i8')
+                query=EventQuery(stream['domain'],tuple(stream['fields']),tuple(subset),report_start,report_end,
+                    cutoffs[-1],spec['pit_policy'],'report_period',stream['filters'])
+                memos={name:_FinancialMemo() for name in stream['bundles']}
+                positions={s:first+i for i,s in enumerate(subset)}
+                for security,start,end,batch in owner.iter_security_spans(query=query,cutoffs=cutoffs,sessions=days,
+                        economic_boundary=stream['domain']!='forecast_events',maximum_group_bytes=maximum_group_bytes):
+                    rows=owner.selected_records;tokens=owner.selected_tokens
+                    if stream['quarterly']:batch,rows,tokens=_quarter_projection(batch,rows,tokens,days[start])
+                    column=positions[security]
+                    for name in stream['bundles']:
+                        bundle=field_bundles[name];field=bundle['field'];outputs=bundle['outputs']
+                        # Preserve field-specific metadata/clocks; never replace
+                        # independent source availability with a common row clock.
+                        selected=DataBatch(batch.frame,{field:batch.field_meta[field]},
+                            {**batch.context,'query':{**batch.context['query'],'fields':[field]}})
+                        single=replace(query,fields=(field,),symbols=(security,))
+                        targets=_projection_targets(rows,outputs,[security],days[start],forecast=stream['domain']=='forecast_events')
+                        tick=time.monotonic()
+                        values=_memoized_results(selected,rows,tokens,targets,outputs,field,single,bundle['unit'],memos[name])
+                        metrics['derive_seconds']+=time.monotonic()-tick;metrics['derived_spans']+=1
+                        tick=time.monotonic()
+                        for output,projection in outputs.items():
+                            period=targets[output].get(security)
+                            result=values[projection['derivation']].get((security,period))
+                            if result is None:value,valid,meta,clock,clock_us=None,False,{'missing_reason':'no_visible_report'},None,None
+                            else:value,valid,meta,clock,clock_us=result
+                            require(clock_us is None or clock_us<=cutoff_us[start],'future financial component')
+                            require(not valid or np.isfinite(value),'nonfinite financial input')
+                            reason=None if valid else meta['missing_reason']
+                            require(reason is None or isinstance(reason,str) and bool(reason),'financial missing state required')
+                            if reason not in reasons:reasons.append(reason)
+                            require(len(reasons)<=256,'financial reason dictionary exceeds uint8')
+                            target=(slice(start,end),column)
+                            for kind in ('values','original_values'):arrays[output+'::'+kind][target]=value if valid else 0
+                            arrays[output+'::validity'][target]=valid
+                            arrays[output+'::reasons'][target]=reasons.index(reason)
+                            arrays[output+'::available'][target]=clock_us if clock_us is not None else cutoff_us[start:end]
+                            arrays[output+'::available_validity'][target]=True
+                            metrics['broadcast_cells']+=end-start
+                        metrics['fill_seconds']+=time.monotonic()-tick
+                    if progress is not None and time.monotonic()-last_report>=10:
+                        progress({**metrics,'active_security':security,'active_domain':stream['domain'],
+                                  'event_reader':dict(owner.metrics),'elapsed_seconds':time.monotonic()-started})
+                        last_report=time.monotonic()
+                for memo in memos.values():
+                    metrics['memo_hits']+=memo.metrics['hits'];metrics['memo_misses']+=memo.metrics['misses']
+                    metrics['formula_calls']+=memo.metrics['formula_calls']
+                del memos
+            metrics['completed_securities']=stop;metrics['event_reader']=dict(owner.metrics)
+            metrics['stock_blocks'].append({'start':first,'stop':stop,'seconds':time.monotonic()-block_started})
+            tick=time.monotonic();staging.commit(stop,[],metrics);metrics['checkpoint_seconds']+=time.monotonic()-tick
+            if progress is not None:progress(dict(metrics))
+            first=stop
+        chunks=[];tick=time.monotonic()
+        for offset in range(0,len(days),32):
+            child=input_block_receipt(spec=spec,sessions=days[offset:offset+32],fields=declarations,
+                context={'domain':DOMAIN,'snapshot_id':event_snapshot},
+                definitions={n:{'dtype':'float64','unit':d['unit']} for n,d in declarations.items()},
+                bindings={n:digest({k:v for k,v in d.items() if k not in ('report_start','report_end','coverage_security_ids')}) for n,d in declarations.items()})
+            chunks.append({'sessions':days[offset:offset+32],'evidence':[write_part(root,child,'evidence_ref')]})
+        metrics['block_receipt_bytes']=sum(Path(c['evidence'][0]['path']).stat().st_size for c in chunks)
+        metrics['encode_write_seconds']+=time.monotonic()-tick
+        for name in declarations:
+            for kind,(_,dtype) in kinds.items():
+                key=name+'::'+kind
+                manifest['buffers'][key],arrays[key]=seal_feature_buffer(root,arrays[key],dtype=dtype,
+                    shape=(len(days),len(symbols)),retain_staging=True)
+        manifest['reason_codes']=reasons
+        manifest.setdefault('daily_fields',{}).update({n:{'domain':DOMAIN,'dtype':'float64','unit':d['unit']} for n,d in declarations.items()})
+        manifest.setdefault('financial_materializations',{}).update(declarations)
+        manifest.setdefault('daily_extensions',[]).append({'fields':list(declarations),'chunks':chunks})
+        previous=manifest['source_profiles'].get(DOMAIN)
+        if previous is None:
+            first=next(iter(declarations.values()));native=owner.manifest['domains'][first['source_domain']]
+            previous={'contract':{'contract_id':'research.financial_materialization.v1','logical_key':['security_id','session'],'fields':{}},
+                'source_profile':{'id':'research.financial_materialization.v1','financial_inputs':{k:native[k] for k in ('contract','source_profile')},
+                    'financial_inputs_by_field':{},'projections':{},'not_native_daily':True}}
+        profile=deepcopy(previous);by_field=profile['source_profile'].setdefault('financial_inputs_by_field',{
+            n:profile['source_profile']['financial_inputs'] for n in profile['source_profile']['projections']})
+        for name,declaration in declarations.items():
+            native=owner.manifest['domains'][declaration['source_domain']]
+            profile['contract']['fields'][name]={'dtype':'float64','unit':declaration['unit']}
+            by_field[name]={k:native[k] for k in ('contract','source_profile')}
+            profile['source_profile']['projections'][name]={k:v for k,v in declaration.items() if k not in
+                ('event_snapshot','report_start','report_end','coverage_security_ids')}
+        manifest['source_profiles'][DOMAIN]=profile
+        validate_financial_materializations(manifest)
+        staging.commit(len(symbols),chunks,metrics)
+        manifest.pop('source_ref');manifest=seal(manifest,'source_ref');atomic_json(root/'source.json',manifest)
+        staging.retire(manifest)
     return FeatureColumnSource(manifest,arrays),metrics

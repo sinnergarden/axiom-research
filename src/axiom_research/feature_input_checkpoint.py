@@ -29,18 +29,19 @@ def atomic_json(path, value):
 
 
 class FeatureInputCheckpoint:
-    def __init__(self, root, *, binding, layout, sessions, metrics):
+    def __init__(self, root, *, binding, layout, sessions, metrics, axis=0):
         import numpy as np
         self.root=Path(root).resolve(); self.path=self.root/'.feature-input-checkpoint.json'
         self.binding=digest(binding); self.layout=layout; self.sessions=sessions
+        require(axis in (0,1),'input checkpoint axis required');self.axis=axis
         self.arrays={}
         if self.path.exists():
             state=json.loads(self.path.read_text()); _verify_ref(state,'checkpoint_ref')
             require(state.get('status')!='PUBLISHED','input already published; open its source.json instead of staging')
-            require(state['binding']==self.binding and state['layout']==layout,'input checkpoint binding/layout mismatch')
+            require(state['binding']==self.binding and state['layout']==layout and state.get('axis',0)==axis,'input checkpoint binding/layout mismatch')
             done=state['completed_dates']; chunks=state['chunks']
             require(type(done) is int and 0<=done<=len(sessions) and
-                    [d for c in chunks for d in c['sessions']]==sessions[:done], 'input checkpoint prefix mismatch')
+                    (axis==1 or [d for c in chunks for d in c['sessions']]==sessions[:done]), 'input checkpoint prefix mismatch')
             require(set(state['files'])==set(layout),'input checkpoint buffer set mismatch')
             for name,item in layout.items():
                 path=Path(state['files'][name]); expected=int(np.prod(item['shape']))*np.dtype(item['dtype']).itemsize
@@ -51,7 +52,7 @@ class FeatureInputCheckpoint:
                 require(block['start']==cursor and cursor<block['stop']<=done,'input checkpoint block mismatch')
                 require(set(block['digests'])==set(layout),'input checkpoint block buffers mismatch')
                 for name,expected in block['digests'].items():
-                    actual=sha256(memoryview(self.arrays[name][cursor:block['stop']]).cast('B')).hexdigest()
+                    actual=self._block_digest(self.arrays[name],cursor,block['stop'])
                     require(actual==expected,'input checkpoint committed buffer changed')
                 cursor=block['stop']
             require(cursor==done,'input checkpoint committed prefix mismatch')
@@ -68,9 +69,16 @@ class FeatureInputCheckpoint:
             self.arrays={name:allocate_feature_buffer(self.root,dtype=item['dtype'],shape=tuple(item['shape']))
                          for name,item in layout.items()}
             self.state={'binding':self.binding,'layout':layout,
+                        'axis':axis,
                         'files':{name:str(Path(value.filename).resolve()) for name,value in self.arrays.items()},
                         'completed_dates':0,'chunks':[],'buffer_blocks':[],'metrics':metrics}
             self.commit(0,[],metrics)
+
+    def _block_digest(self,array,start,stop):
+        if self.axis==0:return sha256(memoryview(array[start:stop]).cast('B')).hexdigest()
+        value=sha256()
+        for row in array:value.update(memoryview(row[start:stop]).cast('B'))
+        return value.hexdigest()
 
     def commit(self, completed, chunks, metrics):
         from .feature_input_evidence import check_input_disk
@@ -98,7 +106,7 @@ class FeatureInputCheckpoint:
         blocks=list(self.state['buffer_blocks']); start=self.state['completed_dates']
         if completed>start:
             blocks.append({'start':start,'stop':completed,'digests':{name:
-                sha256(memoryview(array[start:completed]).cast('B')).hexdigest() for name,array in self.arrays.items()}})
+                self._block_digest(array,start,completed) for name,array in self.arrays.items()}})
         self.state={**self.state,'completed_dates':completed,'chunks':list(chunks),'buffer_blocks':blocks,'metrics':dict(metrics)}
         atomic_json(self.path,seal(self.state,'checkpoint_ref'))
 

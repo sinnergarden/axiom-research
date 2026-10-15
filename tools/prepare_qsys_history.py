@@ -73,7 +73,7 @@ def run(cfg, *, observer=None):
     from axiom_research.qsys_catalog import load_qsys_feature_catalog,qsys_input_requirements
     from axiom_research.stock_feature_library import SavedColumnFeatureSource,CatalogFeatureLibrary
     from axiom_research.stock_feature_columns import extend_feature_column_source,build_feature_column_source
-    from axiom_research.financial_feature_columns import extend_financial_feature_source
+    from axiom_research.financial_feature_columns import extend_financial_feature_sources
     from axiom_research.benchmark_feature_columns import extend_benchmark_feature_source
     from axiom_research.industry_feature_columns import extend_industry_feature_source
     from axiom_research.stock_artifacts import digest
@@ -172,26 +172,24 @@ def run(cfg, *, observer=None):
             snapshot=base,destination=path.parent,block_sessions=2,maximum_added_bytes=8*1024**3,
             progress=lambda detail:progress('daily_inputs',domain=domain,detail=detail))
         finish(path,binding,source,metrics);source_path=path
-    for key,bundle in requirements['financial_fields'].items():
-        fields={k:v for k,v in bundle['outputs'].items() if k not in source.physical_fields()}
-        if not fields:continue
-        if any('quarters_back' in p for p in fields.values()) and bundle.get('selection')!=QUARTER_POLICY:
-            raise ValueError('quarter input declaration differs from producer selection rule')
-        path=root/'inputs'/key/'source.json';binding={'request':request_ref,'parent':source.identity,'bundle':bundle,'snapshot':base}
+    event_bundles={key:bundle for key,bundle in requirements['financial_fields'].items()
+        if any(field not in source.physical_fields() for field in bundle['outputs'])}
+    if event_bundles:
+        path=root/'inputs'/'events'/'source.json'
+        binding={'request':request_ref,'parent':source.identity,'bundles':event_bundles,'snapshot':base,
+                 'execution':'stock_block_event_spans_v1'}
         cached=resume(path,binding)
-        if cached is not None:source=cached;source_path=path;continue
-        filters={}
-        if bundle['endpoint']:filters['endpoint']=bundle['endpoint']
-        if bundle['report_type']:filters['report_type']=bundle['report_type']
-        query=EventQuery(bundle['domain'],(bundle['field'],),tuple(spec['universe']),cfg.get('report_start','2010-01-01'),
-            outputs[-1],spec['cutoff_by_session'][outputs[-1]],spec['pit_policy'],'report_period',filters)
-        progress('financial_inputs',bundle=key)
-        source,metrics=extend_financial_feature_source(data,source=source,query=query,field=bundle['field'],
-            outputs=fields,unit=bundle['unit'],destination=path.parent,event_snapshot=base,
-            session_timezone=bundle['session_timezone'],block_sessions=cfg.get('input_block_sessions',2),
-            maximum_added_bytes=8*1024**3,maximum_event_cache_bytes=cfg.get('event_cache_bytes',64*1024**2),
-            progress=lambda detail:progress('financial_inputs',bundle=key,detail=detail))
-        finish(path,binding,source,metrics);source_path=path
+        if cached is not None:source=cached;source_path=path
+        else:
+            progress('financial_inputs',bundle='unified_events')
+            source,metrics=extend_financial_feature_sources(data,source=source,bundles=event_bundles,
+                destination=path.parent,event_snapshot=base,report_start=cfg.get('report_start','2010-01-01'),
+                report_end=outputs[-1],maximum_added_bytes=8*1024**3,
+                maximum_event_cache_bytes=cfg.get('event_cache_bytes',512*1024**2),
+                maximum_group_bytes=cfg.get('event_group_bytes',256*1024**2),
+                stock_block_limit=cfg.get('event_stock_block_limit'),
+                progress=lambda detail:progress('financial_inputs',bundle='unified_events',detail=detail))
+            finish(path,binding,source,metrics);source_path=path
     for kind,field,fn,kw in [('benchmark','benchmark_close',extend_benchmark_feature_source,
                              {'benchmark_security_id':cfg['benchmark_security_id']}),
                             ('industry','industry_code',extend_industry_feature_source,{})]:
