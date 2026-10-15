@@ -1,54 +1,18 @@
 # Feature library training adapter
 
-`stock_feature_library_adapter.build_feature_library_training_view` projects a
-fixed Engine FeatureView into bounded daily arrays and the original Research
-training row facts. It uses the explicit
-`stock_feature_library_training_projection_v1` contract, retaining the library
-view ref, original partition refs, fixed source descriptor, sample membership,
-original cutoff, cell clocks and reasons. This export performs no Feature math.
+The public workflow and evidence are maintained in
+[Axiom Docs: Feature lifecycle](https://github.com/sinnergarden/axiom-docs/blob/main/docs/design/feature-lifecycle.md).
 
-The public `axiom_research.load_feature_library_training_view` verifies its actual files, compares the
-exported cells with the original library projection, checks membership against
-the pinned source buffer, and returns the existing StockFeatureView owner handle.
-Both build and cold load verify the registered DAG/input semantics and every
-column/day dependency receipt, including the reference cohort for CS. An explicit
-compatibility receipt binds these checks to the requested source, snapshot/PIT
-and cutoffs. Unchanged local inputs can reuse outputs from older source frames;
-the adapter preserves their original refs and does not relabel their provenance.
-Pass this handle to `prepare_stock_ml_batch_inputs` or
-`build_configured_stock_sequential_experiment`; labels, maturity, structural
-training proofs, fitting and signal freezing continue through their original
-owners. The adapter does not alter experiment discovery or CLI registration.
+`build_feature_library_training_view` publishes a native binding consumed by the
+existing `StockFeatureView` and batch owner. Selected FeatureView columns are
+projected in memory; no permanent training matrix is copied. Publication checks
+source compatibility once. Cold loading verifies the binding, Feature files and
+source membership, without Data or full source ancestry admission.
 
-For cold restoration, load this projection through the adapter first, then pass
-the handle explicitly to `load_stock_ml_batch_inputs(..., feature_inputs=handle)`.
-Within an existing preparation session, pass `source=admitted_source` to the
-adapter loader to reuse that source owner's admission. A cold loader admits the
-pinned source through its original owner before checking local compatibility.
-Its new contract is not a legacy Feature producer artifact. The old Feature
-loaders and already saved normalized matrices retain their existing identities.
+`export_feature_library_training_projection` explicitly writes the old daily
+interoperability format. Existing projection v1 files retain their original full
+comparison loader. Both paths preserve clocks, validity and membership. The v3
+model producer still requires normalized columns; raw is not implicitly normalized.
 
-The synthetic source test verifies packed-to-training-owner row equivalence.
-Current executed scope and historical T01 measurements are recorded in the
-[user manual](https://github.com/sinnergarden/axiom-docs/blob/main/docs/user-manual.md)
-and its version ledger. They are separate from this adapter's synthetic checks.
-The adapter preserves raw and normalized layers, while the current v3 model
-producer accepts only dimensionless cross-sectional normalized columns. Passing
-a raw layer now fails before fitting rather than saving a false normalization
-declaration. This tightens admission of a previously misdeclared path; it does
-not normalize values, migrate historical files or validate earlier raw models.
-
-Engine's generic source interface supports new raw facts: register the new fact
-semantics and derived DAG, fingerprint its selected data revisions, then request
-the existing output range. A synthetic field backfill verifies only the new
-dependent output is computed and every old content ref remains unchanged despite
-the source manifest/catalog expansion. Reading source bytes and computing
-Features are counted separately.
-
-The current Research vendor source is still the fixed open/high/low/close/amount/
-factor profile. Arbitrary additional vendor fields are not admitted by its v1
-format. The smallest extension is a Data-owned typed field sidecar with its own
-clock, missing/unit/precision contract and local revision evidence, composed by a
-Research fact adapter alongside the unchanged six-field source. Its per-field/day
-receipts and source bindings feed the existing Engine interface; the old physical
-buffers and keys remain intact. No full-history job is started for this design.
+The version ledger records the candidate's one E2E outcome. Historical synthetic
+tests and T01 timings do not validate this consumer or full-history capacity.

@@ -96,11 +96,15 @@ def _saved_json(desc, ref_key, store):
     return value
 
 
-def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts=None):
+def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts=None,
+                                 _evidence_days=None, _evidence_fields=None,
+                                 _verify_buffers=True):
     """Verify JSON and every physical leaf without loading any source arrays.
 
-    A supplied matrix Store owns hash reuse and change detection. Provenance
-    documents are checked once per Store and released; no caller flag is trusted.
+    A supplied matrix Store owns hash reuse and change detection. The ordinary
+    Feature owner narrows evidence to requested leaves; omitted selectors keep
+    the explicit deep-audit behavior. Deferred buffers are checked by the same
+    Store on first use, never accepted through a persisted trusted flag.
     """
     _fields(descriptor,{'path','file_digest','source_ref'},'exact column source descriptor required')
     _physical(descriptor,store)
@@ -144,7 +148,7 @@ def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts
         shape=[len(days),len(securities)]+([] if name.startswith('member') or '::' in name else [6])
         require(desc['dtype']==buffer_types[name] and desc['shape']==shape and
                 desc['buffer_digest']==desc['file_digest'],'column source buffer shape/type/ref mismatch')
-        _physical(desc,store)
+        if _verify_buffers: _physical(desc,store)
         size=DTYPES[desc['dtype']][1]
         for dimension in shape: size*=dimension
         physical=Path(desc['path']) if store is None else store._resolve(desc['path'])
@@ -167,6 +171,12 @@ def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts
         if expected_domains is not None: covered.extend(chunk_days)
         require(type(chunk['evidence']) is list and bool(chunk['evidence']) and
             (expected_domains is None or len(chunk['evidence'])==expected_domains),'source domains required')
+        if _evidence_days is not None and not set(chunk_days).intersection(_evidence_days):
+            continue
+        chunk_fields=set(expected_fields) if expected_fields is not None else {
+            'open','high','low','close','amount_cny','factor','is_member'}
+        if _evidence_fields is not None and not chunk_fields.intersection(_evidence_fields):
+            continue
         seen_fields=[]
         for desc in chunk['evidence']:
             _fields(desc,{'path','file_digest','evidence_ref'},'exact source provenance descriptor required')

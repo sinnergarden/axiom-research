@@ -5,6 +5,7 @@ universe uses the admitted daily membership and vendor selection policy. This
 adapter uses original Data adjustment and Core DAG/CS arithmetic.
 """
 from copy import deepcopy
+from collections.abc import Mapping
 from contextlib import nullcontext
 from hashlib import sha256
 import json
@@ -52,6 +53,24 @@ def admitted_raw_dependency_refs(view, source, definitions, days, securities):
     return expected
 
 
+class _SourceArrays(Mapping):
+    """Borrow a physical buffer only when its field is actually requested."""
+    _readonly_buffers=True
+
+    def __init__(self, manifest, store):
+        self.descriptors=manifest['buffers']; self.store=store; self.cache={}
+
+    def __iter__(self): return iter(self.descriptors)
+    def __len__(self): return len(self.descriptors)
+    def __getitem__(self, name):
+        if name not in self.cache:
+            desc=self.descriptors[name]; value=self.store.buffer(desc)
+            self.cache[name]=value.view('bool') if desc['dtype']=='bool_u8' else value
+        else: self.store.check_path(self.descriptors[name]['path'])
+        return self.cache[name]
+    def clear(self): self.cache.clear()
+
+
 class SavedColumnFeatureSource:
     """Admit an immutable source through the original owner, then borrow mmap."""
     def __init__(self, descriptor, *, reference_security_ids=None, maximum_source_bytes=8*1024**3,
@@ -65,13 +84,11 @@ class SavedColumnFeatureSource:
         self._leaf_subsets={}; self._leaf_axes={}; self._axis_positions={}
         self.metrics={'physical_field_day_hashes':0,'physical_hash_bytes':0}
         manifest,_=verify_feature_column_source(descriptor,store=self.store,
-            _dependency_receipts=self._capture_leaf_refs)
+            _evidence_days=set(),_verify_buffers=False)
         universe_name=manifest['qlib_view']['universe_name']
         require(type(universe_name) is str and bool(universe_name), 'explicit saved source universe required')
         self.descriptor=deepcopy(descriptor)
-        arrays={name:self.store.buffer(desc) for name,desc in manifest['buffers'].items()}
-        for name, value in arrays.items():
-            if manifest['buffers'][name]['dtype']=='bool_u8': arrays[name]=value.view('bool')
+        arrays=_SourceArrays(manifest,self.store)
         self.source=FeatureColumnSource(manifest,arrays)
         physical=manifest['spec']['universe']
         self.reference_security_ids=list(physical if reference_security_ids is None else reference_security_ids)
@@ -201,6 +218,12 @@ class SavedColumnFeatureSource:
 
     def _selected_leaf_refs(self, fields, days, securities):
         wanted={(field,day) for field in fields for day in days}
+        missing=wanted-set(self._leaf_refs)
+        if missing:
+            verify_feature_column_source(self.descriptor,store=self.store,
+                _dependency_receipts=self._capture_leaf_refs,
+                _evidence_days={d for _,d in missing},
+                _evidence_fields={f for f,_ in missing},_verify_buffers=False)
         require(wanted<=set(self._leaf_refs), 'used source leaf evidence absent')
         axis=tuple(securities); axis=self._leaf_axis(axis)
         result={}

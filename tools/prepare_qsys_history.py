@@ -1,212 +1,258 @@
-"""Resumable offline QSYS history preparation. No training or supplier calls.
+"""Offline QSYS preparation through existing Data, input and Feature owners.
 
-Config pins existing Raw roots, parent Snapshot and public scope receipt. Work
-is single-process. Existing source receipts and FeatureLibrary.ensure checkpoints
-are reused; failures/coverage remain explicit. Run with --config /private/file.
+Use --config. Reuse a published physical source and pinned candidate; prepare
+only absent domains/cells/fields. No supplier calls, training, or automatic
+full-history start. COMPLETE means actual requested Feature coverage, never a
+marker filename. See the public Feature lifecycle workflow in axiom-docs.
 """
-import argparse, json, os, shutil, time, hashlib, resource
+import argparse
+import json
 from pathlib import Path
-from collections import defaultdict
+import resource
+import shutil
+import time
+
+
+def prepare_candidate(cfg, root, requirements, progress):
+    from axiom_data import Data
+    from axiom_data.storage import LocalStore
+    from axiom_research.stock_artifacts import digest
+    from axiom_research.feature_input_checkpoint import atomic_json
+    store=LocalStore(root/'data')
+    binding={'candidate_root':cfg['candidate_root'],'candidate_snapshot':cfg['candidate_snapshot'],
+             'market_root':cfg['market_root'],'market_snapshot':cfg['market_snapshot'],
+             'raw_roots':cfg.get('raw_roots',[])}
+    required={'market_daily','adjustment_factors','universe_membership','trading_calendar',
+              *[v['domain'] for v in requirements['daily_fields'].values()],
+              *[v['domain'] for v in requirements['financial_fields'].values()]}
+    if requirements['benchmark_fields']:required.add('benchmark_daily')
+    if requirements['industry_fields']:required.add('industry_membership_events')
+    marker=root/'candidate-snapshot.json'
+    if marker.exists():
+        saved=json.loads(marker.read_text())
+        if saved.get('request_ref')==digest(binding):
+            manifest=store.load_snapshot(saved['snapshot_id'])
+            if required<=set(manifest['domains']):
+                return Data(root/'data',cache_bytes=cfg.get('event_cache_bytes',64*1024**2),max_readers=1),saved['snapshot_id']
+    progress('candidate',required_domains=sorted(required))
+    manifest=store.borrow_snapshot(cfg['candidate_root'],cfg['candidate_snapshot'])
+    base=manifest['snapshot_id'];domains=dict(manifest['domains']);missing=required-set(domains)
+    if missing:
+        parent=store.borrow_snapshot(cfg['market_root'],cfg['market_snapshot'])
+        restored=missing&set(parent['domains'])
+        for domain in sorted(restored):domains[domain]=parent['domains'][domain]
+        del parent
+        if set(domains)!=set(manifest['domains']):
+            # Publication verifies newly attached Raw IDs. Borrow their exact
+            # receipts before attaching the restored canonical domain.
+            store.borrow_raw([cfg['market_root'],*cfg.get('raw_roots',[])],domains=restored)
+            base=store.publish_snapshot(domains,parent_snapshot=base,promote=False,
+                build_context={'purpose':'retain all prior domains and restore required missing domains',
+                               'original_roots':[cfg['candidate_root'],cfg['market_root']]})['snapshot_id']
+    missing=required-set(domains);del manifest,domains
+    data=Data(root/'data',cache_bytes=cfg.get('event_cache_bytes',64*1024**2),max_readers=1)
+    if missing:
+        ids=store.borrow_raw(cfg.get('raw_roots',[]),domains=missing)
+        if not ids:
+            raise ValueError('MISSING_RAW_REQUIRES_SEPARATE_COLLECTION: '+','.join(sorted(missing)))
+        progress('missing_domain_rebuild',domains=sorted(missing),raw_receipts=len(ids))
+        base=data.rebuild(base_snapshot=base,raw_batch_ids=ids,domains=sorted(missing),
+            operation_id='qsys-missing-domains-'+digest([base,ids,sorted(missing)])[7:23],
+            build_context={'purpose':'only missing required domains from existing Raw'},promote=False).snapshot_id
+    data.describe_snapshot(snapshot=base,domains=sorted(required))
+    data.clear_cache()
+    atomic_json(marker,{'snapshot_id':base,'root':str(root/'data'),'request_ref':digest(binding)})
+    return data,base
+
+
+def run(cfg, *, observer=None):
+    from axiom_research.feature_input_evidence import configure_input_disk_reserve
+    from axiom_research.feature_input_checkpoint import atomic_json
+    from axiom_research.qsys_history_inputs import (open_physical_source,history_scope,
+                                                   reuse_history_source,source_descriptor)
+    from axiom_research.qsys_catalog import load_qsys_feature_catalog,qsys_input_requirements
+    from axiom_research.stock_feature_library import SavedColumnFeatureSource,CatalogFeatureLibrary
+    from axiom_research.stock_feature_columns import extend_feature_column_source,build_feature_column_source
+    from axiom_research.financial_feature_columns import extend_financial_feature_source
+    from axiom_research.benchmark_feature_columns import extend_benchmark_feature_source
+    from axiom_research.industry_feature_columns import extend_industry_feature_source
+    from axiom_research.stock_artifacts import digest
+    from axiom_engine.feature_library import FeatureLibrary
+    from axiom_data import EventQuery
+    root=Path(cfg['destination']).resolve();root.mkdir(parents=True,exist_ok=True)
+    configure_input_disk_reserve(cfg.get('minimum_free_bytes',15*1024**3))
+    started=time.monotonic();timings={};previous=started;previous_stage=None
+    def progress(stage,**extra):
+        nonlocal previous,previous_stage
+        now=time.monotonic()
+        if stage!=previous_stage:
+            if previous_stage is not None:timings[previous_stage]=timings.get(previous_stage,0)+now-previous
+            previous=now;previous_stage=stage
+        record={'stage':stage,'elapsed_seconds':now-started,
+                'peak_rss_bytes':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+                'disk_free_bytes':shutil.disk_usage(root).free,**extra}
+        atomic_json(root/'progress.json',record)
+        print(json.dumps(record,default=str),flush=True)
+        if observer is not None:observer(record)
+        if record['disk_free_bytes']<cfg.get('minimum_free_bytes',15*1024**3):
+            raise RuntimeError('DISK_RESERVE_REACHED')
+        if record['peak_rss_bytes']>cfg.get('maximum_rss_bytes',12*1024**3):
+            raise RuntimeError('RSS_LIMIT_REACHED')
+    catalog=load_qsys_feature_catalog();selection=[s.to_dict() for s in catalog.default_selection]
+    requirements=qsys_input_requirements()
+    progress('candidate')
+    data,base=prepare_candidate(cfg,root,requirements,progress)
+    progress('scope')
+    original=None if cfg.get('rebuild_inputs',False) else open_physical_source(cfg['reuse_source'])
+    seed=json.loads(Path(cfg['scope_seed']).read_text()) if cfg.get('scope_seed') else {
+        'output_sessions':original.manifest['spec']['feature_sessions'],
+        'physical_universe':original.manifest['spec']['universe']}
+    outputs=cfg.get('output_sessions')
+    if outputs is None:
+        outputs=list(seed['output_sessions'])
+        end=cfg.get('output_end')
+        if end and end not in outputs:outputs=sorted([*outputs,end])
+    if outputs!=sorted(set(outputs)) or not outputs:raise ValueError('explicit sorted output sessions required')
+    spec=history_scope(data,snapshot=base,catalog=catalog,selection=selection,
+        output_sessions=outputs,physical_universe=seed['physical_universe'],destination=root/'scope')
+    request_ref=digest(spec)
+    atomic_json(root/'request.json',{'request_ref':request_ref,'spec':spec,
+        'research_range':cfg.get('research_range',['2019-01-02','2025-12-31'])})
+    progress('input_reuse')
+    reuse_path=root/'inputs/reused/source.json'
+    if reuse_path.exists():
+        source=open_physical_source(reuse_path)
+        if source.manifest['spec']!=spec:raise ValueError('saved input request differs; use a new destination and reuse_source')
+        reuse_metrics={'reused_complete_source':True,'old_value_recomputations':0}
+    elif original is None:
+        source,reuse_metrics=build_feature_column_source(data,spec=spec,destination=reuse_path.parent,
+            block_sessions=2,checkpoint=True,progress=lambda detail:progress('input_rebuild',detail=detail))
+        reuse_metrics={**reuse_metrics,'explicit_full_input_rebuild':True}
+    else:
+        source,reuse_metrics=reuse_history_source(data,source=original,spec=spec,catalog=catalog,
+            destination=reuse_path.parent,event_cache_bytes=cfg.get('event_cache_bytes',64*1024**2),
+            progress=lambda detail:progress('input_reuse',detail=detail))
+    source_path=reuse_path
+    atomic_json(root/'input-reuse.json',reuse_metrics)
+    # Stage receipts bind both request and parent source. A path alone is never
+    # evidence that the current request or newly requested fields are complete.
+    def resume(path,binding):
+        receipt=path.parent/'stage.json'
+        if not path.exists():
+            atomic_json(receipt,{'binding':digest(binding),'source_ref':None,'status':'PREPARING'})
+            return None
+        if not receipt.exists():raise ValueError('published stage lacks request binding: '+str(path))
+        saved=json.loads(receipt.read_text())
+        if saved['binding']!=digest(binding):raise ValueError('published stage request differs: '+str(path))
+        result=open_physical_source(path)
+        if saved['source_ref'] not in (None,result.identity) or result.manifest['spec']!=spec:
+            raise ValueError('published stage source/axes mismatch')
+        if saved['source_ref'] is None:
+            inherited=source.manifest['buffers']
+            if any(result.manifest['buffers'].get(k)!=v for k,v in inherited.items()):
+                raise ValueError('recovered stage changed inherited input buffers')
+            expected=set(binding.get('fields',{}))|set(binding.get('bundle',{}).get('outputs',{}))
+            if not expected<=set(result.physical_fields()):raise ValueError('recovered stage lacks requested fields')
+            atomic_json(receipt,{'binding':digest(binding),'source_ref':result.identity,'status':'COMPLETE','recovered_publication':True})
+        return result
+    def finish(path,binding,value,metrics):
+        atomic_json(path.parent/'stage.json',{'binding':digest(binding),'source_ref':value.identity,'metrics':metrics})
+    for domain in sorted({v['domain'] for v in requirements['daily_fields'].values()}):
+        fields={k:v for k,v in requirements['daily_fields'].items() if v['domain']==domain and k not in source.physical_fields()}
+        if not fields:continue
+        path=root/'inputs'/('daily-'+domain)/'source.json';binding={'request':request_ref,'parent':source.identity,'fields':fields,'snapshot':base}
+        cached=resume(path,binding)
+        if cached is not None:source=cached;source_path=path;continue
+        progress('daily_inputs',domain=domain)
+        source,metrics=extend_feature_column_source(data,source=source,daily_fields=fields,
+            snapshot=base,destination=path.parent,block_sessions=2,maximum_added_bytes=8*1024**3,
+            progress=lambda detail:progress('daily_inputs',domain=domain,detail=detail))
+        finish(path,binding,source,metrics);source_path=path
+    for key,bundle in requirements['financial_fields'].items():
+        fields={k:v for k,v in bundle['outputs'].items() if k not in source.physical_fields()}
+        if not fields:continue
+        path=root/'inputs'/key/'source.json';binding={'request':request_ref,'parent':source.identity,'bundle':bundle,'snapshot':base}
+        cached=resume(path,binding)
+        if cached is not None:source=cached;source_path=path;continue
+        filters={}
+        if bundle['endpoint']:filters['endpoint']=bundle['endpoint']
+        if bundle['report_type']:filters['report_type']=bundle['report_type']
+        query=EventQuery(bundle['domain'],(bundle['field'],),tuple(spec['universe']),cfg.get('report_start','2010-01-01'),
+            outputs[-1],spec['cutoff_by_session'][outputs[-1]],spec['pit_policy'],'report_period',filters)
+        progress('financial_inputs',bundle=key)
+        source,metrics=extend_financial_feature_source(data,source=source,query=query,field=bundle['field'],
+            outputs=fields,unit=bundle['unit'],destination=path.parent,event_snapshot=base,
+            session_timezone=bundle['session_timezone'],block_sessions=cfg.get('input_block_sessions',2),
+            maximum_added_bytes=8*1024**3,maximum_event_cache_bytes=cfg.get('event_cache_bytes',64*1024**2),
+            progress=lambda detail:progress('financial_inputs',bundle=key,detail=detail))
+        finish(path,binding,source,metrics);source_path=path
+    for kind,field,fn,kw in [('benchmark','benchmark_close',extend_benchmark_feature_source,
+                             {'benchmark_security_id':cfg['benchmark_security_id']}),
+                            ('industry','industry_code',extend_industry_feature_source,{})]:
+        if field in source.physical_fields():continue
+        path=root/'inputs'/kind/'source.json';binding={'request':request_ref,'parent':source.identity,
+            'snapshot':base,'fields':{field:kind},**kw}
+        cached=resume(path,binding)
+        if cached is not None:source=cached;source_path=path;continue
+        progress(kind+'_inputs')
+        source,metrics=fn(data,source=source,snapshot=base,destination=path.parent,
+            block_sessions=2,maximum_added_bytes=1024**3,
+            progress=lambda detail:progress(kind+'_inputs',detail=detail),**kw)
+        finish(path,binding,source,metrics);source_path=path
+    atomic_json(root/'prepared-source.json',source_descriptor(source_path))
+    # Release the Data Snapshot and mutable preparation objects before Core.
+    data.clear_cache()
+    if original is not None:original._history_store.close()
+    del source,data,original
+    import gc
+    gc.collect()
+    progress('features')
+    library=FeatureLibrary(root/'library',maximum_working_bytes=cfg.get('working_bytes',2*1024**3),
+                           maximum_source_bytes=cfg.get('maximum_source_bytes',256*1024**3))
+    views=[]
+    with SavedColumnFeatureSource(source_descriptor(source_path),maximum_source_bytes=cfg.get('maximum_source_bytes',256*1024**3),
+                                 maximum_working_bytes=cfg.get('working_bytes',2*1024**3)) as admitted:
+        owner=CatalogFeatureLibrary(library,admitted,catalog)
+        block=cfg.get('output_block_sessions',5)
+        for index in range(0,len(outputs),block):
+            days=outputs[index:index+block]
+            # Always ask Engine for real coverage. Existing immutable columns
+            # are reused; changed block size cannot produce false COMPLETE.
+            view,metrics=owner.ensure(selection=selection,output_sessions=days,
+                normalized=cfg.get('normalized',False),
+                progress=lambda detail:progress('features',first=days[0],detail=detail))
+            path=root/'views'/(digest([request_ref,days,cfg.get('normalized',False)])[7:]+'.json')
+            atomic_json(path,{'view':view,'metrics':metrics,'request_ref':request_ref,'sessions':days})
+            views.append(view)
+        progress('native_consumer_publication')
+        # Reuse all saved tiles to publish the complete requested FeatureView;
+        # this call does not accept marker-only completion.
+        full,coverage=owner.ensure(selection=selection,output_sessions=outputs,normalized=cfg.get('normalized',False))
+        from axiom_research.stock_feature_library_adapter import build_feature_library_training_view
+        with library.open_feature_view(full) as view:
+            training=build_feature_library_training_view(view,admitted,selection=selection,
+                destination=root/'training-view',maximum_working_bytes=cfg.get('working_bytes',2*1024**3))
+    progress('complete')
+    result={'status':'COMPLETE_WITH_EXPLICIT_MISSING','catalog_ref':catalog.identity,'request_ref':request_ref,
+        'dates':len(outputs),'bounds':[outputs[0],outputs[-1]],'columns':len(selection),'securities':len(spec['universe']),
+        'read_dates':len(spec['read_sessions']),'warmup':max(f['lookback'] for f in catalog.select(selection))-1,
+        'feature_view':full,'training_view':training,'source':source_descriptor(source_path),
+        'timings':timings,'elapsed_seconds':time.monotonic()-started,'input_reuse':reuse_metrics,
+        'supplier_calls':0,'training_calls':0,'industry_policy':'sw_supplier_intervals_best_effort_v1',
+        'capacity_target_bytes':200_000_000_000,'capacity_target_verified':False,'full_history_12h_verified':False}
+    atomic_json(root/'result.json',result)
+    return result
 
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--config',type=Path,required=True)
-    args=parser.parse_args();cfg=json.loads(args.config.read_text());root=Path(cfg['destination']);root.mkdir(parents=True,exist_ok=True)
-    from axiom_research.feature_input_evidence import configure_input_disk_reserve
-    configure_input_disk_reserve(cfg.get('minimum_free_bytes',15*1024**3))
-    from axiom_data import Data
-    from axiom_data.storage import LocalStore
-    from axiom_data.stock_input_sources import stock_input_source_spec, NORMALIZER
-    from axiom_research.stock_artifacts import file_digest, write_json, digest
-    from axiom_research.stock_fold_inputs import seal
-    from axiom_research.stock_matrix_storage import write_part
-    from axiom_research.stock_feature_columns import build_feature_column_source, extend_feature_column_source
-    from axiom_research.stock_feature_library import SavedColumnFeatureSource,CatalogFeatureLibrary
-    from axiom_research.qsys_catalog import load_qsys_feature_catalog,qsys_input_requirements
-    from axiom_research.qsys_preparation import prepare_qsys_inputs
-    from axiom_engine.feature_library import FeatureLibrary
-    started=time.monotonic()
-    def save(name,obj):
-        tmp=root/(name+'.tmp');tmp.write_text(json.dumps(obj,ensure_ascii=False,default=str));tmp.replace(root/name)
-    def progress(stage,**extra):
-        free=shutil.disk_usage(root).free;rss=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        record={'stage':stage,'elapsed_seconds':time.monotonic()-started,'peak_rss_bytes':rss,'disk_free_bytes':free,**extra}
-        save('progress.json',record);print(json.dumps(record,default=str),flush=True)
-        if free<cfg.get('minimum_free_bytes',15*1024**3):raise RuntimeError('DISK_RESERVE_REACHED: completed checkpoints retained')
-        if rss>cfg.get('maximum_rss_bytes',12*1024**3):raise RuntimeError('RSS_LIMIT_REACHED: completed checkpoints retained')
-    def link(source,target):
-        if target.exists():return
-        target.parent.mkdir(parents=True,exist_ok=True)
-        try:os.link(source,target)
-        except OSError:shutil.copyfile(source,target)
-    def descriptor(path):
-        path=path.resolve();return {'path':str(path),'file_digest':file_digest(path),'source_ref':json.loads(path.read_text())['source_ref']}
-    def load_source(path):
-        # Borrow mmap without repeatedly rebuilding saved physical inputs.
-        import numpy as np
-        from axiom_research.stock_feature_columns import FeatureColumnSource
-        m=json.loads(path.read_text());arrays={};types={'float64_le':'<f8','int64_le':'<i8','bool_u8':'u1','uint8':'u1'}
-        for name,b in m['buffers'].items():
-            if file_digest(b['path'])!=b['file_digest']:raise ValueError('saved input hash mismatch')
-            value=np.memmap(b['path'],mode='r',dtype=types[b['dtype']],shape=tuple(b['shape']))
-            arrays[name]=value.view(bool) if b['dtype']=='bool_u8' else value
-        return FeatureColumnSource(m,arrays)
-    progress('loading_scope')
-    scope_receipt=json.loads(Path(cfg['scope_receipt']).read_text());scope=scope_receipt['result'];request=scope_receipt['request']
-    symbols=scope['read_symbols'];sessions=scope['read_sessions'];outputs=request['output_sessions']
-    # Keep compact scope proof for the existing source owner; original receipt
-    # stays untouched, with its full explicit membership/warmup gaps.
-    gaps=scope.pop('missing_reasons',[])
-    save('scope-gaps.json',{'count':len(gaps),'examples':gaps[:25],'original_receipt':cfg['scope_receipt']});del gaps
-    proof={'source':'Data.plan_scope','receipt_file':cfg['scope_receipt'],'receipt_digest':file_digest(cfg['scope_receipt'])}
-    bundle=seal({'contract_version':'stock_scope_bundle_v1','purpose':'QSYS CSI1800 all-feature cache',
-        'request':request,'request_ref':digest(request),'result':scope,'result_ref':digest(scope),
-        'source_proof':proof,'source_proof_ref':digest(proof)},'scope_bundle_ref')
-    scope_descriptor=write_part(root,bundle,'scope_bundle_ref')
-    candidate=root/'data';candidate.mkdir(exist_ok=True);store=LocalStore(candidate)
-    checkpoint=root/'raw-stage.json'
-    if checkpoint.exists():staged=json.loads(checkpoint.read_text())
-    else:
-        targets={'daily_basic','moneyflow','margin_detail','income_vip','balancesheet_vip','fina_indicator_vip','forecast_vip','stk_holdernumber','index_member_all'}
-        staged={'endpoints':{},'identity_map':{},'next_open_session_by_date':{}};ids=set();by_endpoint=defaultdict(list)
-        rawdir=candidate/'raw';rawdir.mkdir(exist_ok=True);tmp=rawdir/'fetches.jsonl.partial'
-        with tmp.open('wb') as out:
-            for rawroot in cfg['raw_roots']:
-                old=LocalStore(rawroot);log=Path(rawroot)/'raw/fetches.jsonl'
-                with log.open('rb') as f:
-                    for line in f:
-                        compact=json.loads(line);req=compact.get('request',{});ep=req.get('endpoint')
-                        if ep not in targets or compact.get('status') not in ('success','empty'):continue
-                        if not str(compact.get('operation_id','')).startswith('qsys'):continue
-                        rec=old._decode_raw_line(line);bid=rec['batch_id']
-                        if bid in ids:continue
-                        ids.add(bid);out.write(line);link(Path(rawroot)/rec['payload_uri'],candidate/rec['payload_uri'])
-                        profile=rec['source_profile']
-                        for code,identity in profile.get('identity_map',{}).items():
-                            prior=staged['identity_map'].setdefault(code,identity)
-                            if prior!=identity:raise ValueError('conflicting stock identities')
-                        calendar=profile.get('next_open_session_by_date',profile.get('availability',{}).get('next_open_session_by_date',{}))
-                        for day,next_day in calendar.items():
-                            prior=staged['next_open_session_by_date'].setdefault(day,next_day)
-                            if prior!=next_day:raise ValueError('conflicting supplier calendar')
-                        by_endpoint[ep].append(bid)
-                        if len(ids)%250==0:progress('raw_stage',receipts=len(ids))
-        tmp.replace(rawdir/'fetches.jsonl');staged['endpoints']=dict(by_endpoint);save('raw-stage.json',staged)
-    progress('raw_staged',receipts=sum(map(len,staged['endpoints'].values())))
-    # Existing native market domains are borrowed as immutable objects. The
-    # original Raw roots remain required for their older source audit closure.
-    base_marker=root/'base-snapshot.json'
-    if base_marker.exists():base=json.loads(base_marker.read_text())['snapshot_id']
-    else:
-        oldstore=LocalStore(cfg['market_root']);parent=oldstore.load_snapshot(cfg['market_snapshot'])
-        (candidate/'snapshots').mkdir(exist_ok=True)
-        shutil.copyfile(Path(cfg['market_root'])/'snapshots'/f"{cfg['market_snapshot']}.json",candidate/'snapshots'/f"{cfg['market_snapshot']}.json")
-        keep=('market_daily','adjustment_factors','universe_membership','trading_calendar','security_master','price_limits','security_status','benchmark_daily','top_holders_reports')
-        domains={k:parent['domains'][k] for k in keep}
-        for domain in domains.values():
-            for part in domain['partitions']:link(Path(cfg['market_root'])/part['uri'],candidate/part['uri'])
-        base=store.publish_snapshot(domains,parent_snapshot=cfg['market_snapshot'],build_context={'purpose':'QSYS native-domain frozen reuse','original_raw_root':cfg['market_root']},promote=False)['snapshot_id']
-        save('base-snapshot.json',{'snapshot_id':base});del parent,domains
-    data=Data(candidate,cache_bytes=64*1024**2,max_readers=1)
-    selected_codes=sorted(k for k,v in staged['identity_map'].items() if v in set(symbols))
-    for ep,ids in sorted(staged['endpoints'].items()):
-        marker=root/(ep+'-snapshot.json')
-        if marker.exists():base=json.loads(marker.read_text())['snapshot_id'];continue
-        progress('rebuild',endpoint=ep,raw_receipts=len(ids))
-        spec=stock_input_source_spec(ep,identity_map=staged['identity_map'],next_open_session_by_date=staged['next_open_session_by_date'],
-            lending_sell_unit_by_security={v:'shares' for v in staged['identity_map'].values()})
-        override={k:spec[k] for k in ('contract','source_profile')};override.update(normalizer=NORMALIZER,canonical_symbols=selected_codes)
-        result=data.rebuild(base_snapshot=base,raw_batch_ids=ids,domains=[spec['domain']],
-            operation_id='qsys-full-offline-v1-'+ep,build_context={'purpose':'offline original Raw replay, no source calls','scope_receipt':proof},
-            promote=False,domain_overrides={spec['domain']:override})
-        base=result.snapshot_id;save(marker.name,{'snapshot_id':base});data.clear_cache()
-    save('candidate-snapshot.json',{'snapshot_id':base,'root':str(candidate)})
-    # Selected rebuilds never alter scope's market/calendar/membership domains.
-    # Rebind their already computed axes explicitly to the derived Snapshot.
-    scope['snapshot_id']=base;request={**request,'snapshot':base}
-    proof={**proof,'projection':'unchanged native trading_calendar and universe_membership domains',
-           'original_snapshot':cfg['market_snapshot'],'derived_snapshot':base}
-    bundle=seal({'contract_version':'stock_scope_bundle_v1','purpose':'QSYS CSI1800 all-feature cache',
-        'request':request,'request_ref':digest(request),'result':scope,'result_ref':digest(scope),
-        'source_proof':proof,'source_proof_ref':digest(proof)},'scope_bundle_ref')
-    scope_descriptor=write_part(root,bundle,'scope_bundle_ref')
-    catalog=load_qsys_feature_catalog();selection=[vars(s) for s in catalog.default_selection]
-    spec={'contract_version':'stock_feature_inputs_spec_v1','scope':scope_descriptor,'snapshot':base,'pit_policy':'best_effort_vendor_v1',
-          'calendar':sessions,'read_sessions':sessions,'feature_sessions':outputs,'universe':symbols,'catalog_ref':catalog.identity,
-          'feature_selection':selection,'ordered_features':[s['id'] for s in selection],
-          'cutoff_by_session':{d:d+'T20:30:00+08:00' for d in sessions}}
-    source_path=root/'inputs/base/source.json'
-    if source_path.exists():source=load_source(source_path)
-    else:
-        progress('base_inputs',sessions=len(sessions),securities=len(symbols))
-        source,_=build_feature_column_source(data,spec=spec,destination=source_path.parent,block_sessions=2,checkpoint=True,
-            progress=lambda p:progress('base_inputs',detail=p))
-    requirements=qsys_input_requirements();daily=requirements['daily_fields']
-    # Each domain checkpoints independently instead of restarting 21 columns.
-    for domain in sorted({d['domain'] for d in daily.values()}):
-        path=root/'inputs'/('daily-'+domain)/'source.json'
-        if path.exists():source=load_source(path);continue
-        progress('daily_inputs',domain=domain)
-        source,_=extend_feature_column_source(data,source=source,daily_fields={k:v for k,v in daily.items() if v['domain']==domain},
-            destination=path.parent,block_sessions=2,maximum_added_bytes=8*1024**3,
-            progress=lambda p:progress('daily_inputs',domain=domain,detail=p))
-    # One public subset per financial bundle provides durable input checkpoints.
-    from axiom_data import EventQuery
-    from axiom_research.financial_feature_columns import extend_financial_feature_source
-    for key,bundle in requirements['financial_fields'].items():
-        path=root/'inputs'/key/'source.json'
-        if path.exists():source=load_source(path);continue
-        progress('financial_inputs',bundle=key)
-        filters={'endpoint':bundle['endpoint']} if bundle['endpoint'] else {}
-        if bundle['report_type']:filters['report_type']=bundle['report_type']
-        query=EventQuery(bundle['domain'],(bundle['field'],),tuple(symbols),cfg.get('report_start','2010-01-01'),outputs[-1],
-            outputs[-1]+'T20:30:00+08:00','best_effort_vendor_v1','report_period',filters)
-        source,_=extend_financial_feature_source(data,source=source,query=query,field=bundle['field'],outputs=bundle['outputs'],unit=bundle['unit'],
-            destination=path.parent,event_snapshot=base,session_timezone=bundle['session_timezone'],block_sessions=2,
-            maximum_added_bytes=2*1024**3,maximum_event_cache_bytes=64*1024**2,
-            progress=lambda p:progress('financial_inputs',bundle=key,detail=p))
-    from axiom_research.benchmark_feature_columns import extend_benchmark_feature_source
-    from axiom_research.industry_feature_columns import extend_industry_feature_source
-    for kind,fn,kw in [('benchmark',extend_benchmark_feature_source,{'benchmark_security_id':cfg['benchmark_security_id']}),('industry',extend_industry_feature_source,{})]:
-        path=root/'inputs'/kind/'source.json'
-        if path.exists():source=load_source(path);continue
-        progress(kind+'_inputs');source,_=fn(data,source=source,snapshot=base,destination=path.parent,block_sessions=2,maximum_added_bytes=512*1024**2,
-            progress=lambda p:progress(kind+'_inputs',detail=p),**kw)
-    source_path=root/'inputs/industry/source.json';del source;data.clear_cache()
-    # Existing private cache can be safely imported as immutable objects. Any
-    # differing reference cohort or dependency identity is recomputed by ensure.
-    libroot=root/'library';libroot.mkdir(exist_ok=True)
-    if cfg.get('existing_library') and not (root/'library-import.json').exists():
-        old=Path(cfg['existing_library']);count=0
-        for path in old.rglob('*'):
-            if not path.is_file() or path.name.startswith('.') or 'lock' in path.name:continue
-            target=libroot/path.relative_to(old)
-            if target.exists():continue
-            target.parent.mkdir(parents=True,exist_ok=True)
-            if path.suffix in ('.bin','.buffer'):link(path,target)
-            else:shutil.copyfile(path,target)
-            count+=1
-        save('library-import.json',{'source':str(old),'files':count})
-    library=FeatureLibrary(libroot,maximum_working_bytes=cfg.get('working_bytes',2*1024**3))
-    receipts=root/'views';receipts.mkdir(exist_ok=True)
-    with SavedColumnFeatureSource(descriptor(source_path),maximum_source_bytes=64*1024**3,maximum_working_bytes=cfg.get('working_bytes',2*1024**3)) as admitted:
-        owner=CatalogFeatureLibrary(library,admitted,catalog)
-        for index in range(0,len(outputs),cfg.get('output_block_sessions',5)):
-            days=outputs[index:index+cfg.get('output_block_sessions',5)];marker=receipts/(days[0]+'.json')
-            if marker.exists():continue
-            progress('features',first=days[0],last=days[-1],completed_dates=index,total_dates=len(outputs),columns=len(selection))
-            view,metrics=owner.ensure(selection=selection,output_sessions=days,normalized=True,
-                progress=lambda p:progress('features',first=days[0],detail=p))
-            with library.open_feature_view(view) as opened:
-                values=opened.project();valid=values['validity'];coverage={'valid':int(valid.sum()),'total':int(valid.size)}
-            write_json(marker,{'view':view,'metrics':metrics,'coverage':coverage,'catalog_ref':catalog.identity})
-    progress('complete',dates=len(outputs),columns=len(selection),views=str(receipts),supplier_calls=0,training_calls=0)
-    save('result.json',{'status':'COMPLETE_WITH_EXPLICIT_MISSING','catalog_ref':catalog.identity,'dates':len(outputs),'columns':len(selection),'views':str(receipts),'scope_gaps':str(root/'scope-gaps.json'),'industry_policy':'sw_supplier_intervals_best_effort_v1'})
-
-
-if __name__=='__main__':
-    try:main()
+    args=parser.parse_args();cfg=json.loads(args.config.read_text())
+    try:run(cfg)
     except Exception as exc:
+        from axiom_research.feature_input_checkpoint import atomic_json
         import traceback
-        traceback.print_exc()
-        raise SystemExit(1)
+        atomic_json(Path(cfg['destination'])/'failure.json',{'error':type(exc).__name__,'message':str(exc),'traceback':traceback.format_exc()})
+        raise
+
+
+if __name__=='__main__':main()

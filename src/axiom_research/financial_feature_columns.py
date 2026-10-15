@@ -90,6 +90,21 @@ def validate_financial_materializations(manifest, child=None):
 def extend_financial_feature_source(data, *, source, query, field, outputs, unit,
         destination, event_snapshot, session_timezone='Asia/Shanghai', block_sessions=20,
         maximum_added_bytes=64*1024**2, maximum_event_cache_bytes=64*1024**2, progress=None):
+    """Prepare a financial batch with one pinned Data owner across all blocks."""
+    from axiom_data import EventReadOwner
+    with EventReadOwner(data, snapshot=event_snapshot,
+                       maximum_cache_bytes=maximum_event_cache_bytes) as owner:
+        return _extend_financial_feature_source(data, source=source, query=query,
+            field=field, outputs=outputs, unit=unit, destination=destination,
+            event_snapshot=event_snapshot, session_timezone=session_timezone,
+            block_sessions=block_sessions, maximum_added_bytes=maximum_added_bytes,
+            maximum_event_cache_bytes=maximum_event_cache_bytes, progress=progress,
+            event_owner=owner)
+
+
+def _extend_financial_feature_source(data, *, source, query, field, outputs, unit,
+        destination, event_snapshot, session_timezone='Asia/Shanghai', block_sessions=20,
+        maximum_added_bytes=64*1024**2, maximum_event_cache_bytes=64*1024**2, progress=None, event_owner=None):
     """Append reported/TTM/single-quarter leaves without rebuilding existing columns.
 
     ``outputs`` maps leaf name to {derivation, quarters_back}. Every leaf uses
@@ -119,7 +134,7 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
     for name,projection in outputs.items():
         require(name.isidentifier() and set(projection)==({'derivation','reports_back'} if projection.get('derivation') in ('report_observation','report_announcement_ordinal','forecast_category_code') else {'derivation','quarters_back'}) and _projection_valid(projection),'explicit financial output recipe required')
     require(event_snapshot not in ('','current','latest'),'pinned independent financial Snapshot required')
-    snapshot=data.describe_snapshot(snapshot=event_snapshot,domains=[query.domain]); native=snapshot['domains'][query.domain]
+    native=event_owner.manifest['domains'][query.domain]
     actual=native['contract']['fields'][field]
     require((actual.get('unit')==unit or actual.get('dtype')=='string' and unit=='dimensionless' and all(p['derivation']=='forecast_category_code' for p in outputs.values()) or actual.get('dtype')=='date' and unit=='days' and all(p['derivation']=='report_announcement_ordinal' for p in outputs.values())) and (all(p['derivation'] in ('reported','report_observation','report_announcement_ordinal','forecast_category_code') for p in outputs.values()) or actual.get('basis')=='cumulative_ytd'),'financial input unit/basis mismatch')
     shape=(len(days),len(symbols)); required=len(days)*len(symbols)*27*len(outputs)
@@ -149,7 +164,7 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
             subset=list(query.symbols[si:si+256])
             cutoffs=[_cutoff(d,spec['cutoff_by_session'][d],session_timezone) for d in selected]
             batches=iter_event_cutoffs(data,snapshot=event_snapshot,query=replace(query,symbols=tuple(subset),fields=tuple(dict.fromkeys((field,'announcement_date'))) if query.domain=='forecast_events' else query.fields),
-                cutoffs=cutoffs,maximum_cache_bytes=maximum_event_cache_bytes)
+                cutoffs=cutoffs,maximum_cache_bytes=maximum_event_cache_bytes,owner=event_owner)
             metrics['event_blocks']+=1
             for offset,(day,batch) in enumerate(zip(selected,batches)):
                 metrics['event_cutoff_selections']+=1
@@ -257,4 +272,6 @@ def extend_financial_feature_source(data, *, source, query, field, outputs, unit
     manifest['source_profiles'][DOMAIN]=profile
     validate_financial_materializations(manifest)
     manifest.pop('source_ref');manifest=seal(manifest,'source_ref');atomic_json(root/'source.json',manifest)
+    staging.retire(manifest)
+    metrics['event_reader']=dict(event_owner.metrics)
     return FeatureColumnSource(manifest,arrays),metrics

@@ -81,4 +81,5 @@ def extend_industry_feature_source(data, *, source, snapshot, destination,
         'fields':{field:{'dtype':'float64','unit':'dimensionless'}}},'source_profile':profile}
     manifest.setdefault('daily_extensions',[]).append({'fields':[field],'chunks':chunks})
     manifest.pop('source_ref');manifest=seal(manifest,'source_ref');atomic_json(root/'source.json',manifest)
+    staging.retire(manifest)
     return FeatureColumnSource(manifest,arrays),{'added_fields':1,'interval_rows':len(native['records']),'coverage':dict(counts),'invalid_intervals':dict(invalid),'publication_pit':False}

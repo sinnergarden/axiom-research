@@ -438,7 +438,11 @@ class StockFeatureView:
         for state in list(value['prepared'].values()): state.close()
         value['prepared'].clear()
         require(value['borrowers']==0,'compact Feature view still borrowed')
-        value['blocks'].clear(); value['store'].close(); value['closed']=True
+        value['blocks'].clear()
+        if 'native' in value:
+            value['store'].check_hook=None
+            value['native'].close()
+        value['store'].close(); value['closed']=True
     def __enter__(self): _view_data(self); return self
     def __exit__(self,*args): self.close()
 
@@ -688,6 +692,10 @@ def _admit_feature_facts(value, block, group):
 
 
 def _admit_feature_block(value, block):
+    if 'native' in value:
+        parts,rows,eligibility=value['native'].admit(value,block,value['definition']['spec']['ordered_features'])
+        block.update(parts=list(parts.values()),rows=rows,eligibility=eligibility)
+        return
     if block['parts'] is not None:
         try:
             for part in block['descriptors']:
@@ -731,6 +739,8 @@ def _admit_feature_block(value, block):
 
 def _admit_model_columns(value, block, binding):
     """Admit selected physical parts into the existing owner's byte/JSON caches."""
+    if 'native' in value:
+        return value['native'].admit(value,block,binding['ordered_features'])
     import numpy as np
     store=value['store']; spec=value['definition']['spec']; columns=binding['ordered_features']
     selected=set(columns); count=block['count']
@@ -827,6 +837,9 @@ def clear_feature_window(handle):
 def _trim_feature_window(value, wanted):
     store=value['store']; keep=set(value['control_paths'])
     for ordinal,block in enumerate(value['blocks']):
+        if ordinal not in wanted and 'native_cache' in block:
+            block.pop('native_cache').clear()
+            store.resident_bytes-=block.pop('native_charge',0)
         if ordinal not in wanted and 'training_block_proofs' in block:
             store.resident_bytes-=block.pop('training_block_proof_charge',0)
             block.pop('training_block_proofs',None)

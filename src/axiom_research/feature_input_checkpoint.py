@@ -2,7 +2,7 @@
 
 Only committed prefixes are reused. A crash before the atomic receipt replaces
 itself leaves the last block uncommitted and safe to overwrite on recovery.
-Staging is retained even after publication; no prior attempt is deleted here.
+After durable publication only this checkpoint's unreferenced staging retires.
 """
 import json
 from hashlib import sha256
@@ -16,8 +16,9 @@ from .stock_fold_inputs import require, seal
 
 def atomic_json(path, value):
     from .feature_input_evidence import check_input_disk
-    check_input_disk(Path(path).parent,len(json.dumps(value).encode())+1)
-    path=Path(path); temporary=path.with_name(path.name+'.tmp')
+    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+    check_input_disk(path.parent,len(json.dumps(value).encode())+1)
+    temporary=path.with_name(path.name+'.tmp')
     with temporary.open('w') as stream:
         json.dump(value,stream,sort_keys=True,separators=(',',':'),allow_nan=False)
         stream.flush(); os.fsync(stream.fileno())
@@ -35,6 +36,7 @@ class FeatureInputCheckpoint:
         self.arrays={}
         if self.path.exists():
             state=json.loads(self.path.read_text()); _verify_ref(state,'checkpoint_ref')
+            require(state.get('status')!='PUBLISHED','input already published; open its source.json instead of staging')
             require(state['binding']==self.binding and state['layout']==layout,'input checkpoint binding/layout mismatch')
             done=state['completed_dates']; chunks=state['chunks']
             require(type(done) is int and 0<=done<=len(sessions) and
@@ -78,21 +80,70 @@ class FeatureInputCheckpoint:
             array.flush()
             with open(array.filename,'rb') as stream: os.fsync(stream.fileno())
         from .feature_input_evidence import shared_evidence_descriptors
-        synced=set()
+        synced=set(); directories=set()
         for chunk in chunks[len(self.state['chunks']):]:
             for item in chunk['evidence']:
                 with open(item['path'],'rb') as stream: os.fsync(stream.fileno())
+                directories.add(Path(item['path']).parent)
                 for proof in shared_evidence_descriptors(json.loads(Path(item['path']).read_text())):
                     path=proof['buffer']['path']
                     if path not in synced:
                         with open(path,'rb') as stream: os.fsync(stream.fileno())
                         synced.add(path)
+                        directories.add(Path(path).parent)
+        for directory in directories:
+            fd=os.open(directory,os.O_RDONLY)
+            try: os.fsync(fd)
+            finally: os.close(fd)
         blocks=list(self.state['buffer_blocks']); start=self.state['completed_dates']
         if completed>start:
             blocks.append({'start':start,'stop':completed,'digests':{name:
                 sha256(memoryview(array[start:completed]).cast('B')).hexdigest() for name,array in self.arrays.items()}})
         self.state={**self.state,'completed_dates':completed,'chunks':list(chunks),'buffer_blocks':blocks,'metrics':dict(metrics)}
         atomic_json(self.path,seal(self.state,'checkpoint_ref'))
+
+    def retire(self, manifest):
+        """Release this writer's staging after a durable complete source exists.
+
+        Never traverse/delete inherited buffers or evidence. A crash leaves
+        either a resumable checkpoint or a published source and redundant
+        staging; it never removes the only published representation.
+        """
+        published=json.loads((self.root/'source.json').read_text())
+        _verify_ref(published,'source_ref')
+        require(published['source_ref']==manifest['source_ref'] and
+                self.state['completed_dates']==len(self.sessions),
+                'staging retirement requires complete durable publication')
+        referenced=set()
+        def visit(value):
+            if isinstance(value,dict):
+                if isinstance(value.get('path'),str): referenced.add(Path(value['path']).resolve())
+                for item in value.values(): visit(item)
+            elif isinstance(value,list):
+                for item in value: visit(item)
+        visit(published)
+        # The codec atomically exposes immutable files, but retirement also
+        # needs their bytes durable before removing the recovery copy.
+        directories=set()
+        for path in referenced:
+            if path.is_relative_to(self.root) and path.is_file():
+                with path.open('rb') as stream: os.fsync(stream.fileno())
+                directories.add(path.parent)
+        for directory in directories:
+            fd=os.open(directory,os.O_RDONLY)
+            try: os.fsync(fd)
+            finally: os.close(fd)
+        files={Path(p).absolute() for p in self.state['files'].values()}
+        for path in files:
+            require(path.parent==self.root and path.name.startswith('.feature-input-') and
+                    not path.is_symlink() and path.resolve() not in referenced,
+                    'retirement path is not private unreferenced staging')
+        for value in self.arrays.values():
+            if Path(value.filename).absolute() in files:
+                value.flush(); value._mmap.close()
+        self.state={**self.state,'status':'PUBLISHED','published_source_ref':manifest['source_ref']}
+        atomic_json(self.path,seal(self.state,'checkpoint_ref'))
+        for path in files: path.unlink(missing_ok=True)
 
 
 def extension_checkpoint(root, *, source, fields, kinds, sessions, block_sessions, binding, metrics):

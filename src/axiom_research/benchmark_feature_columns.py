@@ -80,4 +80,5 @@ def extend_benchmark_feature_source(data, *, source, snapshot, benchmark_securit
             'projection':'same_session_broadcast_v1','native_contract':native['contract'],'native_profile':native['source_profile']}}
     manifest.setdefault('daily_extensions',[]).append({'fields':[field],'chunks':chunks})
     manifest.pop('source_ref');manifest=seal(manifest,'source_ref');atomic_json(root/'source.json',manifest)
+    staging.retire(manifest)
     return FeatureColumnSource(manifest,arrays),{'data_read_calls':calls,'added_fields':1,'existing_field_reads':0}

@@ -1,4 +1,4 @@
-"""Explicit packed Feature-library projection into the existing training owner.
+"""Native Feature-library consumption by the existing training owner.
 
 This adapter has its own saved contract. It never labels a projected library
 view as a legacy Feature producer result. Existing Label/fit readers receive
@@ -63,7 +63,7 @@ def _instant_us(value, null):
     return (datetime(1970,1,1,tzinfo=timezone.utc)+timedelta(microseconds=value)).isoformat().replace('+00:00','Z')
 
 
-def build_feature_library_training_view(view, source, *, selection, destination,
+def export_feature_library_training_projection(view, source, *, selection, destination,
                                         maximum_working_bytes=512*1024**2):
     """Export bounded daily blocks without Feature computation or new mathematics."""
     import numpy as np
@@ -124,12 +124,14 @@ def build_feature_library_training_view(view, source, *, selection, destination,
 
 
 def load_feature_library_training_view(descriptor, *, limits=None, source=None):
-    """Fresh byte admission + exact library comparison; reuse existing row/fit owner."""
+    """Admit native selected partitions, or verify an explicit legacy export."""
     import numpy as np
     store=OwnedStore(limits); handle=None
     try:
         wire=store.read_json(descriptor,key='training_adapter_ref')
-        require(wire['contract_version']==VERSION and wire['status']=='COMPLETE','complete training projection required')
+        require(wire['contract_version'] in (VERSION,NATIVE_VERSION) and wire['status']=='COMPLETE','complete training view required')
+        if wire['contract_version']==NATIVE_VERSION:
+            return _load_native_training_view(descriptor,wire,store)
         definition=wire['definition']; spec=deepcopy(definition['spec']); days=ordered(spec['feature_sessions'],'Feature days')
         securities=ordered(spec['universe'],'Feature securities'); columns=spec['ordered_features']; schema=wire['schema']
         from .stock_matrix_reader import _schema
@@ -220,4 +222,166 @@ def load_feature_library_training_view(descriptor, *, limits=None, source=None):
     except BaseException:
         if handle is not None: handle.close()
         else: store.close()
+        raise
+
+
+NATIVE_VERSION='stock_feature_library_training_native_v1'
+
+
+def build_feature_library_training_view(view, source, *, selection, destination,
+                                        maximum_working_bytes=512*1024**2):
+    """Save a small native binding; no training value/metadata table is copied.
+
+    Source compatibility is checked once at this publication boundary. Fresh
+    consumers admit selected Feature partitions and membership, not ancestors.
+    The explicit export_feature_library_training_projection retains the old
+    interoperability export for consumers that actually need physical tables.
+    """
+    cap=view.describe(); physical=source.source
+    compatibility=_feature_source_compatibility(view,source,selection)
+    compatibility={**{k:v for k,v in compatibility.items()
+                      if k not in ('dependency_refs','compatibility_ref')},
+                   'local_dependency_ref':digest(compatibility['dependency_refs'])}
+    spec=deepcopy(physical.manifest['spec'])
+    spec.update(universe=cap['sample_universe'],feature_sessions=cap['sessions'],
+                feature_selection=deepcopy(selection),ordered_features=cap['columns'])
+    schema=[deepcopy(cap['definitions'][n]['schema']) for n in cap['columns']]
+    definition={'spec':spec,'library_view':view.descriptor,'source':source.descriptor,
+                'source_compatibility':compatibility}
+    target=Path(destination).resolve()/digest(definition)[7:]
+    target.mkdir(parents=True,exist_ok=True)
+    grid=row_index(cap['sessions'],cap['sample_universe'])
+    wire=seal({'contract_version':NATIVE_VERSION,'status':'COMPLETE',
+        'definition':definition,'schema':schema,'row_index':grid,
+        'source_member_buffer':physical.manifest['buffers']['member'],
+        'source_member_sessions':physical.manifest['spec']['read_sessions'],
+        'source_member_securities':physical.manifest['spec']['universe'],
+        'qlib_view_ref':digest(physical.manifest['qlib_view'])},'training_adapter_ref')
+    source.store.check();view.validate_boundary()
+    return write_part(target,wire,'training_adapter_ref')
+
+
+class _NativeTrainingBlocks:
+    """Day-local projections owned by the existing StockFeatureView lifetime."""
+    def __init__(self, library, members, member_store, wire):
+        self.library=library;self.members=members;self.member_store=member_store;self.wire=wire
+        self.days={d:i for i,d in enumerate(wire['source_member_sessions'])}
+        self.securities={s:i for i,s in enumerate(wire['source_member_securities'])}
+
+    def check(self):
+        self.library.validate_boundary();self.member_store.check()
+
+    def close(self):
+        self.library.close();self.member_store.close();self.members=None
+
+    def admit(self, value, block, columns):
+        import numpy as np
+        from .stock_matrix_reader import _CompactRows
+        self.check();store=value['store'];key=tuple(columns)
+        cache=block.setdefault('native_cache',{})
+        if key in cache:return cache[key]
+        spec=value['definition']['spec'];width=len(spec['ordered_features'])
+        securities=spec['universe'];count=len(securities)
+        day=spec['feature_sessions'][block['start']//count]
+        store.reserve(count*(width*40+len(columns)*96+256)+4096)
+        cells=self.library.project([(s,day) for s in securities],columns=columns)
+        known=cells['available_at_utc_us']!=cells['null_available_at_utc_us']
+        arrays={'values':np.where(cells['validity'],cells['values'],0).astype('<f8'),
+            'value_validity':cells['validity'].astype('u1'),
+            'available_at_utc_us':np.where(known,cells['available_at_utc_us'],0).astype('<i8'),
+            'available_at_validity':known.astype('u1')}
+        cutoff=spec['cutoff_by_session'][day]
+        from .stock_matrix_storage import instant_us
+        require(bool(np.isfinite(arrays['values']).all()) and
+                bool((~known|(arrays['available_at_utc_us']<=instant_us(cutoff))).all()),
+                'native Feature values/availability exceed original cutoff')
+        member=self.members[self.days[day],[self.securities[s] for s in securities]]
+        positions=[value['column_positions'][n] for n in columns]
+        rows=[]
+        for i,s in enumerate(securities):
+            flags=[False]*width;clocks=[None]*width;reasons=[[] for _ in range(width)]
+            for j,k in enumerate(positions):
+                flags[k]=bool(cells['validity'][i,j])
+                clocks[k]=_instant_us(cells['available_at_utc_us'][i,j],cells['null_available_at_utc_us'])
+                reason=cells['reason_dictionary'][int(cells['reason_codes'][i,j])]
+                reasons[k]=[] if reason is None else [reason]
+            rows.append({'member':bool(member[i]),'knowledge_cutoff':cutoff,
+                'validity':flags,'availability':clocks,'reasons':reasons,
+                'source_refs':[self.library.identity,*cells['partition_refs']]})
+        compact=_CompactRows(rows,width,np);rows=None
+        flags=np.all(cells['validity'],axis=1)
+        maximum=np.max(cells['available_at_utc_us'],axis=1)
+        flags.flags.writeable=False;maximum.flags.writeable=False
+        from hashlib import sha256
+        buffers={name:{'dtype':'float64_le' if name=='values' else 'int64_le' if name=='available_at_utc_us' else 'bool_u8',
+                      'shape':list(a.shape),'buffer_digest':'sha256:'+sha256(a.tobytes()).hexdigest()}
+                 for name,a in arrays.items()}
+        part={'columns':list(columns),'metadata':self.library.descriptor,'buffers':buffers,
+              'partition_ref':digest({'view_ref':self.library.identity,'day':day,'columns':list(columns),
+                                      'original_partitions':cells['partition_refs']})}
+        for a in arrays.values():a.flags.writeable=False
+        charge=compact.bytes+sum(a.nbytes for a in arrays.values())+flags.nbytes+maximum.nbytes+_size(part)+1024
+        store.reserve(charge);store.resident_bytes+=charge
+        block['native_charge']=block.get('native_charge',0)+charge
+        cache[key]=({part['partition_ref']:(part,arrays)},compact,(flags,maximum))
+        value['parents'][day]={'feature_ref':part['partition_ref'],'qlib_view_ref':self.wire['qlib_view_ref']}
+        store.metrics['native_feature_projections']=store.metrics.get('native_feature_projections',0)+1
+        self.check()
+        return cache[key]
+
+
+def _load_native_training_view(descriptor,wire,store):
+    library=member_store=None
+    try:
+        definition=wire['definition'];spec=definition['spec'];grid=wire['row_index']
+        days=ordered(spec['feature_sessions'],'native Feature sessions')
+        securities=ordered(spec['universe'],'native Feature securities');columns=spec['ordered_features']
+        require(grid==row_index(days,securities),'native Feature row index mismatch')
+        library=FeatureView(definition['library_view'],maximum_matrix_bytes=store.maximum_matrix_bytes,
+                            maximum_source_bytes=store.limits['maximum_source_bytes'])
+        cap=library.describe()
+        from .stock_matrix_reader import _schema
+        _schema(wire['schema'],columns)
+        require(cap['sessions']==days and cap['sample_universe']==securities and cap['columns']==columns and
+                wire['schema']==[cap['definitions'][n]['schema'] for n in columns],
+                'native training view axes/schema mismatch')
+        compatibility=definition['source_compatibility']
+        require(compatibility['view_ref']==library.identity and
+                compatibility['source']==definition['source'] and
+                compatibility['snapshot']==spec['snapshot'] and
+                compatibility['pit_policy']==spec['pit_policy'] and
+                compatibility['semantic_refs']=={n:cap['definitions'][n]['semantic_ref'] for n in columns} and
+                compatibility['cutoff_by_session']=={d:spec['cutoff_by_session'][d] for d in days},
+                'native publication compatibility binding mismatch')
+        member_store=VerifiedMatrixStore(maximum_matrix_bytes=store.maximum_matrix_bytes,
+                                        maximum_source_bytes=store.limits['maximum_source_bytes'])
+        original=member_store.read_json(definition['source'],'source_ref')
+        require(wire['source_member_buffer']==original['buffers']['member'] and
+                wire['source_member_sessions']==original['spec']['read_sessions'] and
+                wire['source_member_securities']==original['spec']['universe'] and
+                all(spec[k]==original['spec'][k] for k in ('snapshot','pit_policy','calendar','catalog_ref')) and
+                set(days)<=set(original['spec']['feature_sessions']) and
+                set(securities)<=set(wire['source_member_securities']) and
+                all(spec['cutoff_by_session'][d]==original['spec']['cutoff_by_session'][d] for d in days),
+                'native training membership/cutoff binding mismatch')
+        members=member_store.buffer(wire['source_member_buffer']).view('bool')
+        native=_NativeTrainingBlocks(library,members,member_store,wire)
+        owner_definition={'contract_version':'stock_feature_library_training_view_v1',
+            'source_index':descriptor,'spec':deepcopy(spec),'schema':wire['schema'],'row_index':grid,
+            'partitions':[],'historical_feature_inputs_ref':library.identity,
+            'historical_content_digest':wire['training_adapter_ref'],'native_library_view':definition['library_view']}
+        owner_definition['feature_view_ref']=digest(owner_definition)
+        count=len(securities)
+        blocks=[{'start':i*count,'count':count,'descriptors':[],'parts':None,'rows':None,
+                 'complete_columns':True,'charge':0,'eligibility':None} for i in range(len(days))]
+        control=_size([owner_definition,grid,blocks]);store.reserve(control);store.resident_bytes+=control
+        store.check_hook=native.check
+        return StockFeatureView(_TOKEN,{'path':Path(descriptor['path']).parent,'definition':owner_definition,
+            'store':store,'blocks':blocks,'parents':{},'row_index':grid,'native':native,
+            'column_positions':{c:i for i,c in enumerate(columns)},'day_blocks':list(range(len(days))),
+            'day_admissions':[[i] for i in range(len(days))],'control_paths':{descriptor['path']},
+            'residency':'sequential','closed':False,'borrowers':0,'prepared':{}})
+    except BaseException:
+        if library is not None:library.close()
+        if member_store is not None:member_store.close()
         raise

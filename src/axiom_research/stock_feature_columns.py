@@ -60,7 +60,8 @@ class FeatureColumnSource:
         self.manifest, self.arrays = manifest, arrays
         self.positions = {day:i for i,day in enumerate(manifest['spec']['read_sessions'])}
         self.security_positions={security:i for i,security in enumerate(manifest['spec']['universe'])}
-        for value in arrays.values(): value.flags.writeable=False
+        if not getattr(arrays,'_readonly_buffers',False):
+            for value in arrays.values(): value.flags.writeable=False
 
     @property
     def identity(self):
@@ -125,8 +126,8 @@ class FeatureColumnSource:
         self.require_coverage(fields,securities)
         positions=[self.security_positions[s] for s in securities]
         # Bound copies by the requested history and securities before adjustment.
-        a={name:(value[begin:end] if securities==spec['universe'] else value[begin:end][:,positions])
-           for name,value in self.arrays.items() if '::' not in name}
+        a={name:(self.arrays[name][begin:end] if securities==spec['universe'] else self.arrays[name][begin:end][:,positions])
+           for name in self.arrays if '::' not in name}
         cutoff=instant_us(spec['cutoff_by_session'][day])//1000000*1000000
         prices=[name for name in fields if name in FIELDS[:4]]; indices=[FIELDS.index(name) for name in prices]
         selected_values={}; selected_validity={}; selected_reasons={}; selected_clocks={}
@@ -398,7 +399,7 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
         if staging is None:
             descriptors[name],arrays[name]=seal_feature_buffer(root,array,dtype=dtype,shape=list(array.shape))
         else:
-            # Keep staging intact until and after the final receipt is published.
+            # Keep staging intact until the final receipt is durably published.
             # A crash during sealing can safely repeat immutable publication.
             wire=array.view('u1') if dtype=='bool_u8' else array
             descriptors[name]=write_buffer(root,wire.reshape(-1),dtype=dtype,shape=list(array.shape))
@@ -410,6 +411,7 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
         'environment':_environment()},'source_ref')
     if staging is not None: atomic_json(root/'source.json',manifest)
     else: write_json(root/'source.json',manifest)
+    if staging is not None: staging.retire(manifest)
     return FeatureColumnSource(manifest,arrays),metrics
 
 
@@ -587,4 +589,5 @@ def extend_feature_column_source(data, *, source, daily_fields, destination, blo
     manifest.setdefault('daily_extensions',[]).append({'fields':list(daily_fields),'chunks':chunks})
     manifest.pop('source_ref'); manifest=seal(manifest,'source_ref')
     atomic_json(root/'source.json',manifest)
+    staging.retire(manifest)
     return FeatureColumnSource(manifest,arrays),metrics
