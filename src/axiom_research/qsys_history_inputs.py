@@ -216,7 +216,14 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
             for src_row,dst_row in selected:target[dst_row,list(dst_cols)]=value[src_row,list(src_cols)]
         manifest['buffers'][name],arrays[name]=seal_feature_buffer(root,target,dtype=desc['dtype'],shape=shape)
         metrics['buffer_copy_bytes']+=int(np.prod(shape))*original.dtype.itemsize
-    if same_axes:arrays=source.arrays
+    # Validation and the published source borrow the same descriptor-backed mapping.
+    # Appended date slabs have descriptors only, not entries in the copy-route dict.
+    from .stock_feature_library import _SourceArrays
+    from .stock_matrix_reader import VerifiedMatrixStore
+    store=getattr(source,'_history_store',None)
+    if store is None:
+        store=VerifiedMatrixStore(maximum_source_bytes=256*1024**3,maximum_matrix_bytes=8*1024**3)
+    arrays=_SourceArrays(manifest,store)
     if source.manifest.get('evidence_mode')!='block_receipts_v1':
         require(not source.manifest.get('financial_materializations') and not any(
             item['domain']=='materialized_industry_intervals' for item in source.manifest.get('daily_fields',{}).values()),
@@ -304,12 +311,7 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
     from .stock_feature_inputs import source_universe_binding
     manifest['universe_binding']=source_universe_binding(manifest)
     manifest.pop('source_ref');manifest=seal(manifest,'source_ref')
-    from .stock_feature_library import _SourceArrays
-    from .stock_matrix_reader import VerifiedMatrixStore
-    store=getattr(source,'_history_store',None)
-    if store is None:
-        store=VerifiedMatrixStore(maximum_source_bytes=256*1024**3,maximum_matrix_bytes=8*1024**3)
-    result=FeatureColumnSource(manifest,_SourceArrays(manifest,store))
+    result=FeatureColumnSource(manifest,arrays)
     result._history_store=store
     atomic_json(root/'source.json',manifest)
     if progress is not None:progress({'stage':'input_reuse',**metrics})
