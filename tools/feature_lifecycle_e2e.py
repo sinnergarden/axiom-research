@@ -303,10 +303,12 @@ def acceptance(cfg):
     assert result['warmup']==756 and result['read_dates']==764
     limits={'maximum_source_bytes':cfg['maximum_source_bytes'],
             'maximum_matrix_bytes':cfg['working_bytes'],'maximum_parent_bytes':64*1024**2}
-    library=FeatureLibrary(root/'library',maximum_source_bytes=cfg['maximum_source_bytes'],
+    library_root=Path(cfg.get('library_root',root/'library'))
+    library=FeatureLibrary(library_root,maximum_source_bytes=cfg['maximum_source_bytes'],
                            maximum_working_bytes=cfg['working_bytes'])
+    warm_started=time.monotonic()
     # Changed request grouping must query real coverage, with no Core calls.
-    before={str(p.relative_to(root/'library')) for p in (root/'library').rglob('*') if p.is_file()}
+    before={str(p.relative_to(library_root)) for p in library_root.rglob('*') if p.is_file()}
     with SavedColumnFeatureSource(result['source'],maximum_source_bytes=cfg['maximum_source_bytes'],
                                   maximum_working_bytes=cfg['working_bytes']) as source:
         owner=CatalogFeatureLibrary(library,source,catalog)
@@ -316,8 +318,10 @@ def acceptance(cfg):
         member=source.source.arrays['member']
         unknown=int((~known).sum())
         assert not bool((member & ~known).any())
-    after={str(p.relative_to(root/'library')) for p in (root/'library').rglob('*') if p.is_file()}
+    after={str(p.relative_to(library_root)) for p in library_root.rglob('*') if p.is_file()}
     assert not any('/partitions/' in '/'+p or p.startswith('buffers/') for p in after-before)
+    warm_seconds=time.monotonic()-warm_started
+    norm_started=time.monotonic()
     # Additional Axiom normalization is an explicit small request; it reuses
     # existing raw columns instead of duplicating all 401 normalized columns.
     with SavedColumnFeatureSource(result['source'],maximum_source_bytes=cfg['maximum_source_bytes'],
@@ -327,6 +331,7 @@ def acceptance(cfg):
         assert norm['raw']['core_calls']==0
         with library.open_feature_view(norm_view) as view:
             assert len(view.describe()['columns'])==2
+    norm_seconds=time.monotonic()-norm_started
     # A fresh training owner must not open Data or re-admit source ancestry.
     original_reader=Data._reader;original_source=SavedColumnFeatureSource.__init__
     def prohibited(*args,**kwargs):raise AssertionError('native consumer reopened source ancestry')
@@ -377,8 +382,13 @@ def acceptance(cfg):
                         assert reasons==[None,'LABEL_NOT_MATURE','LABEL_NOT_MATURE','LABEL_CLOCK_OR_ENDPOINT_UNKNOWN']
             assert training_rows>0 and cells_count==8*3396*401
             consumer_metrics=handle.metrics
+            from axiom_research.stock_compact_store import _view_data
+            native=_view_data(handle)['native']
+            consumer_io={'comparison_view':dict(view._store.metrics),
+                'native_subset_view':dict(native.library._store.metrics),'member_store':dict(native.member_store.metrics)}
     finally:
         Data._reader=original_reader;SavedColumnFeatureSource.__init__=original_source
+    consumer_seconds=time.monotonic()-consumer_started
     staging=[str(p) for p in (root/'inputs').rglob('.feature-input-*')
              if p.name!='.feature-input-checkpoint.json']
     assert not staging,staging[:5]
@@ -393,7 +403,8 @@ def acceptance(cfg):
         assert all('by_key' not in meta for meta in proof['field_meta'].values())
     assert result['input_reuse']['buffer_copy_bytes']==0 and result['input_reuse']['old_value_recomputations']==0
     return {'status':'PASS','run':result,'performance':performance,'warm_overlap':warm,'requested_normalized_subset':norm,
-        'consumer_seconds':time.monotonic()-consumer_started,'consumer_metrics':consumer_metrics,
+        'warm_seconds':warm_seconds,'normalized_subset_seconds':norm_seconds,
+        'consumer_seconds':consumer_seconds,'consumer_metrics':consumer_metrics,'consumer_io':consumer_io,
         'physical_cells':cells_count,'valid_cells':valid_count,'subset_training_rows':training_rows,
         'unknown_membership_cells_preserved':unknown,'unpublished_staging_files':staging,
         'native_consumer_ancestor_calls':0,'input_block_receipt_bytes':proof_bytes,

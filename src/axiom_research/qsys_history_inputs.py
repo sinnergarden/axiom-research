@@ -142,7 +142,27 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
     rectangles=[]
     missing_days=[d for d in days if d not in source.positions]
     missing_symbols=[s for s in symbols if s not in source.security_positions]
-    require(not missing_symbols,'additional securities need explicit complete-axis input preparation; existing cells have not been changed')
+    if missing_symbols:
+        # Extend the old slab's dates first, then prepare only new securities.
+        old_axis=old['universe']
+        require(set(old_axis)<=set(symbols),'grow securities or explicitly project first')
+        if days!=old['read_sessions']:
+            old_spec=_subset_spec(spec,days,old_axis,root/'old-axis-scope')
+            source,_=reuse_history_source(data,source=source,spec=old_spec,catalog=catalog,
+                destination=root/'old-axis',event_cache_bytes=event_cache_bytes,progress=progress)
+        new_spec=_subset_spec(spec,days,missing_symbols,root/'new-axis-scope')
+        delta,_=build_feature_column_source(data,spec=new_spec,destination=root/'new-axis/base',block_sessions=2,checkpoint=True,progress=progress)
+        from .qsys_catalog import qsys_input_requirements
+        req=qsys_input_requirements()
+        delta,_=prepare_qsys_inputs(data,source=delta,names=spec['ordered_features'],
+            input_fields=set(source.manifest.get('daily_fields',{})),destination=root/'new-axis/added',
+            event_snapshots={b['domain']:spec['snapshot'] for b in req['financial_fields'].values()},
+            report_start='2010-01-01',report_end=days[-1],daily_snapshot=spec['snapshot'],
+            benchmark_snapshot=spec['snapshot'],industry_snapshot=spec['snapshot'],
+            benchmark_security_id=source.manifest['source_profiles'].get('materialized_benchmark_daily',{}).get('source_profile',{}).get('benchmark_security_id'),
+            block_sessions=2,maximum_added_bytes=8*1024**3,maximum_event_cache_bytes=event_cache_bytes)
+        return merge_security_sources([source,delta],spec=spec,destination=root,data=data)
+
     if missing_days:
         require(all(d['event_snapshot']==spec['snapshot'] for d in
                     source.manifest.get('financial_materializations',{}).values()),
@@ -174,10 +194,19 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
              'missing_date_count':len(missing_days),'missing_security_count':len(missing_symbols),
              'old_value_recomputations':0,'buffer_copy_bytes':0}
     for name,desc in manifest['buffers'].items():
-        if same_axes:
-            arrays[name]=source.arrays[name];continue
-        original=source.arrays[name]
-        shape=(len(days),len(symbols),*original.shape[2:])
+        if same_axes:continue
+        if symbols==old['universe'] and days[:len(old['read_sessions'])]==old['read_sessions']:
+            from .feature_input_buffers import segmented_buffer,SegmentedFeatureBuffer
+            ordered_parts=sorted(sources,key=lambda part:part.manifest['spec']['read_sessions'][0])
+            require([d for part in ordered_parts for d in part.manifest['spec']['read_sessions']]==days,
+                    'append input slabs must form the exact frozen calendar')
+            require(all(part.manifest['reason_codes']==source.manifest['reason_codes'] for part in ordered_parts),
+                    'append reason dictionaries differ; remap only the new slab before publication')
+            manifest['buffers'][name]=segmented_buffer([part.manifest['buffers'][name] for part in ordered_parts])
+            arrays[name]=SegmentedFeatureBuffer(manifest['buffers'][name],source._history_store)
+            continue
+        # Explicit axis projection retains the original bounded copy route.
+        original=source.arrays[name];shape=(len(days),len(symbols),*original.shape[2:])
         target=allocate_feature_buffer(root,dtype=original.dtype,shape=shape)
         for part in sources:
             old_days=part.manifest['spec']['read_sessions'];old_symbols=part.manifest['spec']['universe']
@@ -185,10 +214,10 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
             cols=[(j,security_positions[s]) for j,s in enumerate(old_symbols) if s in security_positions]
             if not selected or not cols:continue
             src_cols,dst_cols=zip(*cols);value=part.arrays[name]
-            for src_row,dst_row in selected:
-                target[dst_row,list(dst_cols)]=value[src_row,list(src_cols)]
+            for src_row,dst_row in selected:target[dst_row,list(dst_cols)]=value[src_row,list(src_cols)]
         manifest['buffers'][name],arrays[name]=seal_feature_buffer(root,target,dtype=desc['dtype'],shape=shape)
         metrics['buffer_copy_bytes']+=int(np.prod(shape))*original.dtype.itemsize
+    if same_axes:arrays=source.arrays
     if source.manifest.get('evidence_mode')!='block_receipts_v1':
         require(not source.manifest.get('financial_materializations') and not any(
             item['domain']=='materialized_industry_intervals' for item in source.manifest.get('daily_fields',{}).values()),
@@ -278,4 +307,97 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
     manifest.pop('source_ref');manifest=seal(manifest,'source_ref')
     atomic_json(root/'source.json',manifest)
     if progress is not None:progress({'stage':'input_reuse',**metrics})
-    return FeatureColumnSource(manifest,arrays),metrics
+    result=FeatureColumnSource(manifest,arrays)
+    if hasattr(source,'_history_store'):result._history_store=source._history_store
+    return result,metrics
+
+
+def merge_security_sources(sources, *, spec, destination, data):
+    """Join separately prepared, disjoint securities under one frozen scope.
+
+    The caller prepares only new securities through the same input producers.
+    All sources must have identical dates, fields, PIT and field-level source
+    bindings. Changed source rules need explicit affected-field preparation.
+    FeatureLibrary then reuses independent old-axis results and recomputes CS
+    against the expanded reference pool.
+    """
+    from .feature_input_buffers import security_segmented_buffer
+    from .stock_feature_library import _SourceArrays
+    from .stock_matrix_reader import VerifiedMatrixStore
+    from .stock_feature_columns import FeatureColumnSource
+    from .stock_feature_inputs import _spec,source_universe_binding
+    from .feature_input_checkpoint import atomic_json
+    require(len(sources)>=2,'at least two disjoint prepared sources required')
+    root=Path(destination);root.mkdir(parents=True,exist_ok=True)
+    first=sources[0].manifest;days=spec['read_sessions'];symbols=spec['universe'];universe=_spec(spec)
+    axes=[s.manifest['spec']['universe'] for s in sources]
+    require(sorted(s for axis in axes for s in axis)==symbols,'prepared security axes must cover scope exactly')
+    bindings=None
+    for source in sources:
+        manifest=source.manifest;old=manifest['spec']
+        require(old['read_sessions']==days and old['pit_policy']==spec['pit_policy'] and
+                old['cutoff_by_session']==spec['cutoff_by_session'] and _spec(old)==universe,
+                'security merge scope or PIT differs')
+        require(manifest.get('evidence_mode')=='block_receipts_v1' and
+                manifest['reason_codes']==first['reason_codes'] and
+                manifest.get('daily_fields')==first.get('daily_fields') and set(manifest['buffers'])==set(first['buffers']),
+                'security merge needs identical typed fields and reason codes')
+        actual={}
+        chunks=list(manifest['chunks'])+[c for ext in manifest.get('daily_extensions',[]) for c in ext['chunks']]
+        for chunk in chunks:
+            for descriptor in chunk['evidence']:
+                require(file_digest(descriptor['path'])==descriptor['file_digest'],'security merge evidence changed')
+                child=json.loads(Path(descriptor['path']).read_text());_verify_ref(child,'evidence_ref')
+                require(child['contract_version']=='reader_column_block_v1','light input blocks required')
+                for day in child['sessions']:
+                    for field,metadata in child['field_meta'].items():actual[field,day]=metadata
+        require(bindings is None or actual==bindings,'field source versions differ across security slabs')
+        bindings=actual
+    manifest=deepcopy(first);manifest['spec']=deepcopy(spec)
+    manifest['buffers']={name:security_segmented_buffer([s.manifest['buffers'][name] for s in sources],axes,symbols)
+                         for name in first['buffers']}
+    manifest['chunks']=_project_chunks(first['chunks'],days,symbols,root)
+    manifest['daily_extensions']=[{**ext,'chunks':_project_chunks(ext['chunks'],days,symbols,root)}
+                                  for ext in first.get('daily_extensions',[])]
+    for declaration in manifest.get('financial_materializations',{}).values():declaration['coverage_security_ids']=list(symbols)
+    store=VerifiedMatrixStore(maximum_source_bytes=256*1024**3,maximum_matrix_bytes=8*1024**3)
+    try:
+        manifest['buffers']['member_pool_complete']=_merged_pool_complete(
+            data,spec=spec,buffers=manifest['buffers'],store=store,root=root,universe_id=universe)
+    except BaseException:
+        store.close();raise
+    manifest['universe_binding']=source_universe_binding(manifest)
+    manifest.pop('source_ref');manifest=seal(manifest,'source_ref');atomic_json(root/'source.json',manifest)
+    result=FeatureColumnSource(manifest,_SourceArrays(manifest,store));result._history_store=store
+    return result,{'old_value_recomputations':0,'buffer_copy_bytes':0,'security_slabs':len(sources)}
+
+
+def _merged_pool_complete(data, *, spec, buffers, store, root, universe_id):
+    """Recheck changed CS membership closure, retaining every old numeric slab."""
+    import numpy as np
+    import pandas as pd
+    from axiom_data import QuerySpec
+    from .feature_input_buffers import SegmentedFeatureBuffer,allocate_feature_buffer,seal_feature_buffer
+    from .stock_feature_columns import _membership_masks
+    def array(name):
+        desc=buffers[name]
+        return SegmentedFeatureBuffer(desc,store) if 'layout' in desc else store.buffer(desc).view('bool')
+    days=spec['read_sessions'];symbols=spec['universe'];shape=(len(days),len(symbols))
+    member=array('member');known=array('member_known')
+    complete=allocate_feature_buffer(root,dtype='bool',shape=shape)
+    for offset in range(0,len(days),2):
+        selected=days[offset:offset+2];keys=[(s,d) for d in selected for s in symbols]
+        query=QuerySpec('universe_membership',('is_member',),tuple(symbols),tuple(selected),
+            spec['pit_policy'],{d:spec['cutoff_by_session'][d] for d in selected},universe_id=universe_id)
+        batch=data.members(snapshot=spec['snapshot'],query=query)
+        frame=batch.frame.set_index(['security_id','session'])
+        require(frame.index.is_unique and set(frame.index)==set(keys),'merged membership keys differ')
+        frame=frame.reindex(pd.MultiIndex.from_tuples(keys,names=['security_id','session']))
+        meta=batch.field_meta['is_member'];by_key={(r['security_id'],r['session']):r for r in meta['by_key']}
+        require(len(by_key)==len(meta['by_key']) and set(by_key)==set(keys),'merged membership provenance differs')
+        values,valid,pool,_=_membership_masks(frame['is_member'],[by_key[k] for k in keys],meta,selected,(len(selected),len(symbols)))
+        require(np.array_equal(values,member[offset:offset+len(selected)]) and
+                np.array_equal(valid,known[offset:offset+len(selected)]),'merged membership differs from fixed source slabs')
+        complete[offset:offset+len(selected)]=pool
+    descriptor,_=seal_feature_buffer(root,complete,dtype='bool_u8',shape=shape)
+    return descriptor

@@ -40,6 +40,18 @@ def prepare_qsys_inputs(data, *, source, names, destination, event_snapshots,
                 daily_fields={k:v for k,v in daily.items() if v['domain']==domain},
                 destination=root/('daily-'+domain),snapshot=daily_snapshot,
                 block_sessions=block_sessions,maximum_added_bytes=maximum_added_bytes)
+    # The full physical-axis route shares one event pass across compatible fields.
+    if symbols==spec['universe']:
+        from .financial_feature_columns import extend_financial_feature_sources
+        groups={}
+        for key,bundle in requirements['financial_fields'].items():
+            outputs={n:p for n,p in bundle['outputs'].items() if n not in source.physical_fields() and (wanted is None or n in wanted)}
+            if outputs:groups.setdefault(event_snapshots[bundle['domain']],{})[key]={**bundle,'outputs':outputs}
+        for ordinal,(snapshot,bundles) in enumerate(groups.items()):
+            source,metrics['financial']['unified_'+str(ordinal)]=extend_financial_feature_sources(data,
+                source=source,bundles=bundles,destination=root/('events-'+str(ordinal)),event_snapshot=snapshot,
+                report_start=report_start,report_end=report_end,maximum_added_bytes=maximum_added_bytes,
+                maximum_event_cache_bytes=maximum_event_cache_bytes)
     for key,bundle in requirements['financial_fields'].items():
         present=set(source.physical_fields())
         reused=set(bundle['outputs']) & present

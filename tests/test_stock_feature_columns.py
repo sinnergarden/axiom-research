@@ -24,12 +24,13 @@ class FeatureColumnSourceTests(unittest.TestCase):
         reason=np.zeros(shape,dtype='u1'); reason[0,1,0]=1
         arrays={'values':values,'original_values':values.copy(),'validity':valid,
             'available':available,'available_validity':known,'reasons':reason,
-            'member':np.ones(shape[:2],dtype=bool),'member_available':available[:,:,0].copy(),
+            'member':np.ones(shape[:2],dtype=bool),'member_known':np.ones(shape[:2],dtype=bool),
+            'member_pool_complete':np.ones(shape[:2],dtype=bool),'member_available':available[:,:,0].copy(),
             'member_available_validity':np.ones(shape[:2],dtype=bool)}
         spec={'read_sessions':days,'feature_sessions':[days[-1]],'universe':securities,
             'cutoff_by_session':{d:d+'T12:30:00.900000Z' for d in days},
             'snapshot':'s_fixture','pit_policy':'best_effort_vendor_v1'}
-        manifest={'spec':spec,'source_ref':digest({'fixture':'columns'})}
+        manifest={'reason_codes':list(REASONS),'spec':spec,'source_ref':digest({'fixture':'columns'})}
         return FeatureColumnSource(manifest,arrays)
 
     def test_public_adjustment_values_and_missing_precedence(self):

@@ -986,7 +986,8 @@ def iter_feature_rows(handle, offsets, *, model_feature_selection=None):
                     'source_refs':deepcopy(compact.dictionary[int(compact.sources[local])])}
                 for name in ('reasons','availability'):
                     original=compact.dictionary[int(getattr(compact,name)[local])]
-                    row[name]=deepcopy([original[j] for j in source_positions])
+                    projection=getattr(compact,'column_positions',None)
+                    row[name]=deepcopy([original[j if projection is None else projection[j]] for j in source_positions])
             yield row
     value['store'].check()
 

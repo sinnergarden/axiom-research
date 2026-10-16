@@ -149,16 +149,33 @@ def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts
             'column source buffers mismatch')
     reachable={manifest['source_ref'],descriptor['file_digest']}
     for name,desc in manifest['buffers'].items():
-        _fields(desc,{'path','file_digest','dtype','shape','buffer_digest'},'exact source buffer required')
         shape=[len(days),len(securities)]+([] if name.startswith('member') or '::' in name else [6])
-        require(desc['dtype']==buffer_types[name] and desc['shape']==shape and
-                desc['buffer_digest']==desc['file_digest'],'column source buffer shape/type/ref mismatch')
-        if _verify_buffers: _physical(desc,store)
-        size=DTYPES[desc['dtype']][1]
-        for dimension in shape: size*=dimension
-        physical=Path(desc['path']) if store is None else store._resolve(desc['path'])
-        require(physical.stat().st_size==size,'column source buffer length mismatch')
-        reachable.add(desc['buffer_digest'])
+        require(desc['dtype']==buffer_types[name] and desc['shape']==shape,'column source buffer shape/type mismatch')
+        def pieces(value):
+            if value.get('layout')=='date_segments_v1':
+                from .feature_input_buffers import segmented_buffer
+                require(value==segmented_buffer(value['segments']),'date segment identity/axes mismatch')
+                for child in value['segments']:yield from pieces(child)
+            elif value.get('layout')=='security_segments_v1':
+                require(value['buffer_digest']==digest({k:v for k,v in value.items() if k!='buffer_digest'}),'security segment identity mismatch')
+                selected=[]
+                for part in value['segments']:
+                    cols=part['columns'];child=part['buffer'];selected.extend(cols)
+                    require(cols==sorted(set(cols)) and child['dtype']==value['dtype'] and
+                        child['shape']==[value['shape'][0],len(cols),*value['shape'][2:]],'security segment axes mismatch')
+                    yield from pieces(child)
+                require(sorted(selected)==list(range(value['shape'][1])),'security segment coverage mismatch')
+            else:yield value
+        parts=pieces(desc)
+        for part in parts:
+            _fields(part,{'path','file_digest','dtype','shape','buffer_digest'},'exact source buffer required')
+            require(part['buffer_digest']==part['file_digest'],'column source buffer ref mismatch')
+            if _verify_buffers:_physical(part,store)
+            size=DTYPES[part['dtype']][1]
+            for dimension in part['shape']:size*=dimension
+            physical=Path(part['path']) if store is None else store._resolve(part['path'])
+            require(not physical.is_symlink() and physical.stat().st_size==size,'column source buffer length mismatch')
+            reachable.add(part['buffer_digest'])
     require(type(manifest['chunks']) is list and bool(manifest['chunks']),'column source provenance chunks required')
     covered=[]
     all_chunks=[(chunk,3,None) for chunk in manifest['chunks']]

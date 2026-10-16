@@ -33,12 +33,14 @@ def _feature_source_compatibility(view, source, selection):
     require(catalog.to_dict()['input_contract']=={'price_basis':'common_anchor_adjusted_v1',
         'adjustment_anchor':'feature_session_visible_at_cutoff','amount_unit':'CNY'},
         'unsupported training source/catalog input interpretation')
-    raw=feature_definitions(source.plan(catalog,selection,normalized=False),input_semantics=source.input_semantics())
-    normalized=feature_definitions(source.plan(catalog,selection,normalized=True),input_semantics=source.input_semantics())
+    raw=source.definitions(catalog,selection,normalized=False)
     def same(expected):
         return all(cap['definitions'][name]['semantic_ref']==expected[name]['semantic_ref'] and
                    cap['definitions'][name]['schema']==expected[name]['schema'] for name in cap['columns'])
-    layer='raw' if same(raw) else 'normalized' if same(normalized) else None
+    layer='raw' if same(raw) else None
+    if layer is None:
+        normalized=source.definitions(catalog,selection,normalized=True)
+        layer='normalized' if same(normalized) else None
     require(layer is not None, 'Feature/source definition semantics mismatch')
     dependencies=(admitted_raw_dependency_refs(view,source,raw,cap['sessions'],cap['security_ids'])
                   if layer=='raw' else source.dependency_refs(raw,cap['sessions'],cap['security_ids']))
@@ -155,7 +157,10 @@ def load_feature_library_training_view(descriptor, *, limits=None, source=None):
                     capabilities['columns']==columns and
                     [capabilities['definitions'][n]['schema'] for n in columns]==schema,
                     'training projection library binding mismatch')
-            members=member_store.buffer(wire['source_member_buffer']).view('bool')
+            if wire['source_member_buffer'].get('layout') in ('date_segments_v1','security_segments_v1'):
+                from .feature_input_buffers import SegmentedFeatureBuffer
+                members=SegmentedFeatureBuffer(wire['source_member_buffer'],member_store)
+            else:members=member_store.buffer(wire['source_member_buffer']).view('bool')
             original_source=member_store.read_json(definition['source'],'source_ref')
             original_spec=original_source['spec']
             require(wire['source_member_buffer']==original_source['buffers']['member'] and
@@ -283,7 +288,7 @@ class _NativeTrainingBlocks:
         spec=value['definition']['spec'];width=len(spec['ordered_features'])
         securities=spec['universe'];count=len(securities)
         day=spec['feature_sessions'][block['start']//count]
-        store.reserve(count*(width*40+len(columns)*96+256)+4096)
+        store.reserve(count*(len(columns)*136+256)+4096)
         cells=self.library.project([(s,day) for s in securities],columns=columns)
         known=cells['available_at_utc_us']!=cells['null_available_at_utc_us']
         arrays={'values':np.where(cells['validity'],cells['values'],0).astype('<f8'),
@@ -299,8 +304,8 @@ class _NativeTrainingBlocks:
         positions=[value['column_positions'][n] for n in columns]
         rows=[]
         for i,s in enumerate(securities):
-            flags=[False]*width;clocks=[None]*width;reasons=[[] for _ in range(width)]
-            for j,k in enumerate(positions):
+            flags=[False]*len(columns);clocks=[None]*len(columns);reasons=[[] for _ in columns]
+            for j,k in enumerate(range(len(columns))):
                 flags[k]=bool(cells['validity'][i,j])
                 clocks[k]=_instant_us(cells['available_at_utc_us'][i,j],cells['null_available_at_utc_us'])
                 reason=cells['reason_dictionary'][int(cells['reason_codes'][i,j])]
@@ -308,7 +313,8 @@ class _NativeTrainingBlocks:
             rows.append({'member':bool(member[i]),'knowledge_cutoff':cutoff,
                 'validity':flags,'availability':clocks,'reasons':reasons,
                 'source_refs':[self.library.identity,*cells['partition_refs']]})
-        compact=_CompactRows(rows,width,np);rows=None
+        compact=_CompactRows(rows,len(columns),np);rows=None
+        compact.column_positions={original:selected for selected,original in enumerate(positions)}
         flags=np.all(cells['validity'],axis=1)
         maximum=np.max(cells['available_at_utc_us'],axis=1)
         flags.flags.writeable=False;maximum.flags.writeable=False
@@ -364,7 +370,10 @@ def _load_native_training_view(descriptor,wire,store):
                 set(securities)<=set(wire['source_member_securities']) and
                 all(spec['cutoff_by_session'][d]==original['spec']['cutoff_by_session'][d] for d in days),
                 'native training membership/cutoff binding mismatch')
-        members=member_store.buffer(wire['source_member_buffer']).view('bool')
+        if wire['source_member_buffer'].get('layout') in ('date_segments_v1','security_segments_v1'):
+            from .feature_input_buffers import SegmentedFeatureBuffer
+            members=SegmentedFeatureBuffer(wire['source_member_buffer'],member_store)
+        else:members=member_store.buffer(wire['source_member_buffer']).view('bool')
         native=_NativeTrainingBlocks(library,members,member_store,wire)
         owner_definition={'contract_version':'stock_feature_library_training_view_v1',
             'source_index':descriptor,'spec':deepcopy(spec),'schema':wire['schema'],'row_index':grid,

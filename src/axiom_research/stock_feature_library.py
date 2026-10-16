@@ -64,9 +64,14 @@ class _SourceArrays(Mapping):
     def __len__(self): return len(self.descriptors)
     def __getitem__(self, name):
         if name not in self.cache:
-            desc=self.descriptors[name]; value=self.store.buffer(desc)
+            desc=self.descriptors[name]
+            if desc.get('layout') in ('date_segments_v1','security_segments_v1'):
+                from .feature_input_buffers import SegmentedFeatureBuffer
+                self.cache[name]=SegmentedFeatureBuffer(desc,self.store)
+                return self.cache[name]
+            value=self.store.buffer(desc)
             self.cache[name]=value.view('bool') if desc['dtype']=='bool_u8' else value
-        else: self.store.check_path(self.descriptors[name]['path'])
+        elif 'path' in self.descriptors[name]: self.store.check_path(self.descriptors[name]['path'])
         return self.cache[name]
     def clear(self): self.cache.clear()
 
@@ -80,9 +85,14 @@ class SavedColumnFeatureSource:
         self.store=VerifiedMatrixStore(maximum_source_bytes=maximum_source_bytes,
             maximum_matrix_bytes=maximum_working_bytes,
             _caller_retained_bytes=lambda:self._leaf_cache_bytes)
+        # This owner retains private admitted metadata without mutating its graphs.
+        # Reuse the existing incremental ledger rather than walking all ancestors per receipt.
+        self.store._begin_publication_accounting()
         self._leaf_refs={}; self._dependencies={}; self._buffer_refs={}; self._reference_refs={}
         self._leaf_subsets={}; self._leaf_axes={}; self._axis_positions={}
         self.metrics={'physical_field_day_hashes':0,'physical_hash_bytes':0}
+        self._plans={}; self._definitions={}; self._needed_cache={}; self._axis_sets={}
+        self._leaf_dependencies={}; self._window_buffers={};self._axis_refs={}
         manifest,_=verify_feature_column_source(descriptor,store=self.store,
             _evidence_days=set(),_verify_buffers=False)
         from .stock_feature_inputs import source_universe_binding
@@ -104,6 +114,7 @@ class SavedColumnFeatureSource:
         if axis not in self._leaf_axes:
             self._charge_leaf_cache(256+sys.getsizeof(axis)+sum(sys.getsizeof(s) for s in axis))
             self._leaf_axes[axis]=axis
+            self._axis_refs[id(axis)]=digest(list(axis))
         return self._leaf_axes[axis]
 
     def _charge_leaf_cache(self, amount):
@@ -226,37 +237,52 @@ class SavedColumnFeatureSource:
                 'logical_key':contract['logical_key'], 'field':contract['fields'][field]}
 
     def plan(self, catalog, selection, *, normalized=False):
-        original=feature_column_plan(self.source,catalog,selection=selection,normalized=normalized).to_dict()
-        original['reference_members']={day:{s:g for s,g in members.items() if s in self._reference_set}
-                                       for day,members in original['reference_members'].items()}
-        original['reference_ref']=digest({'original_reference_ref':original['reference_ref'],
-                                         'reference_selection':self.reference_security_ids})
-        return FeaturePlan.from_dict(original)
+        key=(catalog.identity,digest(selection),normalized)
+        if key not in self._plans:
+            with self.store.operation():
+                original=feature_column_plan(self.source,catalog,selection=selection,normalized=normalized).to_dict()
+                original['reference_members']={day:{s:g for s,g in members.items() if s in self._reference_set}
+                                               for day,members in original['reference_members'].items()}
+                original['reference_ref']=digest({'original_reference_ref':original['reference_ref'],
+                                                 'reference_selection':self.reference_security_ids})
+                self._plans[key]=FeaturePlan.from_dict(original)
+        return self._plans[key]
+
+    def definitions(self, catalog, selection, *, normalized=False):
+        key=(catalog.identity,digest(selection),normalized)
+        if key not in self._definitions:
+            self._definitions[key]=feature_definitions(self.plan(catalog,selection,normalized=normalized),
+                                                      input_semantics=self.input_semantics())
+        return self._definitions[key]
 
     def _selected_leaf_refs(self, fields, days, securities):
         wanted={(field,day) for field in fields for day in days}
-        missing=wanted-set(self._leaf_refs)
+        missing={key for key in wanted if key not in self._leaf_refs}
         if missing:
             verify_feature_column_source(self.descriptor,store=self.store,
                 _dependency_receipts=self._capture_leaf_refs,
                 _evidence_days={d for _,d in missing},
                 _evidence_fields={f for f,_ in missing},_verify_buffers=False)
-        require(wanted<=set(self._leaf_refs), 'used source leaf evidence absent')
+        require(all(key in self._leaf_refs for key in wanted), 'used source leaf evidence absent')
         axis=tuple(securities); axis=self._leaf_axis(axis)
         result={}
         for field in sorted(fields):
             result[field]={}
             for day in sorted(days):
                 symbols,full,dtype,unit,packed,raw_bytes=self._leaf_refs[field,day]
-                require(set(securities)<=set(symbols), 'source leaf security axes mismatch')
+                if id(symbols) not in self._axis_sets:self._axis_sets[id(symbols)]=frozenset(symbols)
+                if id(axis) not in self._axis_sets:self._axis_sets[id(axis)]=frozenset(axis)
+                require(self._axis_sets[id(axis)]<=self._axis_sets[id(symbols)], 'source leaf security axes mismatch')
                 if packed is None:
-                    result[field][day]=digest({'contract_version':'block_input_dependency_v1',
+                    key=(field,day,id(axis))
+                    if key not in self._leaf_dependencies:self._leaf_dependencies[key]=digest({'contract_version':'block_input_dependency_v2',
                         'source_binding':full,'field':field,'dtype':dtype,'unit':unit,
-                        'security_ids':securities,'session':day,
+                        'security_axis_ref':self._axis_refs[id(axis)],'session':day,
                         'cutoff':self.source.manifest['spec']['cutoff_by_session'][day]})
+                    result[field][day]=self._leaf_dependencies[key]
                 elif axis==symbols: result[field][day]=full
                 else:
-                    key=(field,day,axis)
+                    key=(field,day,id(axis))
                     if key not in self._leaf_subsets:
                         # Bound inflate output and its decoded flat provenance
                         # graph before allocation; saved rows come from admitted JSON.
@@ -281,13 +307,15 @@ class SavedColumnFeatureSource:
 
     def _selected_buffers(self, field, indices, securities):
         """One bounded physical field/day fingerprint; rolling windows combine refs."""
-        rows=[]
         axis=tuple(securities); axis=self._leaf_axis(axis)
-        if axis not in self._axis_positions:
-            self._axis_positions[axis]=[self.source.security_positions[s] for s in securities]
-        positions=self._axis_positions[axis]
+        window=(field,tuple(indices),id(axis))
+        if window in self._window_buffers:return self._window_buffers[window]
+        rows=[]
+        if id(axis) not in self._axis_positions:
+            self._axis_positions[id(axis)]=[self.source.security_positions[s] for s in securities]
+        positions=self._axis_positions[id(axis)]
         for i in indices:
-            key=field,i,axis
+            key=field,i,id(axis)
             if key not in self._buffer_refs:
                 buffers={k:_array_ref(self.source.field_array(field,k)[i,positions]) for k in
                     ('values','original_values','validity','available','available_validity','reasons')}
@@ -295,7 +323,9 @@ class SavedColumnFeatureSource:
                 self.metrics['physical_hash_bytes']+=sum(self.source.field_array(field,k)[i,positions].nbytes for k in buffers)
                 self._buffer_refs[key]=digest(buffers)
             rows.append([self.source.manifest['spec']['read_sessions'][i],self._buffer_refs[key]])
-        return {'contract_version':'ordered_field_day_buffers_v1','field':field,'days':rows}
+        value={'contract_version':'ordered_field_day_buffers_v1','field':field,'days':rows}
+        self._window_buffers[window]=value
+        return value
 
     def _reference_days(self, indices):
         import numpy as np
@@ -319,18 +349,39 @@ class SavedColumnFeatureSource:
                 set(securities)<=set(spec['universe']) and set(days)<=set(spec['feature_sessions']),
                 'requested axes outside admitted physical source')
         axis=tuple(securities); axis=self._leaf_axis(axis)
+        # Admit requested block receipts once, including reference dependencies.
+        requested_days=set(); requested_fields=set()
+        for day in days:
+            for definition in definitions.values():
+                template=(definition['semantic_ref'],day)
+                if template not in self._needed_cache:
+                    semantic=definition['semantic']
+                    self._needed_cache[template]=_needed({'input_schema':[v['schema'] for v in semantic['inputs'].values()],
+                        'nodes':semantic['nodes'],'outputs':[semantic['output']]},[positions[day]])
+                needed=self._needed_cache[template]
+                for field in definition['inputs']:
+                    requested_fields.update(source.leaf_fields(field))
+                    requested_days.update(spec['read_sessions'][i] for i in needed[field])
+                if definition['reference_dependent']:
+                    requested_fields.add('is_member')
+                    if 'industry_code' in source.physical_fields():requested_fields.add('industry_code')
+        requested_days.update(days)
+        if any((field,day) not in self._leaf_refs for field in requested_fields for day in requested_days):
+            with self.store.operation():
+                verify_feature_column_source(self.descriptor,store=self.store,
+                    _dependency_receipts=self._capture_leaf_refs,_evidence_days=requested_days,
+                    _evidence_fields=requested_fields,_verify_buffers=False)
         result={}
         for day in days:
             result[day]={}
             for name, definition in definitions.items():
                 require(not definition['reference_dependent'] or securities==spec['universe'],
                         'CS dependencies require complete physical cohort')
-                key=(definition['semantic_ref'],day,axis)
+                key=(definition['semantic_ref'],day,id(axis))
                 if key in self._dependencies:
                     result[day][name]=self._dependencies[key]; continue
                 source.require_coverage(definition['inputs'],securities)
-                semantic=definition['semantic']; needed=_needed({'input_schema':[v['schema'] for v in semantic['inputs'].values()],
-                    'nodes':semantic['nodes'],'outputs':[semantic['output']]},[positions[day]])
+                semantic=definition['semantic']; needed=self._needed_cache[definition['semantic_ref'],day]
                 selected={}; field_days={}
                 for field in definition['inputs']:
                     ix=sorted(needed[field])
@@ -338,7 +389,7 @@ class SavedColumnFeatureSource:
                     # Preserve old receipt structure byte-for-byte for old fields.
                     first=leaves[0]
                     field_days.setdefault(first,set()).update(spec['read_sessions'][i] for i in ix)
-                    selected[field]=deepcopy(self._selected_buffers(first,ix,securities))
+                    selected[field]=dict(self._selected_buffers(first,ix,securities))
                     for leaf in leaves[1:]:
                         leaf_ix=sorted(set(ix)|{positions[day]}) if leaf=='factor' else ix
                         field_days.setdefault(leaf,set()).update(spec['read_sessions'][i] for i in leaf_ix)
@@ -358,9 +409,13 @@ class SavedColumnFeatureSource:
 
     def prepare(self, plan, day, securities, dependencies):
         import numpy as np
-        p=plan.to_dict(); history=max(required_history(plan).values())+1
+        p=plan.to_dict()
+        from axiom_engine.core.plan import _required_history
+        history=max(_required_history(p).values())+1
+        needed=_needed(p,[history-1])
         inputs,_=self.source.core_inputs(day,calendar_ref=p['calendar_ref'],reference_ref=p['reference_ref'],
-            schema=p['input_schema'],history_sessions=history,securities=securities)
+            schema=p['input_schema'],history_sessions=history,securities=securities,
+            field_rows={c['name']:sorted(needed[c['name']]) for c in p['input_schema']})
         names=[c['name'] for c in p['input_schema']]
         for field in ('values','validity','reason_codes','available_at_utc_us','source_codes'):
             inputs[field]={name:inputs[field][name] for name in names}
@@ -397,7 +452,8 @@ class SavedColumnFeatureSource:
         if self._leaf_spool is not None:self._leaf_spool.close()
         self._leaf_cache_bytes=0
         for cache in (self._leaf_refs,self._leaf_axes,self._leaf_subsets,self._dependencies,
-                      self._buffer_refs,self._reference_refs,self._axis_positions): cache.clear()
+                      self._buffer_refs,self._reference_refs,self._axis_positions,self._plans,self._definitions,
+                      self._needed_cache,self._axis_sets,self._leaf_dependencies,self._window_buffers,self._axis_refs): cache.clear()
     def __enter__(self): return self
     def __exit__(self,*args): self.close()
 
@@ -408,7 +464,7 @@ class CatalogFeatureLibrary:
         self.library, self.source, self.catalog=library,source,catalog
 
     def ensure(self, *, selection, output_sessions, sample_universe=None, normalized=False, progress=None):
-        with (self.library.execution_session() if self.library._session is None else nullcontext(self.library)):
+        with self.source.store.operation(), (self.library.execution_session() if self.library._session is None else nullcontext(self.library)):
             return self._ensure(selection=selection,output_sessions=output_sessions,
                 sample_universe=sample_universe,normalized=normalized,progress=progress)
 
@@ -461,7 +517,8 @@ class _RawCrossSectionSource:
         return FeaturePlan.from_dict(p)
 
     def dependency_refs(self, definitions, days, securities):
-        raw_definitions={name:self.raw_view.describe()['definitions'][name] for name in definitions}
+        cap=self.raw_view.describe()
+        raw_definitions={name:cap['definitions'][name] for name in definitions}
         physical=self.source.source.manifest['spec']['universe']
         require(securities==physical,'CS dependencies require complete physical cohort')
         raw=admitted_raw_dependency_refs(self.raw_view,self.source,raw_definitions,days,physical)
