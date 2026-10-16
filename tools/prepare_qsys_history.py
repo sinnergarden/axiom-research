@@ -113,9 +113,20 @@ def run(cfg, *, observer=None):
         end=cfg.get('output_end')
         if end and end not in outputs:outputs=sorted([*outputs,end])
     if outputs!=sorted(set(outputs)) or not outputs:raise ValueError('explicit sorted output sessions required')
-    spec=history_scope(data,snapshot=base,catalog=catalog,selection=selection,
+    from axiom_research.stock_feature_inputs import _spec
+    source_universe=None if original is None else _spec(original.manifest['spec'])
+    universe_id=cfg.get('universe_id',source_universe)
+    if not isinstance(universe_id,str) or not universe_id:raise ValueError('explicit configured universe_id required')
+    if source_universe is not None and source_universe!=universe_id:raise ValueError('configured universe differs from reused membership')
+    spec=history_scope(data,snapshot=base,catalog=catalog,selection=selection,universe_id=universe_id,
         output_sessions=outputs,physical_universe=seed['physical_universe'],destination=root/'scope')
     request_ref=digest(spec)
+    if cfg.get('prepared_inputs_only'):
+        if original is None:raise ValueError('published prepared source required')
+        prior=original.manifest['spec']
+        if ({k:v for k,v in prior.items() if k!='scope'}!={k:v for k,v in spec.items() if k!='scope'} or
+                prior['scope']['scope_bundle_ref']!=spec['scope']['scope_bundle_ref']):
+            raise ValueError('prepared-input continuation differs from frozen plan')
     atomic_json(root/'request.json',{'request_ref':request_ref,'spec':spec,
         'research_range':cfg.get('research_range',['2019-01-02','2025-12-31'])})
     progress('input_reuse')
@@ -133,6 +144,12 @@ def run(cfg, *, observer=None):
             destination=reuse_path.parent,event_cache_bytes=cfg.get('event_cache_bytes',64*1024**2),
             progress=lambda detail:progress('input_reuse',detail=detail))
     source_path=reuse_path
+    if cfg.get('prepared_inputs_only') and source.manifest['buffers']!=original.manifest['buffers']:
+        raise ValueError('prepared-input continuation changed numeric buffer descriptors')
+    if cfg.get('prepared_inputs_only'):
+        required=set(requirements['daily_fields'])|set(requirements['benchmark_fields'])|set(requirements['industry_fields'])
+        required.update(n for b in requirements['financial_fields'].values() for n in b['outputs'])
+        if not required<=set(source.physical_fields()):raise ValueError('published continuation lacks required inputs')
     from axiom_research.financial_feature_columns import QUARTER_POLICY
     if any('quarters_back' in d and d['selection']!=QUARTER_POLICY
            for d in source.manifest.get('financial_materializations',{}).values()):
@@ -174,6 +191,8 @@ def run(cfg, *, observer=None):
         finish(path,binding,source,metrics);source_path=path
     event_bundles={key:bundle for key,bundle in requirements['financial_fields'].items()
         if any(field not in source.physical_fields() for field in bundle['outputs'])}
+    if cfg.get('prepared_inputs_only') and event_bundles:
+        raise ValueError('prepared continuation lacks required event inputs')
     if event_bundles:
         path=root/'inputs'/'events'/'source.json'
         binding={'request':request_ref,'parent':source.identity,'bundles':event_bundles,'snapshot':base,

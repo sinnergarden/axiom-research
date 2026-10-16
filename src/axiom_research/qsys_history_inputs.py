@@ -33,7 +33,7 @@ def open_physical_source(path):
 
 
 def history_scope(data, *, snapshot, catalog, selection, output_sessions,
-                  physical_universe, destination, universe_id='csi1800'):
+                  physical_universe, destination, universe_id):
     """Derive required prior sessions; calendar gaps fail before expensive work."""
     history=max(f['lookback'] for f in catalog.select(selection))-1
     request={'snapshot':snapshot,'universe_id':universe_id,
@@ -273,6 +273,8 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
         manifest['daily_extensions']=extensions
     for decl in manifest.get('financial_materializations',{}).values():
         decl['coverage_security_ids']=[s for s in decl['coverage_security_ids'] if s in set(symbols)]
+    from .stock_feature_inputs import source_universe_binding
+    manifest['universe_binding']=source_universe_binding(manifest)
     manifest.pop('source_ref');manifest=seal(manifest,'source_ref')
     atomic_json(root/'source.json',manifest)
     if progress is not None:progress({'stage':'input_reuse',**metrics})

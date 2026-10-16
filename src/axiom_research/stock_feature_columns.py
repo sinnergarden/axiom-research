@@ -411,6 +411,9 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
         'selection_invariance':'declared_vendor_release_visible_at_each_historical_row_cutoff',
         'implementation_sources':implementations,'implementation_ref':digest(implementations),
         'environment':_environment()},'source_ref')
+    from .stock_feature_inputs import source_universe_binding
+    manifest.pop('source_ref');manifest['universe_binding']=source_universe_binding(manifest)
+    manifest=seal(manifest,'source_ref')
     if staging is not None: atomic_json(root/'source.json',manifest)
     else: write_json(root/'source.json',manifest)
     if staging is not None: staging.retire(manifest)

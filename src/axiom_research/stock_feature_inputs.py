@@ -70,6 +70,20 @@ def _spec(spec, *, reader=read_parent):
     return universe_id
 
 
+def source_universe_binding(manifest, *, reader=read_parent):
+    """Bind actual frozen membership semantics, independently of Qlib labels."""
+    spec=manifest['spec'];universe_id=_spec(spec,reader=reader)
+    query=manifest['qlib_view'].get('universe_query')
+    require(query is None or query.get('universe_id')==universe_id,'Qlib and frozen scope universe differ')
+    members={k:v for k,v in manifest['buffers'].items() if k.startswith('member')}
+    require('member' in members and 'member_known' in members and 'member_pool_complete' in members,
+            'explicit saved membership buffers required')
+    return {'contract_version':'source_universe_binding_v1','universe_id':universe_id,
+        'scope_bundle_ref':spec['scope']['scope_bundle_ref'],'snapshot':spec['snapshot'],
+        'pit_policy':spec['pit_policy'],'membership_profile_ref':digest(manifest['source_profiles']['universe_membership']),
+        'membership_buffers_ref':digest(members)}
+
+
 def _qlib(descriptor, limits, *, fingerprints=None, _file_hasher=None, _json_reader=None):
     """Verify the saved Data manifest and its actual files, without importing Data."""
     _file_hasher=file_digest if _file_hasher is None else _file_hasher

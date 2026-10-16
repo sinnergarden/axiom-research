@@ -260,10 +260,18 @@ def _performance_acceptance(cfg,run):
     evidence.materialize_evidence_rows=forbidden_proof;evidence.input_block_receipt=receipt
     try:
         result=run(cfg,observer=observe)
-        assert counts['real_revision_boundary_cutoffs']>0 and counts['financial_reference_cells']>0
-        assert counts['same_value_revision_invalidation']==1 and counts['block_receipts']>0 and counts['legacy_proof_calls']==0
-        assert counts['nonquarter_case_before_visibility']>0 and counts['nonquarter_case_eligible_anchor']>0 and counts['missing_quarter_control']==1
-        assert counts['unchanged_span_end_comparisons']>0 and counts['stock_block_boundary_visits']>0
+        if cfg.get('prepared_inputs_only'):
+            assert not phase and not counts
+            original=json.loads(Path(cfg['reuse_source']).read_text())
+            published=json.loads(Path(result['source']['path']).read_text())
+            assert original['buffers']==published['buffers']
+            assert result['input_reuse']['buffer_copy_bytes']==0 and result['input_reuse']['old_value_recomputations']==0
+            counts['prepared_buffer_descriptors_preserved']=len(original['buffers'])
+        else:
+            assert counts['real_revision_boundary_cutoffs']>0 and counts['financial_reference_cells']>0
+            assert counts['same_value_revision_invalidation']==1 and counts['block_receipts']>0 and counts['legacy_proof_calls']==0
+            assert counts['nonquarter_case_before_visibility']>0 and counts['nonquarter_case_eligible_anchor']>0 and counts['missing_quarter_control']==1
+            assert counts['unchanged_span_end_comparisons']>0 and counts['stock_block_boundary_visits']>0
         return result,{'checks':{str(k):v for k,v in counts.items()},'validation_seconds':validation_seconds,'financial_phases':phase,'disk_peak':disk_peak}
     finally:
         EventReadOwner.iter_cutoffs=original_iter;financial._memoized_results=original_memo;evidence.compact_reader_evidence=original_compact

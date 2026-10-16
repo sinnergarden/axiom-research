@@ -85,8 +85,12 @@ class SavedColumnFeatureSource:
         self.metrics={'physical_field_day_hashes':0,'physical_hash_bytes':0}
         manifest,_=verify_feature_column_source(descriptor,store=self.store,
             _evidence_days=set(),_verify_buffers=False)
-        universe_name=manifest['qlib_view']['universe_name']
-        require(type(universe_name) is str and bool(universe_name), 'explicit saved source universe required')
+        from .stock_feature_inputs import source_universe_binding
+        binding=source_universe_binding(manifest,reader=self.store.read_json)
+        require(manifest.get('universe_binding')==binding or
+                manifest.get('universe_binding') is None and manifest['qlib_view'].get('universe_query') is not None,
+                'explicit saved source universe binding required; publish a scope-bound descriptor')
+        self.universe_id=binding['universe_id']
         self.descriptor=deepcopy(descriptor)
         arrays=_SourceArrays(manifest,self.store)
         self.source=FeatureColumnSource(manifest,arrays)
@@ -160,7 +164,7 @@ class SavedColumnFeatureSource:
 
     def capabilities(self):
         return {'contract_version':'feature_source_capabilities_v1','source_ref':self.source.identity,
-            'universe_profile':self.source.manifest['qlib_view']['universe_name'],
+            'universe_profile':self.universe_id,
             'pit_policies':[self.source.manifest['spec']['pit_policy']],
             'physical_security_ids':list(self.source.manifest['spec']['universe']),
             'reference_security_ids':list(self.reference_security_ids),
