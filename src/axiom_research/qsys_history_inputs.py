@@ -196,14 +196,13 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
     for name,desc in manifest['buffers'].items():
         if same_axes:continue
         if symbols==old['universe'] and days[:len(old['read_sessions'])]==old['read_sessions']:
-            from .feature_input_buffers import segmented_buffer,SegmentedFeatureBuffer
+            from .feature_input_buffers import segmented_buffer
             ordered_parts=sorted(sources,key=lambda part:part.manifest['spec']['read_sessions'][0])
             require([d for part in ordered_parts for d in part.manifest['spec']['read_sessions']]==days,
                     'append input slabs must form the exact frozen calendar')
             require(all(part.manifest['reason_codes']==source.manifest['reason_codes'] for part in ordered_parts),
                     'append reason dictionaries differ; remap only the new slab before publication')
             manifest['buffers'][name]=segmented_buffer([part.manifest['buffers'][name] for part in ordered_parts])
-            arrays[name]=SegmentedFeatureBuffer(manifest['buffers'][name],source._history_store)
             continue
         # Explicit axis projection retains the original bounded copy route.
         original=source.arrays[name];shape=(len(days),len(symbols),*original.shape[2:])
@@ -305,10 +304,15 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
     from .stock_feature_inputs import source_universe_binding
     manifest['universe_binding']=source_universe_binding(manifest)
     manifest.pop('source_ref');manifest=seal(manifest,'source_ref')
+    from .stock_feature_library import _SourceArrays
+    from .stock_matrix_reader import VerifiedMatrixStore
+    store=getattr(source,'_history_store',None)
+    if store is None:
+        store=VerifiedMatrixStore(maximum_source_bytes=256*1024**3,maximum_matrix_bytes=8*1024**3)
+    result=FeatureColumnSource(manifest,_SourceArrays(manifest,store))
+    result._history_store=store
     atomic_json(root/'source.json',manifest)
     if progress is not None:progress({'stage':'input_reuse',**metrics})
-    result=FeatureColumnSource(manifest,arrays)
-    if hasattr(source,'_history_store'):result._history_store=source._history_store
     return result,metrics
 
 

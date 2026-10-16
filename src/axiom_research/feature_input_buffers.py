@@ -54,14 +54,38 @@ class SegmentedFeatureBuffer:
         self.shape=tuple(descriptor['shape'][:2] if component is not None else descriptor['shape'])
         self.dtype=np.dtype({'float64_le':'<f8','int64_le':'<i8','bool_u8':'bool','uint8':'u1'}[descriptor['dtype']])
         self.nbytes=int(np.prod(self.shape))*self.dtype.itemsize
+        self._axes=tuple(np.arange(size) for size in self.shape)
+        self._children={};self._columns={}
+        self._locations=([{column:i for i,column in enumerate(part['columns'])} for part in descriptor['segments']]
+                         if descriptor['layout']=='security_segments_v1' else None)
+        self._ends=[]
+        if self._locations is None:
+            total=0
+            for part in descriptor['segments']:
+                total+=part['shape'][0];self._ends.append(total)
+
+    def _value(self, desc):
+        if 'layout' in desc:
+            key=desc['buffer_digest']
+            if key not in self._children:self._children[key]=type(self)(desc,self.store,self.component)
+            return self._children[key]
+        value=self.store.buffer(desc)
+        if self.component is not None:return value[:,:,self.component]
+        return value.view('bool') if desc['dtype']=='bool_u8' else value
 
     def __getitem__(self, key):
         import numpy as np
         key=key if isinstance(key,tuple) else (key,)
+        if len(key)==1 and isinstance(key[0],(int,np.integer)) and self._locations is None:
+            from bisect import bisect_right
+            row=int(key[0]);row=row+self.shape[0] if row<0 else row
+            if not 0<=row<self.shape[0]:raise IndexError('date row outside source')
+            part=bisect_right(self._ends,row);start=0 if part==0 else self._ends[part-1]
+            return self._value(self.descriptor['segments'][part])[row-start]
         key=(*key,*([slice(None)]*(len(self.shape)-len(key))))
         axes=[];projection=[]
-        for size,selector in zip(self.shape,key):
-            chosen=np.arange(size)[selector]
+        for axis,selector in zip(self._axes,key):
+            chosen=axis[selector]
             if np.ndim(chosen)==0:axes.append(np.asarray([chosen]));projection.append(0)
             elif isinstance(selector,slice):axes.append(chosen);projection.append(slice(None))
             else:
@@ -69,13 +93,11 @@ class SegmentedFeatureBuffer:
                 axes.append(unique);projection.append(inverse.reshape(chosen.shape))
         out=np.empty(tuple(len(a) for a in axes),dtype=self.dtype);start=0
         if self.descriptor['layout']=='security_segments_v1':
-            for part in self.descriptor['segments']:
-                locations={column:i for i,column in enumerate(part['columns'])}
+            for part,locations in zip(self.descriptor['segments'],self._locations):
                 selected=np.asarray([i for i,column in enumerate(axes[1]) if int(column) in locations],dtype=int)
                 if not selected.size:continue
                 desc=part['buffer']
-                value=(type(self)(desc,self.store,self.component) if 'layout' in desc else self.store.buffer(desc))
-                if 'layout' not in desc and self.component is not None:value=value[:,:,self.component]
+                value=self._value(desc)
                 source_columns=np.asarray([locations[int(axes[1][i])] for i in selected])
                 out[np.ix_(np.arange(len(axes[0])),selected,*[np.arange(len(a)) for a in axes[2:]])]=value[np.ix_(axes[0],source_columns,*axes[2:])]
             out.flags.writeable=False
@@ -83,16 +105,15 @@ class SegmentedFeatureBuffer:
         for desc in self.descriptor['segments']:
             end=start+desc['shape'][0];selected=np.flatnonzero((axes[0]>=start)&(axes[0]<end))
             if selected.size:
-                value=(type(self)(desc,self.store,self.component) if 'layout' in desc else self.store.buffer(desc))
-                if 'layout' not in desc and self.component is not None:value=value[:,:,self.component]
-                elif 'layout' not in desc and desc['dtype']=='bool_u8':value=value.view('bool')
+                value=self._value(desc)
                 out[np.ix_(selected,*[np.arange(len(a)) for a in axes[1:]])]=value[np.ix_(axes[0][selected]-start,*axes[1:])]
             start=end
         out.flags.writeable=False
         return out[tuple(projection)]
 
     def column(self, component):
-        return type(self)(self.descriptor,self.store,component)
+        if component not in self._columns:self._columns[component]=type(self)(self.descriptor,self.store,component)
+        return self._columns[component]
 
 
 def security_segmented_buffer(descriptors, axes, securities):

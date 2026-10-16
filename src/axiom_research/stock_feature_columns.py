@@ -48,8 +48,11 @@ def feature_column_plan(source, catalog, *, selection=None, normalized=True):
         'member_available':source.manifest['buffers']['member_available']})
     member=a['member']
     if not hasattr(source,'_reference_members'):
-        source._reference_members={day:{security:groups[j] for j,security in enumerate(spec['universe']) if bool(member[i,j])}
-            for i,day in enumerate(spec['read_sessions']) for groups in source.industries([i])}
+        source._reference_members={}
+        for i,day in enumerate(spec['read_sessions']):
+            members=member[i]
+            groups=source.industries([i])[0]
+            source._reference_members[day]={security:groups[j] for j,security in enumerate(spec['universe']) if bool(members[j])}
     header={'abi':ABI,'semantics':SEMANTICS,'recipe_ref':catalog.recipe_ref(selection,normalized=normalized),
         'calendar_ref':calendar_ref,'reference_ref':reference_ref,
         'reference_members':source._reference_members,
@@ -136,7 +139,8 @@ class FeatureColumnSource:
         selected_days=spec['read_sessions'][begin:end] if rows is None else [spec['read_sessions'][i] for i in rows]
         # Bound copies by the requested history and securities before adjustment.
         a={name:(self.arrays[name][chosen] if securities==spec['universe'] else self.arrays[name][chosen][:,positions])
-           for name in self.arrays if '::' not in name and (include_reference or not name.startswith('member'))}
+           for name in self.arrays if '::' not in name and (include_reference or not name.startswith('member'))
+           and (include_reference or any(field in FIELDS for field in fields))}
         cutoff=instant_us(spec['cutoff_by_session'][day])//1000000*1000000
         prices=[name for name in fields if name in FIELDS[:4]]; indices=[FIELDS.index(name) for name in prices]
         selected_values={}; selected_validity={}; selected_reasons={}; selected_clocks={}
@@ -172,9 +176,13 @@ class FeatureColumnSource:
             selected_reasons['amount_cny']=a['reasons'][:,:,4]
             selected_clocks['amount_cny']=amount_clock
         # Added daily leaves retain their native numeric precision and clocks.
+        leaves={}
         def leaf(field, kind):
-            value=self.field_array(field,kind)[chosen]
-            return value if securities==spec['universe'] else value[:,positions]
+            key=(field,kind)
+            if key not in leaves:
+                value=self.field_array(field,kind)[chosen]
+                leaves[key]=value if securities==spec['universe'] else value[:,positions]
+            return leaves[key]
         for field in fields:
             if field in FIELDS or field=='vwap': continue
             if field=='session_ordinal':
@@ -265,13 +273,20 @@ class FeatureColumnSource:
             reason_dictionary=list(self.manifest['reason_codes']),source_sets=sets,
             input_refs={'source_ref':self.identity,'selection_ref':digest(selection)})
         if field_rows is not None:inputs['field_rows']={n:list(field_rows[n]) for n in names}
+        groups={}
         for ordinal,name in enumerate(names):
-            rows=None if field_rows is None else [begin+i for i in field_rows[name]]
-            view=self.select(day,history_sessions=history_sessions,securities=securities,fields=[name],rows=rows,include_reference=False)
-            inputs['values'][name]=view['values'][name];inputs['validity'][name]=view['validity'][name]
-            inputs['reason_codes'][name]=view['missing_reasons'][name].astype('<i4')
-            inputs['available_at_utc_us'][name]=view['availability'][name]
-            inputs['source_codes'][name]=np.full(inputs['values'][name].shape,ordinal,dtype='<i4')
+            key=None if field_rows is None else tuple(field_rows[name])
+            groups.setdefault(key,[]).append((ordinal,name))
+        for relative,columns in groups.items():
+            rows=None if relative is None else [begin+i for i in relative]
+            view=self.select(day,history_sessions=history_sessions,securities=securities,
+                fields=[name for _,name in columns],rows=rows,include_reference=False)
+            for ordinal,name in columns:
+                inputs['values'][name]=view['values'][name];inputs['validity'][name]=view['validity'][name]
+                inputs['reason_codes'][name]=view['missing_reasons'][name].astype('<i4')
+                inputs['available_at_utc_us'][name]=view['availability'][name]
+                inputs['source_codes'][name]=np.full(inputs['values'][name].shape,ordinal,dtype='<i4')
+            del view
         for source,target in (('member','reference_member'),('member_known','reference_member_known'),('member_pool_complete','reference_pool_complete')):
             if source!='member' and source not in self.arrays:
                 # Preserve the legacy input contract; published modern sources carry explicit masks.

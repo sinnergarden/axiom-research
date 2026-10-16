@@ -93,6 +93,7 @@ class SavedColumnFeatureSource:
         self.metrics={'physical_field_day_hashes':0,'physical_hash_bytes':0}
         self._plans={}; self._definitions={}; self._needed_cache={}; self._axis_sets={}
         self._leaf_dependencies={}; self._window_buffers={};self._axis_refs={}
+        self._execution_plans={};self._prepared_plans={}
         manifest,_=verify_feature_column_source(descriptor,store=self.store,
             _evidence_days=set(),_verify_buffers=False)
         from .stock_feature_inputs import source_universe_binding
@@ -321,7 +322,7 @@ class SavedColumnFeatureSource:
                     ('values','original_values','validity','available','available_validity','reasons')}
                 self.metrics['physical_field_day_hashes']+=1
                 self.metrics['physical_hash_bytes']+=sum(self.source.field_array(field,k)[i,positions].nbytes for k in buffers)
-                self._buffer_refs[key]=digest(buffers)
+                self._retain_leaf(self._buffer_refs,key,digest(buffers))
             rows.append([self.source.manifest['spec']['read_sessions'][i],self._buffer_refs[key]])
         value={'contract_version':'ordered_field_day_buffers_v1','field':field,'days':rows}
         self._window_buffers[window]=value
@@ -342,7 +343,28 @@ class SavedColumnFeatureSource:
             rows.append([days[i],self._reference_refs[i]])
         return {'selection':self.reference_security_ids,'days':rows}
 
+    def _dependency_rows(self, definition, position):
+        key=definition['semantic_ref'];semantic=definition['semantic']
+        depth=definition['history_sessions']-1
+        if position<depth or key not in self._needed_cache:
+            plan={'input_schema':[v['schema'] for v in semantic['inputs'].values()],
+                  'nodes':semantic['nodes'],'outputs':[semantic['output']],
+                  'history_policy':semantic['history_policy']}
+        if position<depth:return _needed(plan,[position])
+        if key not in self._needed_cache:
+            needed=_needed(plan,[depth])
+            names=set(definition['inputs'])|{n['name'] for n in semantic['nodes'] if n['op'] in CS}
+            template={name:tuple(sorted(i-depth for i in needed[name])) for name in names}
+            self._charge_leaf_cache(512+sys.getsizeof(template)+sum(sys.getsizeof(k)+sys.getsizeof(v)+sum(sys.getsizeof(i) for i in v) for k,v in template.items()))
+            self._needed_cache[key]=template
+        return {name:{position+i for i in offsets} for name,offsets in self._needed_cache[key].items()}
+
     def dependency_refs(self, definitions, days, securities):
+        self._window_buffers.clear()
+        try:return self._dependency_refs(definitions,days,securities)
+        finally:self._window_buffers.clear()
+
+    def _dependency_refs(self, definitions, days, securities):
         import numpy as np
         self.store.check(); source=self.source; spec=source.manifest['spec']; positions=source.positions
         require(bool(securities) and securities==sorted(set(securities)) and
@@ -353,12 +375,8 @@ class SavedColumnFeatureSource:
         requested_days=set(); requested_fields=set()
         for day in days:
             for definition in definitions.values():
-                template=(definition['semantic_ref'],day)
-                if template not in self._needed_cache:
-                    semantic=definition['semantic']
-                    self._needed_cache[template]=_needed({'input_schema':[v['schema'] for v in semantic['inputs'].values()],
-                        'nodes':semantic['nodes'],'outputs':[semantic['output']]},[positions[day]])
-                needed=self._needed_cache[template]
+                if (definition['semantic_ref'],day,id(axis)) in self._dependencies:continue
+                needed=self._dependency_rows(definition,positions[day])
                 for field in definition['inputs']:
                     requested_fields.update(source.leaf_fields(field))
                     requested_days.update(spec['read_sessions'][i] for i in needed[field])
@@ -373,6 +391,7 @@ class SavedColumnFeatureSource:
                     _evidence_fields=requested_fields,_verify_buffers=False)
         result={}
         for day in days:
+            self._window_buffers.clear()
             result[day]={}
             for name, definition in definitions.items():
                 require(not definition['reference_dependent'] or securities==spec['universe'],
@@ -381,7 +400,7 @@ class SavedColumnFeatureSource:
                 if key in self._dependencies:
                     result[day][name]=self._dependencies[key]; continue
                 source.require_coverage(definition['inputs'],securities)
-                semantic=definition['semantic']; needed=self._needed_cache[definition['semantic_ref'],day]
+                semantic=definition['semantic']; needed=self._dependency_rows(definition,positions[day])
                 selected={}; field_days={}
                 for field in definition['inputs']:
                     ix=sorted(needed[field])
@@ -403,19 +422,25 @@ class SavedColumnFeatureSource:
                     ref_ix=sorted(set().union(*(needed[n['name']] for n in semantic['nodes'] if n['op'] in CS)))
                     receipt['reference']=self._reference_days(ref_ix)
                 result[day][name]=digest(receipt)
-                self._dependencies[key]=result[day][name]
+                self._retain_leaf(self._dependencies,key,result[day][name])
         self.store.check()
         return result
 
     def prepare(self, plan, day, securities, dependencies):
         import numpy as np
-        p=plan.to_dict()
-        from axiom_engine.core.plan import _required_history
-        history=max(_required_history(p).values())+1
-        needed=_needed(p,[history-1])
+        key=plan.identity
+        if key not in self._prepared_plans:
+            p=plan.to_dict()
+            from axiom_engine.core.plan import _required_history
+            history=max(_required_history(p).values())+1
+            needed=_needed(p,[history-1])
+            header={k:p[k] for k in ('calendar_ref','reference_ref','input_schema','sources')}
+            rows={c['name']:sorted(needed[c['name']]) for c in p['input_schema']}
+            self._prepared_plans[key]=(header,history,rows)
+        p,history,rows=self._prepared_plans[key]
         inputs,_=self.source.core_inputs(day,calendar_ref=p['calendar_ref'],reference_ref=p['reference_ref'],
             schema=p['input_schema'],history_sessions=history,securities=securities,
-            field_rows={c['name']:sorted(needed[c['name']]) for c in p['input_schema']})
+            field_rows=rows)
         names=[c['name'] for c in p['input_schema']]
         for field in ('values','validity','reason_codes','available_at_utc_us','source_codes'):
             inputs[field]={name:inputs[field][name] for name in names}
@@ -439,13 +464,16 @@ class SavedColumnFeatureSource:
         self.store.check(); return inputs
 
     def execution_plan(self, plan, day, securities, dependencies):
+        key=plan.identity
+        if key in self._execution_plans:return self._execution_plans[key]
         p=plan.to_dict(); names={c['name'] for c in p['input_schema']}
         fields=self.source.physical_fields()
         require(names<={c['name'] for c in self.source.input_schema()}, 'source fact fields unavailable')
         selected={'is_member'}|set().union(*(self.source.leaf_fields(name) for name in names))
         p['sources']=sorted((binding for field,binding in zip(fields,self.source.source_bindings())
                              if field in selected),key=lambda b:b['id'])
-        return FeaturePlan.from_dict(p)
+        self._execution_plans[key]=FeaturePlan.from_dict(p)
+        return self._execution_plans[key]
 
     def close(self):
         self.source.arrays.clear(); self.store.close()
@@ -453,7 +481,8 @@ class SavedColumnFeatureSource:
         self._leaf_cache_bytes=0
         for cache in (self._leaf_refs,self._leaf_axes,self._leaf_subsets,self._dependencies,
                       self._buffer_refs,self._reference_refs,self._axis_positions,self._plans,self._definitions,
-                      self._needed_cache,self._axis_sets,self._leaf_dependencies,self._window_buffers,self._axis_refs): cache.clear()
+                      self._needed_cache,self._axis_sets,self._leaf_dependencies,self._window_buffers,self._axis_refs,
+                      self._execution_plans,self._prepared_plans): cache.clear()
     def __enter__(self): return self
     def __exit__(self,*args): self.close()
 
@@ -499,6 +528,7 @@ class CatalogFeatureLibrary:
 class _RawCrossSectionSource:
     def __init__(self, raw_view, source):
         self.raw_view,self.source=raw_view,source
+        self._plans={};self._headers={};self._prepared_headers={}
 
     def source_bindings(self, day, columns):
         reference=self.source.source.source_bindings()[-1]
@@ -511,10 +541,15 @@ class _RawCrossSectionSource:
         return sorted(bindings.values(),key=lambda b:b['id'])
 
     def execution_plan(self, plan, day, securities, dependencies):
-        p=plan.to_dict(); names={c['name'] for c in p['input_schema']}
+        original=plan.identity
+        if original not in self._headers:self._headers[original]=plan.to_dict()
+        p=self._headers[original];names={c['name'] for c in p['input_schema']}
         require(names==set(dependencies), 'CS gap fact closure differs from output dependencies')
-        p['sources']=self.source_bindings(day,names)
-        return FeaturePlan.from_dict(p)
+        bindings=self.source_bindings(day,names);key=(original,digest(bindings))
+        if key not in self._plans:
+            self._plans[key]=FeaturePlan.from_dict({**p,'sources':bindings})
+            self._prepared_headers[self._plans[key].identity]={k:(bindings if k=='sources' else p[k]) for k in ('calendar_ref','reference_ref','input_schema','sources')}
+        return self._plans[key]
 
     def dependency_refs(self, definitions, days, securities):
         cap=self.raw_view.describe()
@@ -527,7 +562,10 @@ class _RawCrossSectionSource:
 
     def prepare(self, plan, day, securities, dependencies):
         import numpy as np
-        p=plan.to_dict(); names=[c['name'] for c in p['input_schema']]
+        key=plan.identity
+        if key not in self._prepared_headers:
+            wire=plan.to_dict();self._prepared_headers[key]={k:wire[k] for k in ('calendar_ref','reference_ref','input_schema','sources')}
+        p=self._prepared_headers[key];names=[c['name'] for c in p['input_schema']]
         require(set(names)==set(dependencies), 'CS raw projection differs from gap fact closure')
         raw=self.raw_view.project([(s,day) for s in securities],names)
         original=self.source.source
