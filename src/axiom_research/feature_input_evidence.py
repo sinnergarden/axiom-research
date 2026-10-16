@@ -24,8 +24,13 @@ def configure_input_disk_reserve(minimum_free_bytes):
 
 
 def check_input_disk(root, pending_bytes=0):
-    if _MINIMUM_FREE_BYTES and shutil.disk_usage(root).free < _MINIMUM_FREE_BYTES + pending_bytes:
-        raise RuntimeError('DISK_RESERVE_REACHED: committed input checkpoints retained')
+    if _MINIMUM_FREE_BYTES:
+        # Writers may check a destination before creating its directory.
+        location=Path(root).resolve()
+        while not location.exists():
+            location=location.parent
+        if shutil.disk_usage(location).free < _MINIMUM_FREE_BYTES + pending_bytes:
+            raise RuntimeError('DISK_RESERVE_REACHED: committed input checkpoints retained')
 
 
 def compact_reader_evidence(root, child):
