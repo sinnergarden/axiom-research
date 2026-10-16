@@ -147,7 +147,8 @@ def run(cfg, *, observer=None):
     if cfg.get('prepared_inputs_only') and source.manifest['buffers']!=original.manifest['buffers']:
         raise ValueError('prepared-input continuation changed numeric buffer descriptors')
     if cfg.get('prepared_inputs_only'):
-        required=set(requirements['daily_fields'])|set(requirements['benchmark_fields'])|set(requirements['industry_fields'])
+        required=set(requirements['daily_fields'])|set(requirements['benchmark_fields'])
+        if requirements['industry_fields']:required.add('industry_code')
         required.update(n for b in requirements['financial_fields'].values() for n in b['outputs'])
         if not required<=set(source.physical_fields()):raise ValueError('published continuation lacks required inputs')
     from axiom_research.financial_feature_columns import QUARTER_POLICY
