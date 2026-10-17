@@ -383,7 +383,7 @@ def build_feature_column_source(data, *, spec, destination, block_sessions=20, p
         expected=set(keys); chunk_shape=(len(days),len(symbols)); evidence=[]
         for base in (prepared['price_query'],prepared['factor_query'],prepared['member_query']):
             query=replace(base,sessions=tuple(days),cutoff_by_session={d:spec['cutoff_by_session'][d] for d in days})
-            batch=data.members(snapshot=spec['snapshot'],query=query) if query.domain=='universe_membership' else data.read(snapshot=spec['snapshot'],query=query)
+            batch=data.members(snapshot=spec['snapshot'],query=query,_borrow_context=True) if query.domain=='universe_membership' else data.read(snapshot=spec['snapshot'],query=query,_borrow_context=True)
             metrics['data_read_calls']+=1
             frame=batch.frame.set_index(['security_id','session'])
             require(frame.index.is_unique and set(frame.index)==expected,'complete unique source keys required')
@@ -527,7 +527,7 @@ def extend_feature_column_source(data, *, source, daily_fields, destination, blo
         manifest.setdefault('snapshot_extensions',[]).append({'from_snapshot':original_snapshot,
             'to_snapshot':snapshot,'reused_domains':reused})
         spec['snapshot']=snapshot
-    snapshot=candidate; domains={}; delayed_domains=set()
+    snapshot=candidate; domains={}; delayed_domains=set(); previous_sessions={}
     for field,meta in daily_fields.items():
         require(type(field) is str and field.isidentifier() and type(meta) is dict and
                 set(meta)=={'domain','dtype','unit'},'typed daily field declaration required')
@@ -540,6 +540,10 @@ def extend_feature_column_source(data, *, source, daily_fields, destination, blo
             require(meta['domain']=='margin_daily' and profile.get('endpoint')=='margin_detail',
                     'row-clock daily input needs an explicit projection')
             delayed_domains.add(meta['domain'])
+            # The frozen next-open map supplies the predecessor even when this
+            # physical slab contains only newly appended dates.
+            calendar=profile['next_open_session_by_date'];opened=set(calendar.values())
+            previous_sessions[meta['domain']]={n:d for d,n in calendar.items() if d in opened}
         else:
             require(all(instant_us(_release_time(profile,d).isoformat())<=instant_us(spec['cutoff_by_session'][d])
                         for d in spec['read_sessions']),'hidden later release prevents daily extension')
@@ -548,7 +552,7 @@ def extend_feature_column_source(data, *, source, daily_fields, destination, blo
         domains.setdefault(meta['domain'],[]).append(field)
         incoming={'contract':contract,'source_profile':deepcopy(profile)}
         if meta['domain'] in delayed_domains:
-            incoming['source_profile']['research_daily_projection']='previous_trade_session_at_current_cutoff_v1; first unseeded row missing'
+            incoming['source_profile']['research_daily_projection']='previous_trade_session_at_current_cutoff_v1; unavailable predecessor stays missing'
         if meta['domain'] in manifest['source_profiles']:
             from .stock_feature_library import SavedColumnFeatureSource
             for existing in source.physical_fields():
@@ -578,11 +582,11 @@ def extend_feature_column_source(data, *, source, daily_fields, destination, blo
         selected=days[offset:offset+block_sessions]; keys=[(s,d) for d in selected for s in symbols]
         expected=set(keys); chunk_shape=(len(selected),len(symbols)); evidence=[]
         for domain,fields in domains.items():
-            previous={d:days[max(0,source.positions[d]-1)] for d in selected} if domain in delayed_domains else {d:d for d in selected}
-            query_days=sorted(set(previous.values()))
+            previous={d:previous_sessions[domain].get(d) for d in selected} if domain in delayed_domains else {d:d for d in selected}
+            query_days=sorted({previous[d] or d for d in selected})
             query=QuerySpec(domain,tuple(fields),tuple(symbols),tuple(query_days),spec['pit_policy'],
-                            {p:max(spec['cutoff_by_session'][d] for d in selected if previous[d]==p) for p in query_days})
-            batch=data.read(snapshot=spec['snapshot'],query=query); metrics['data_read_calls']+=1
+                            {p:max(spec['cutoff_by_session'][d] for d in selected if (previous[d] or d)==p) for p in query_days})
+            batch=data.read(snapshot=spec['snapshot'],query=query,_borrow_context=True); metrics['data_read_calls']+=1
             if domain in delayed_domains:
                 from axiom_data import DataBatch
                 native_rows={(r['security_id'],r['session']):r for r in batch.frame.to_dict('records')}
@@ -591,7 +595,7 @@ def extend_feature_column_source(data, *, source, daily_fields, destination, blo
                 projected=[]
                 for d in selected:
                     for security in symbols:
-                        key=(security,previous[d]);unseeded=d==days[0]
+                        unseeded=previous[d] is None;key=(security,previous[d] or d)
                         projected.append({'security_id':security,'session':d,**{f:None if unseeded else native_rows[key][f] for f in fields}})
                         for f in fields:
                             row=deepcopy(indexes[f][key]);row.update(session=d,source_session=previous[d],daily_projection='previous_trade_session_at_current_cutoff_v1')

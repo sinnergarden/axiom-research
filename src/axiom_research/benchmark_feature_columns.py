@@ -44,7 +44,7 @@ def extend_benchmark_feature_source(data, *, source, snapshot, benchmark_securit
         selected=days[start:start+block_sessions]
         query=QuerySpec('benchmark_daily',('close',),(benchmark_security_id,),tuple(selected),
                         spec['pit_policy'],{d:spec['cutoff_by_session'][d] for d in selected})
-        batch=data.read(snapshot=snapshot,query=query);calls+=1
+        batch=data.read(snapshot=snapshot,query=query,_borrow_context=True);calls+=1
         records={r['session']:r for r in batch.frame.to_dict('records')}
         metas={r['session']:r for r in batch.field_meta['close']['by_key']}
         require(len(records)==len(selected) and set(records)==set(metas)==set(selected),'one benchmark row per session required')

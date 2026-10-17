@@ -21,7 +21,13 @@ def prepare_candidate(cfg, root, requirements, progress):
     store=LocalStore(root/'data')
     binding={'candidate_root':cfg['candidate_root'],'candidate_snapshot':cfg['candidate_snapshot'],
              'market_root':cfg['market_root'],'market_snapshot':cfg['market_snapshot'],
-             'raw_roots':cfg.get('raw_roots',[])}
+             'raw_roots':cfg.get('raw_roots',[]),
+             'canonical_raw_stage':cfg.get('canonical_raw_stage'),
+             'native_domains':cfg.get('native_domains',[])}
+    raw_stage=None
+    if cfg.get('canonical_raw_stage'):
+        raw_stage=json.loads(Path(cfg['canonical_raw_stage']).read_text())
+        binding['retained_stock_scope_ref']=digest(raw_stage)
     required={'market_daily','adjustment_factors','universe_membership','trading_calendar',
               *[v['domain'] for v in requirements['daily_fields'].values()],
               *[v['domain'] for v in requirements['financial_fields'].values()]}
@@ -37,17 +43,19 @@ def prepare_candidate(cfg, root, requirements, progress):
     progress('candidate',required_domains=sorted(required))
     manifest=store.borrow_snapshot(cfg['candidate_root'],cfg['candidate_snapshot'])
     base=manifest['snapshot_id'];domains=dict(manifest['domains']);missing=required-set(domains)
-    if missing:
+    refresh=set(cfg.get('native_domains',[]))
+    if missing or refresh:
         parent=store.borrow_snapshot(cfg['market_root'],cfg['market_snapshot'])
-        restored=missing&set(parent['domains'])
+        restored=(missing|refresh)&set(parent['domains'])
+        if refresh-set(parent['domains']):raise ValueError('requested frozen native domains are absent')
         for domain in sorted(restored):domains[domain]=parent['domains'][domain]
         del parent
-        if set(domains)!=set(manifest['domains']):
+        if restored:
             # Publication verifies newly attached Raw IDs. Borrow their exact
             # receipts before attaching the restored canonical domain.
             store.borrow_raw([cfg['market_root'],*cfg.get('raw_roots',[])],domains=restored)
             base=store.publish_snapshot(domains,parent_snapshot=base,promote=False,
-                build_context={'purpose':'retain all prior domains and restore required missing domains',
+                build_context={'purpose':'retain prior domains and bind explicitly selected frozen native domains',
                                'original_roots':[cfg['candidate_root'],cfg['market_root']]})['snapshot_id']
     missing=required-set(domains);del manifest,domains
     data=Data(root/'data',cache_bytes=cfg.get('event_cache_bytes',64*1024**2),max_readers=1)
@@ -59,6 +67,34 @@ def prepare_candidate(cfg, root, requirements, progress):
         base=data.rebuild(base_snapshot=base,raw_batch_ids=ids,domains=sorted(missing),
             operation_id='qsys-missing-domains-'+digest([base,ids,sorted(missing)])[7:23],
             build_context={'purpose':'only missing required domains from existing Raw'},promote=False).snapshot_id
+    if raw_stage is not None:
+        # Original Raw retains the full market response. Rebuild the retained
+        # historical candidate union once, rather than inherit a T01 subset.
+        endpoint_domains={'income_vip':'financial_events','balancesheet_vip':'balance_sheet_events',
+            'fina_indicator_vip':'financial_indicator_events','daily_basic':'valuation_daily',
+            'moneyflow':'money_flow_daily','margin_detail':'margin_daily',
+            'stk_holdernumber':'shareholder_count_events','forecast_vip':'forecast_events',
+            'index_member_all':'industry_membership_events'}
+        selected={ep:domain for ep,domain in endpoint_domains.items()
+                  if domain in required and ep in raw_stage['endpoints']}
+        codes=sorted(raw_stage['identity_map'])
+        ids=list(dict.fromkeys(bid for ep in selected for bid in raw_stage['endpoints'][ep]))
+        require_domains=set(selected.values())
+        if not ids or not codes:raise ValueError('retained canonical scope has no Raw or stable identities')
+        progress('canonical_scope_rebuild',domains=sorted(require_domains),securities=len(codes),raw_receipts=len(ids))
+        store.borrow_raw([cfg['candidate_root'],cfg['market_root'],*cfg.get('raw_roots',[])],domains=require_domains)
+        data.clear_cache()
+        fingerprint=digest([base,ids,codes,sorted(require_domains)])
+        base=data.rebuild(base_snapshot=base,raw_batch_ids=ids,domains=sorted(require_domains),
+            domain_overrides={domain:{'canonical_symbols':codes} for domain in require_domains},
+            operation_id='qsys-canonical-scope-'+fingerprint[7:27],promote=False,
+            build_context={'purpose':'restore all retained historical candidates from unchanged original Raw',
+                'bulk_chunk':{'job_fingerprint':fingerprint,'chunk_index':0}}).snapshot_id
+        data.clear_cache()
+        atomic_json(root/'canonical-scope.json',{'snapshot_id':base,'canonical_securities':len(codes),
+            'identity_map_ref':digest(raw_stage['identity_map']),
+            'canonical_security_ids':sorted(raw_stage['identity_map'].values()),'domains':sorted(require_domains),
+            'raw_receipts':len(ids),'supplier_calls':0})
     data.describe_snapshot(snapshot=base,domains=sorted(required))
     data.clear_cache()
     atomic_json(marker,{'snapshot_id':base,'root':str(root/'data'),'request_ref':digest(binding)})
@@ -72,10 +108,7 @@ def run(cfg, *, observer=None):
                                                    reuse_history_source,source_descriptor)
     from axiom_research.qsys_catalog import load_qsys_feature_catalog,qsys_input_requirements
     from axiom_research.stock_feature_library import SavedColumnFeatureSource,CatalogFeatureLibrary
-    from axiom_research.stock_feature_columns import extend_feature_column_source,build_feature_column_source
-    from axiom_research.financial_feature_columns import extend_financial_feature_sources
-    from axiom_research.benchmark_feature_columns import extend_benchmark_feature_source
-    from axiom_research.industry_feature_columns import extend_industry_feature_source
+    from axiom_research.stock_feature_columns import build_feature_column_source
     from axiom_research.stock_artifacts import digest
     from axiom_engine.feature_library import FeatureLibrary
     from axiom_data import EventQuery
@@ -136,23 +169,30 @@ def run(cfg, *, observer=None):
         progress('candidate')
         data,base=prepare_candidate(cfg,root,requirements,progress)
         progress('scope')
-        original=None if cfg.get('rebuild_inputs',False) else open_physical_source(cfg['reuse_source'])
-        seed=json.loads(Path(cfg['scope_seed']).read_text()) if cfg.get('scope_seed') else {
-            'output_sessions':original.manifest['spec']['feature_sessions'],
-            'physical_universe':original.manifest['spec']['universe']}
+        original=None if cfg.get('rebuild_inputs',False) or not cfg.get('reuse_source') else open_physical_source(cfg['reuse_source'])
+        seed=json.loads(Path(cfg['scope_seed']).read_text()) if cfg.get('scope_seed') else None
         outputs=cfg.get('output_sessions')
-        if outputs is None:
-            outputs=list(seed['output_sessions'])
-            end=cfg.get('output_end')
-            if end and end not in outputs:outputs=sorted([*outputs,end])
-        if outputs!=sorted(set(outputs)) or not outputs:raise ValueError('explicit sorted output sessions required')
+        if outputs is None and not cfg.get('research_range'):
+            if seed is None and original is None:raise ValueError('explicit research_range or output sessions required')
+            outputs=list(seed['output_sessions'] if seed else original.manifest['spec']['feature_sessions'])
+        if outputs is not None and (outputs!=sorted(set(outputs)) or not outputs):
+            raise ValueError('explicit sorted output sessions required')
         from axiom_research.stock_feature_inputs import _spec
         source_universe=None if original is None else _spec(original.manifest['spec'])
         universe_id=cfg.get('universe_id',source_universe)
         if not isinstance(universe_id,str) or not universe_id:raise ValueError('explicit configured universe_id required')
         if source_universe is not None and source_universe!=universe_id:raise ValueError('configured universe differs from reused membership')
         spec=history_scope(data,snapshot=base,catalog=catalog,selection=selection,universe_id=universe_id,
-            output_sessions=outputs,physical_universe=seed['physical_universe'],destination=root/'scope')
+            output_sessions=outputs,physical_universe=seed['physical_universe'] if seed else (),destination=root/'scope',
+            start_session=cfg.get('research_range',[None,None])[0],end_session=cfg.get('research_range',[None,None])[1],
+            calendar_probe_security=cfg.get('calendar_probe_security','cnstock.600000.SH.19991110'))
+        outputs=list(spec['feature_sessions'])
+        canonical_receipt=Path(cfg['canonical_scope_receipt']) if cfg.get('canonical_scope_receipt') else root/'canonical-scope.json'
+        if cfg.get('research_range') and not cfg.get('scope_seed'):
+            if not canonical_receipt.exists():raise ValueError('independent production range requires an explicit canonical scope receipt')
+            canonical_scope=json.loads(canonical_receipt.read_text())
+            if canonical_scope['snapshot_id']!=base or not set(spec['universe'])<=set(canonical_scope['canonical_security_ids']):
+                raise ValueError('canonical retained scope does not cover the planned historical security union')
         request_ref=digest(spec)
         atomic_json(root/'request.json',{'request_ref':request_ref,'spec':spec,
             'research_range':cfg.get('research_range',['2019-01-02','2025-12-31'])})
@@ -164,11 +204,12 @@ def run(cfg, *, observer=None):
             reuse_metrics={'reused_complete_source':True,'old_value_recomputations':0}
         elif original is None:
             source,reuse_metrics=build_feature_column_source(data,spec=spec,destination=reuse_path.parent,
-                block_sessions=2,checkpoint=True,progress=lambda detail:progress('input_rebuild',detail=detail))
+                block_sessions=cfg.get('input_block_sessions',16),checkpoint=True,progress=lambda detail:progress('input_rebuild',detail=detail))
             reuse_metrics={**reuse_metrics,'explicit_full_input_rebuild':True}
         else:
             source,reuse_metrics=reuse_history_source(data,source=original,spec=spec,catalog=catalog,
                 destination=reuse_path.parent,event_cache_bytes=cfg.get('event_cache_bytes',64*1024**2),
+                block_sessions=cfg.get('input_block_sessions',16),
                 progress=lambda detail:progress('input_reuse',detail=detail))
         source_path=reuse_path
         from axiom_research.financial_feature_columns import QUARTER_POLICY
@@ -176,73 +217,21 @@ def run(cfg, *, observer=None):
                for d in source.manifest.get('financial_materializations',{}).values()):
             raise ValueError('old quarterly inputs require preparation under the current quarter selection rule')
         atomic_json(root/'input-reuse.json',reuse_metrics)
-        # Stage receipts bind both request and parent source. A path alone is never
-        # evidence that the current request or newly requested fields are complete.
-        def resume(path,binding):
-            receipt=path.parent/'stage.json'
-            if not path.exists():
-                atomic_json(receipt,{'binding':digest(binding),'source_ref':None,'status':'PREPARING'})
-                return None
-            if not receipt.exists():raise ValueError('published stage lacks request binding: '+str(path))
-            saved=json.loads(receipt.read_text())
-            if saved['binding']!=digest(binding):raise ValueError('published stage request differs: '+str(path))
-            result=open_physical_source(path)
-            if saved['source_ref'] not in (None,result.identity) or result.manifest['spec']!=spec:
-                raise ValueError('published stage source/axes mismatch')
-            if saved['source_ref'] is None:
-                inherited=source.manifest['buffers']
-                if any(result.manifest['buffers'].get(k)!=v for k,v in inherited.items()):
-                    raise ValueError('recovered stage changed inherited input buffers')
-                expected=set(binding.get('fields',{}))|set(binding.get('bundle',{}).get('outputs',{}))
-                if not expected<=set(result.physical_fields()):raise ValueError('recovered stage lacks requested fields')
-                atomic_json(receipt,{'binding':digest(binding),'source_ref':result.identity,'status':'COMPLETE','recovered_publication':True})
-            return result
-        def finish(path,binding,value,metrics):
-            atomic_json(path.parent/'stage.json',{'binding':digest(binding),'source_ref':value.identity,'metrics':metrics})
-        for domain in sorted({v['domain'] for v in requirements['daily_fields'].values()}):
-            fields={k:v for k,v in requirements['daily_fields'].items() if v['domain']==domain and k not in source.physical_fields()}
-            if not fields:continue
-            path=root/'inputs'/('daily-'+domain)/'source.json';binding={'request':request_ref,'parent':source.identity,'fields':fields,'snapshot':base}
-            cached=resume(path,binding)
-            if cached is not None:source=cached;source_path=path;continue
-            progress('daily_inputs',domain=domain)
-            source,metrics=extend_feature_column_source(data,source=source,daily_fields=fields,
-                snapshot=base,destination=path.parent,block_sessions=2,maximum_added_bytes=8*1024**3,
-                progress=lambda detail:progress('daily_inputs',domain=domain,detail=detail))
-            finish(path,binding,source,metrics);source_path=path
-        event_bundles={key:bundle for key,bundle in requirements['financial_fields'].items()
-            if any(field not in source.physical_fields() for field in bundle['outputs'])}
-        if cfg.get('prepared_inputs_only') and event_bundles:
-            raise ValueError('prepared continuation lacks required event inputs')
-        if event_bundles:
-            path=root/'inputs'/'events'/'source.json'
-            binding={'request':request_ref,'parent':source.identity,'bundles':event_bundles,'snapshot':base,
-                     'execution':'stock_block_event_spans_v1'}
-            cached=resume(path,binding)
-            if cached is not None:source=cached;source_path=path
-            else:
-                progress('financial_inputs',bundle='unified_events')
-                source,metrics=extend_financial_feature_sources(data,source=source,bundles=event_bundles,
-                    destination=path.parent,event_snapshot=base,report_start=cfg.get('report_start','2010-01-01'),
-                    report_end=outputs[-1],maximum_added_bytes=8*1024**3,
-                    maximum_event_cache_bytes=cfg.get('event_cache_bytes',512*1024**2),
-                    maximum_group_bytes=cfg.get('event_group_bytes',256*1024**2),
-                    stock_block_limit=cfg.get('event_stock_block_limit'),
-                    progress=lambda detail:progress('financial_inputs',bundle='unified_events',detail=detail))
-                finish(path,binding,source,metrics);source_path=path
-        for kind,field,fn,kw in [('benchmark','benchmark_close',extend_benchmark_feature_source,
-                                 {'benchmark_security_id':cfg['benchmark_security_id']}),
-                                ('industry','industry_code',extend_industry_feature_source,{})]:
-            if field in source.physical_fields():continue
-            path=root/'inputs'/kind/'source.json';binding={'request':request_ref,'parent':source.identity,
-                'snapshot':base,'fields':{field:kind},**kw}
-            cached=resume(path,binding)
-            if cached is not None:source=cached;source_path=path;continue
-            progress(kind+'_inputs')
-            source,metrics=fn(data,source=source,snapshot=base,destination=path.parent,
-                block_sessions=2,maximum_added_bytes=1024**3,
-                progress=lambda detail:progress(kind+'_inputs',detail=detail),**kw)
-            finish(path,binding,source,metrics);source_path=path
+        # One missing-input orchestration serves full, field, date and security paths.
+        from axiom_research.qsys_preparation import prepare_qsys_inputs
+        source,preparation=prepare_qsys_inputs(data,source=source,names=cfg.get('feature_names'),
+            destination=root/'inputs/added',event_snapshots={bundle['domain']:base
+                for bundle in requirements['financial_fields'].values()},
+            report_start=cfg.get('report_start','2010-01-01'),report_end=outputs[-1],
+            daily_snapshot=base,benchmark_snapshot=base,industry_snapshot=base,
+            benchmark_security_id=cfg['benchmark_security_id'],
+            block_sessions=cfg.get('input_block_sessions',16),maximum_added_bytes=8*1024**3,
+            maximum_event_cache_bytes=cfg.get('event_cache_bytes',512*1024**2),
+            maximum_group_bytes=cfg.get('event_group_bytes',256*1024**2),
+            stock_block_limit=cfg.get('event_stock_block_limit'),
+            progress=lambda detail:progress(detail['stage'],**{k:v for k,v in detail.items() if k!='stage'}))
+        if preparation['source_path'] is not None:source_path=Path(preparation['source_path'])
+        atomic_json(root/'input-preparation.json',preparation)
         atomic_json(root/'prepared-source.json',source_descriptor(source_path))
         # Release the Data Snapshot and mutable preparation objects before Core.
         data.clear_cache()

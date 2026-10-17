@@ -32,9 +32,27 @@ def open_physical_source(path):
     return source
 
 
-def history_scope(data, *, snapshot, catalog, selection, output_sessions,
-                  physical_universe, destination, universe_id):
+def history_scope(data, *, snapshot, catalog, selection, output_sessions=None,
+                  physical_universe=(), destination, universe_id, start_session=None,
+                  end_session=None, calendar_probe_security='cnstock.600000.SH.19991110'):
     """Derive required prior sessions; calendar gaps fail before expensive work."""
+    if output_sessions is None:
+        # Use the existing public state diagnostic to prove open calendar dates;
+        # the probe selects an exchange calendar, never the physical universe.
+        from datetime import date,timedelta
+        from axiom_data import QuerySpec
+        first,last=date.fromisoformat(start_session),date.fromisoformat(end_session)
+        require(first<=last,'research calendar range reversed')
+        candidates=tuple((first+timedelta(days=i)).isoformat() for i in range((last-first).days+1))
+        query=QuerySpec('market_daily',('close',),(calendar_probe_security,),candidates,
+            'best_effort_vendor_v1',{d:d+'T20:30:00+08:00' for d in candidates})
+        wire=data.states(snapshot=snapshot,query=query).to_json()
+        reasons=[m.get('missing_reason') or '' for m in wire['field_meta']['market_state']['by_key']]
+        require(not any(r.startswith(('calendar_','identity_')) for r in reasons),'calendar range is not proven')
+        output_sessions=sorted(r['session'] for r in wire['records'] if r['market_state']!='calendar_closed')
+        require(output_sessions and output_sessions[0]>=start_session and output_sessions[-1]<=end_session,
+                'research range has no proven open sessions')
+        del wire
     history=max(f['lookback'] for f in catalog.select(selection))-1
     request={'snapshot':snapshot,'universe_id':universe_id,
         'output_sessions':list(output_sessions),
@@ -114,7 +132,7 @@ def _project_chunks(chunks, days, symbols, root):
 
 
 def reuse_history_source(data, *, source, spec, catalog, destination,
-                         event_cache_bytes=64*1024**2, progress=None):
+                         event_cache_bytes=64*1024**2, block_sessions=16, progress=None):
     """Reuse existing cells and prepare only missing date rectangles.
 
     Native daily domain identity must match before old cells can cross a
@@ -144,14 +162,14 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
     missing_symbols=[s for s in symbols if s not in source.security_positions]
     if missing_symbols:
         # Extend the old slab's dates first, then prepare only new securities.
-        old_axis=old['universe']
-        require(set(old_axis)<=set(symbols),'grow securities or explicitly project first')
-        if days!=old['read_sessions']:
+        old_axis=sorted(set(old['universe'])&set(symbols))
+        require(old_axis,'security expansion requires an overlapping reusable axis')
+        if days!=old['read_sessions'] or old_axis!=old['universe']:
             old_spec=_subset_spec(spec,days,old_axis,root/'old-axis-scope')
             source,_=reuse_history_source(data,source=source,spec=old_spec,catalog=catalog,
-                destination=root/'old-axis',event_cache_bytes=event_cache_bytes,progress=progress)
+                destination=root/'old-axis',event_cache_bytes=event_cache_bytes,block_sessions=block_sessions,progress=progress)
         new_spec=_subset_spec(spec,days,missing_symbols,root/'new-axis-scope')
-        delta,_=build_feature_column_source(data,spec=new_spec,destination=root/'new-axis/base',block_sessions=2,checkpoint=True,progress=progress)
+        delta,_=build_feature_column_source(data,spec=new_spec,destination=root/'new-axis/base',block_sessions=block_sessions,checkpoint=True,progress=progress)
         from .qsys_catalog import qsys_input_requirements
         req=qsys_input_requirements()
         delta,_=prepare_qsys_inputs(data,source=delta,names=spec['ordered_features'],
@@ -160,7 +178,7 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
             report_start='2010-01-01',report_end=days[-1],daily_snapshot=spec['snapshot'],
             benchmark_snapshot=spec['snapshot'],industry_snapshot=spec['snapshot'],
             benchmark_security_id=source.manifest['source_profiles'].get('materialized_benchmark_daily',{}).get('source_profile',{}).get('benchmark_security_id'),
-            block_sessions=2,maximum_added_bytes=8*1024**3,maximum_event_cache_bytes=event_cache_bytes)
+            block_sessions=block_sessions,maximum_added_bytes=8*1024**3,maximum_event_cache_bytes=event_cache_bytes,progress=progress)
         return merge_security_sources([source,delta],spec=spec,destination=root,data=data)
 
     if missing_days:
@@ -173,7 +191,7 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
     for ordinal,(delta_days,delta_symbols) in enumerate(rectangles):
         target=root/f'gap-{ordinal}'
         delta_spec=_subset_spec(spec,delta_days,delta_symbols,target)
-        delta,_=build_feature_column_source(data,spec=delta_spec,destination=target/'base',block_sessions=2,checkpoint=True,progress=progress)
+        delta,_=build_feature_column_source(data,spec=delta_spec,destination=target/'base',block_sessions=block_sessions,checkpoint=True,progress=progress)
         fields=set(source.manifest.get('daily_fields',{}))
         if fields:
             from .qsys_catalog import qsys_input_requirements
@@ -184,7 +202,7 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
                 report_start='2010-01-01',report_end=days[-1],daily_snapshot=spec['snapshot'],
                 benchmark_snapshot=spec['snapshot'],industry_snapshot=spec['snapshot'],
                 benchmark_security_id=source.manifest['source_profiles'].get('materialized_benchmark_daily',{}).get('source_profile',{}).get('benchmark_security_id'),
-                block_sessions=2,maximum_added_bytes=8*1024**3,maximum_event_cache_bytes=event_cache_bytes)
+                block_sessions=block_sessions,maximum_added_bytes=8*1024**3,maximum_event_cache_bytes=event_cache_bytes,progress=progress)
         require(set(delta.manifest['buffers'])==set(source.manifest['buffers']),'gap source fields differ from reused source')
         sources.append(delta)
     manifest=deepcopy(source.manifest);manifest['spec']=deepcopy(spec)
@@ -395,7 +413,7 @@ def _merged_pool_complete(data, *, spec, buffers, store, root, universe_id):
         selected=days[offset:offset+2];keys=[(s,d) for d in selected for s in symbols]
         query=QuerySpec('universe_membership',('is_member',),tuple(symbols),tuple(selected),
             spec['pit_policy'],{d:spec['cutoff_by_session'][d] for d in selected},universe_id=universe_id)
-        batch=data.members(snapshot=spec['snapshot'],query=query)
+        batch=data.members(snapshot=spec['snapshot'],query=query,_borrow_context=True)
         frame=batch.frame.set_index(['security_id','session'])
         require(frame.index.is_unique and set(frame.index)==set(keys),'merged membership keys differ')
         frame=frame.reindex(pd.MultiIndex.from_tuples(keys,names=['security_id','session']))
