@@ -70,14 +70,26 @@ def _spec(spec, *, reader=read_parent):
     return universe_id
 
 
-def source_universe_binding(manifest, *, reader=read_parent):
+def source_universe_binding(manifest, *, reader=read_parent, reuse_saved=False):
     """Bind actual frozen membership semantics, independently of Qlib labels."""
-    spec=manifest['spec'];universe_id=_spec(spec,reader=reader)
+    spec=manifest['spec'];saved=manifest.get('universe_binding')
+    # Saved sources already bind the producer-admitted scope. Recompute the
+    # small binding below, without reopening an unrelated full-scope payload.
+    universe_id=(saved['universe_id'] if reuse_saved and saved is not None
+                 else _spec(spec,reader=reader))
+    require(type(universe_id) is str and bool(universe_id),'fixed source universe required')
     query=manifest['qlib_view'].get('universe_query')
     require(query is None or query.get('universe_id')==universe_id,'Qlib and frozen scope universe differ')
     members={k:v for k,v in manifest['buffers'].items() if k.startswith('member')}
-    require('member' in members and 'member_known' in members and 'member_pool_complete' in members,
-            'explicit saved membership buffers required')
+    explicit='member_known' in members and 'member_pool_complete' in members
+    # Old dated-reader sources carry the same information in archived row
+    # status and complete-state records. The array owner derives flags on use.
+    legacy=(not any(k in members for k in ('member_known','member_pool_complete','member_reasons')) and
+        manifest['source_profiles']['universe_membership']['source_profile'].get('id')==
+        'tushare.index_weight.dated_membership.v1' and spec['pit_policy']=='best_effort_vendor_v1' and
+        query is not None)
+    require('member' in members and (explicit or legacy),
+            'explicit membership flags or archived dated membership evidence required')
     return {'contract_version':'source_universe_binding_v1','universe_id':universe_id,
         'scope_bundle_ref':spec['scope']['scope_bundle_ref'],'snapshot':spec['snapshot'],
         'pit_policy':spec['pit_policy'],'membership_profile_ref':digest(manifest['source_profiles']['universe_membership']),

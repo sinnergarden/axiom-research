@@ -57,12 +57,17 @@ class _SourceArrays(Mapping):
     """Borrow a physical buffer only when its field is actually requested."""
     _readonly_buffers=True
 
-    def __init__(self, manifest, store):
+    def __init__(self, manifest, store, universe_id):
+        self.legacy=None
+        if 'member_known' not in manifest['buffers']:
+            from .stock_saved_membership import LegacyMembershipMasks
+            self.legacy=LegacyMembershipMasks(manifest,self,store,universe_id)
         self.descriptors=manifest['buffers']; self.store=store; self.cache={}
 
-    def __iter__(self): return iter(self.descriptors)
-    def __len__(self): return len(self.descriptors)
+    def __iter__(self): return iter((*self.descriptors,*(self.legacy.names if self.legacy else ())))
+    def __len__(self): return len(self.descriptors)+(len(self.legacy.names) if self.legacy else 0)
     def __getitem__(self, name):
+        if self.legacy and name in self.legacy.names:return self.legacy.buffer(name)
         if name not in self.cache:
             desc=self.descriptors[name]
             if desc.get('layout') in ('date_segments_v1','security_segments_v1'):
@@ -73,7 +78,9 @@ class _SourceArrays(Mapping):
             self.cache[name]=value.view('bool') if desc['dtype']=='bool_u8' else value
         elif 'path' in self.descriptors[name]: self.store.check_path(self.descriptors[name]['path'])
         return self.cache[name]
-    def clear(self): self.cache.clear()
+    def clear(self):
+        self.cache.clear()
+        if self.legacy:self.legacy.masks=None;self.legacy.cached=None
 
 
 class SavedColumnFeatureSource:
@@ -97,13 +104,13 @@ class SavedColumnFeatureSource:
         manifest,_=verify_feature_column_source(descriptor,store=self.store,
             _evidence_days=set(),_verify_buffers=False)
         from .stock_feature_inputs import source_universe_binding
-        binding=source_universe_binding(manifest,reader=self.store.read_json)
+        binding=source_universe_binding(manifest,reader=self.store.read_json,reuse_saved=True)
         require(manifest.get('universe_binding')==binding or
                 manifest.get('universe_binding') is None and manifest['qlib_view'].get('universe_query') is not None,
                 'explicit saved source universe binding required; publish a scope-bound descriptor')
         self.universe_id=binding['universe_id']
         self.descriptor=deepcopy(descriptor)
-        arrays=_SourceArrays(manifest,self.store)
+        arrays=_SourceArrays(manifest,self.store,self.universe_id)
         self.source=FeatureColumnSource(manifest,arrays)
         physical=manifest['spec']['universe']
         self.reference_security_ids=list(physical if reference_security_ids is None else reference_security_ids)
