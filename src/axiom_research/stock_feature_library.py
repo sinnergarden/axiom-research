@@ -606,18 +606,20 @@ def _bound_raw_refs(view, reference, bindings, catalog, selection, days):
         definitions=source.definitions(catalog,chosen,normalized=False) if chosen else {}
         parents.append((parent,source,pc,definitions))
     for day in days:
-        owners={}
+        owners={};receipts=None
         for parent,source,pc,definitions in parents:
             if day not in pc['sessions']:continue
             names=[n for n in cap['columns'] if n in pc['columns']]
             if not names:continue
-            for name,receipt in parent.column_receipts(day,names).items():
+            parent_receipts=parent.column_receipts(day,names)
+            if parent is view:receipts=parent_receipts
+            for name,receipt in parent_receipts.items():
                 for block in receipt['blocks']:
                     key=(name,block['partition']['partition_ref'])
                     require(key not in owners,'ambiguous raw parent/source binding')
                     owners[key]=(source,definitions)
         result[day]={}
-        receipts=view.column_receipts(day)
+        receipts=view.column_receipts(day) if receipts is None else receipts
         groups={}
         for name,receipt in receipts.items():
             for block in receipt['blocks']:
@@ -728,22 +730,19 @@ class _RawCrossSectionSource:
         # Core requires actual original source IDs, including the reference source.
         bindings={b['id']:b for b in raw['source_bindings']}
         sets=deepcopy(raw['source_sets'])
-        require(all(sets[int(c)] for c in np.unique(raw['source_codes'])), 'raw constant-only source not supported in CS profile')
-        # Drop unused empty zero set and remap actual codes to Core's nonempty sets.
-        codes=raw['source_codes']; nonempty=[i for i,s in enumerate(sets) if s]
-        remap=np.zeros(len(sets),dtype='int32'); admitted=[sets[i] for i in nonempty]
-        for new,old in enumerate(nonempty): remap[old]=new
+        # Keep original zero-source codes: missing/constant Core outputs are
+        # valid saved facts, not invented Data observations.
+        codes=raw['source_codes'];admitted=sets
         reference_set=[reference_binding['id']]
         bindings[reference_binding['id']]=reference_binding
         if reference_set not in admitted: admitted.append(reference_set)
         reference_code=admitted.index(reference_set)
-        require(np.all(raw['available_at_utc_us'] != raw['null_available_at_utc_us']), 'clockless raw source not supported in CS profile')
         base.update(schema=p['input_schema'],source_bindings=p['sources'],sessions=[day],
             values={name:raw['values'][:,j][None,:] for j,name in enumerate(names)},
             validity={name:raw['validity'][:,j][None,:] for j,name in enumerate(names)},
             reason_codes={name:raw['reason_codes'][:,j][None,:] for j,name in enumerate(names)},
             available_at_utc_us={name:raw['available_at_utc_us'][:,j][None,:] for j,name in enumerate(names)},
-            source_codes={name:remap[codes[:,j]][None,:] for j,name in enumerate(names)},
+            source_codes={name:codes[:,j][None,:] for j,name in enumerate(names)},
             source_sets=admitted,reason_dictionary=raw['reason_dictionary'])
         expected={b['id']:b for b in p['sources']}
         require(expected==bindings,
