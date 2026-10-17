@@ -529,7 +529,8 @@ class CatalogFeatureLibrary:
 
         raw_bindings is a sequence of (parent FeatureView, admitted
         SavedColumnFeatureSource) pairs, explicitly naming each raw owner.
-        Parents may span dates/columns/libraries. This path never calls raw
+        Parents may span columns/libraries, with the same requested dates.
+        This path never calls raw
         ensure/prepare. It retains actual source IDs and requires equal PIT,
         output cutoffs and calendars on the consumed dates; snapshot identities
         may differ and remain distinct. It makes no cross-snapshot parity claim.
@@ -586,6 +587,8 @@ def _bound_raw_refs(view, reference, bindings, catalog, selection, days):
     parents=[]
     for parent,source in bindings:
         pc=parent.describe()
+        require(set(cap['sessions'])<=set(pc['sessions']),
+                'date stitching is not supported; each raw parent must cover all requested sessions')
         chosen=[s for s in selection if s['id'] in pc['columns']]
         definitions=source.definitions(catalog,chosen,normalized=False) if chosen else {}
         parents.append((parent,source,pc,definitions))

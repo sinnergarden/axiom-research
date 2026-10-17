@@ -15,7 +15,7 @@ from test_stock_feature_library import saved_source
 
 
 class SavedFeatureSubsetE2E(unittest.TestCase):
-    def test_saved_subset_stitch_membership_and_native_consumer(self):
+    def test_saved_subset_columns_membership_and_native_consumer(self):
         with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
             root=Path(temp);catalog=load_a01_feature_catalog();budget=8*1024**2
             selection=[{'id':n,'semantic_version':'1.0.0'} for n in ('ALP003','ALP001')]
@@ -26,14 +26,14 @@ class SavedFeatureSubsetE2E(unittest.TestCase):
                 return stack.enter_context(SavedColumnFeatureSource(saved_source(root/name,**kwargs),maximum_working_bytes=budget))
             first=source('raw-first',securities=['A','B','C','D'],snapshot='raw-1')
             second=source('raw-second',securities=['A','B','C','D'],snapshot='raw-2')
-            member=source('member',securities=axis,snapshot='member',members_by_session=members)
-            alternate=source('alternate',securities=axis,snapshot='other-members')
+            member=source('member',securities=axis,snapshot='member',members_by_session=members,value_shift=100)
+            alternate=source('alternate',securities=axis,snapshot='other-members',value_shift=200)
             wrong=source('wrong',securities=['A','B','C','D'],snapshot='wrong',value_shift=2)
             days=member.source.manifest['spec']['feature_sessions']
             libraries=[FeatureLibrary(root/name,maximum_working_bytes=budget) for name in ('l1','l2','output')]
             parents=[]
-            for lib,owner,dates in zip(libraries[:2],(first,second),(days[:2],days[2:])):
-                descriptor,_=CatalogFeatureLibrary(lib,owner,catalog).ensure(selection=selection,output_sessions=dates)
+            for lib,owner,chosen in zip(libraries[:2],(first,second),(selection[:1],selection[1:])):
+                descriptor,_=CatalogFeatureLibrary(lib,owner,catalog).ensure(selection=chosen,output_sessions=days)
                 parents.append(stack.enter_context(lib.open_feature_view(descriptor)))
             output=libraries[2];before=set(root.rglob('*.bin'))
             descriptor=output.compose_views(parents,output_sessions=days,security_ids=axis,columns=columns,sample_universe=sample)
@@ -41,7 +41,8 @@ class SavedFeatureSubsetE2E(unittest.TestCase):
             raw=stack.enter_context(output.open_feature_view(descriptor));bindings=list(zip(parents,(first,second)))
             for parent in parents:
                 for day in parent.describe()['sessions']:
-                    keys=[(s,day) for s in axis];actual=raw.project(keys);expected=parent.project(keys,columns)
+                    keys=[(s,day) for s in axis];chosen=parent.describe()['columns']
+                    actual=raw.project(keys,chosen);expected=parent.project(keys,chosen)
                     for name in ('values','validity','available_at_utc_us'):
                         np.testing.assert_array_equal(actual[name],expected[name])
                     for field,dictionary in (('reason_codes','reason_dictionary'),('source_codes','source_sets')):
@@ -53,14 +54,20 @@ class SavedFeatureSubsetE2E(unittest.TestCase):
                 output.compose_views(parents+parents[:1],output_sessions=days,security_ids=axis,columns=columns)
             with self.assertRaisesRegex(ValueError,'incomplete'):
                 output.compose_views(parents[:1],output_sessions=days,security_ids=axis,columns=columns)
+            short=output.compose_views([parents[0]],output_sessions=days[:2],security_ids=axis,columns=columns[:1])
+            short_view=stack.enter_context(output.open_feature_view(short))
+            with self.assertRaisesRegex(ValueError,'date stitching'):
+                output.compose_views([short_view,parents[1]],output_sessions=days,security_ids=axis,columns=columns)
             # Independent full catalog DAG expectations, before disabling every
             # saved source's raw prepare entry. Normalization uses Core itself.
             expected={}
             for owner in (member,alternate):
-                plan=owner.plan(catalog,selection,normalized=True)
+                oracle=source('oracle-'+str(len(expected)),securities=axis,
+                    members_by_session=members if owner is member else None)
+                plan=oracle.plan(catalog,selection,normalized=True)
                 expected[id(owner)]=[]
                 for day in days:
-                    inputs=owner.prepare(plan,day,axis,{n:'synthetic-direct' for n in columns})
+                    inputs=oracle.prepare(plan,day,axis,{n:'synthetic-direct' for n in columns})
                     expected[id(owner)].append(execute_feature_columns(compile_feature_columns(plan),inputs=inputs,
                         output_sessions=[day],max_working_bytes=budget))
             for owner in (first,second,member,alternate,wrong):
