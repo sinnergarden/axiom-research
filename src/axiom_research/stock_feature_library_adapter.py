@@ -21,7 +21,7 @@ from .stock_compact_store import OwnedStore, StockFeatureView, _TOKEN, _size
 VERSION='stock_feature_library_training_projection_v1'
 
 
-def _feature_source_compatibility(view, source, selection):
+def _feature_source_compatibility(view, source, selection, *, raw_view=None, raw_bindings=None):
     """Same semantics and local selected facts, allowing unchanged historical frames."""
     from axiom_engine.feature_library import feature_definitions
     from .feature_catalog import load_feature_catalog_ref
@@ -33,6 +33,29 @@ def _feature_source_compatibility(view, source, selection):
     require(catalog.to_dict()['input_contract']=={'price_basis':'common_anchor_adjusted_v1',
         'adjustment_anchor':'feature_session_visible_at_cutoff','amount_unit':'CNY'},
         'unsupported training source/catalog input interpretation')
+    if raw_view is not None or raw_bindings is not None:
+        from .stock_feature_library import _saved_normalization_request, _RawCrossSectionSource
+        require(raw_view is not None and raw_bindings is not None,
+                'saved normalization requires both raw view and explicit raw owners')
+        raw_bindings=list(raw_bindings)
+        request=_saved_normalization_request(raw_view,source,catalog,selection)
+        expected=feature_definitions(request.plan,input_semantics=request.input_semantics)
+        raw_cap=raw_view.describe()
+        require(all(cap[k]==raw_cap[k] for k in ('sessions','security_ids','sample_universe','columns')) and
+                cap['definitions']==expected,'saved normalized semantics or axes mismatch')
+        adapter=_RawCrossSectionSource(raw_view,source,raw_bindings=raw_bindings,catalog=catalog,selection=selection)
+        dependencies=adapter.dependency_refs(expected,cap['sessions'],cap['security_ids'])
+        for day,columns in dependencies.items():
+            receipts=view.column_receipts(day,list(columns))
+            require(all(receipts[n]['dependency_ref']==ref for n,ref in columns.items()),
+                    'saved normalized raw/reference dependency mismatch')
+        return seal({'contract_version':'stock_feature_source_compatibility_v1','layer':'normalized',
+            'view_ref':view.identity,'semantic_refs':{n:expected[n]['semantic_ref'] for n in cap['columns']},
+            'dependency_refs':dependencies,'reference_security_ids':list(source.reference_security_ids),
+            'source':source.descriptor,'snapshot':spec['snapshot'],'pit_policy':spec['pit_policy'],
+            'cutoff_by_session':{day:spec['cutoff_by_session'][day] for day in cap['sessions']},
+            'raw_view':raw_view.descriptor,
+            'raw_bindings':[{'view':v.descriptor,'source':s.descriptor} for v,s in raw_bindings]},'compatibility_ref')
     raw=source.definitions(catalog,selection,normalized=False)
     def same(expected):
         return all(cap['definitions'][name]['semantic_ref']==expected[name]['semantic_ref'] and
@@ -234,16 +257,20 @@ NATIVE_VERSION='stock_feature_library_training_native_v1'
 
 
 def build_feature_library_training_view(view, source, *, selection, destination,
-                                        maximum_working_bytes=512*1024**2):
+                                        maximum_working_bytes=512*1024**2, raw_view=None, raw_bindings=None):
     """Save a small native binding; no training value/metadata table is copied.
 
     Source compatibility is checked once at this publication boundary. Fresh
     consumers admit selected Feature partitions and membership, not ancestors.
     The explicit export_feature_library_training_projection retains the old
     interoperability export for consumers that actually need physical tables.
+    For normalize_saved outputs, pass the original raw_view/raw_bindings to
+    re-admit raw and member dependencies independently. source explicitly owns
+    daily reference/sample membership and the training spec; raw source IDs
+    and snapshots remain in the saved compatibility proof and Core lineage.
     """
     cap=view.describe(); physical=source.source
-    compatibility=_feature_source_compatibility(view,source,selection)
+    compatibility=_feature_source_compatibility(view,source,selection,raw_view=raw_view,raw_bindings=raw_bindings)
     compatibility={**{k:v for k,v in compatibility.items()
                       if k not in ('dependency_refs','compatibility_ref')},
                    'local_dependency_ref':digest(compatibility['dependency_refs'])}

@@ -37,8 +37,12 @@ def _source_config(spec):
         'feature_selection':spec['feature_selection'],'scope_ref':spec['scope']['scope_bundle_ref']}
 
 
-def feature_column_plan(source, catalog, *, selection=None, normalized=True):
-    """Compile the existing catalog DAG once with actual global source bindings."""
+def feature_column_plan(source, catalog, *, selection=None, normalized=True, input_schema=None):
+    """Compile the catalog DAG with actual source/reference bindings.
+
+    input_schema supplies admitted virtual raw schemas for saved-value CS
+    planning only; it does not add physical fields to the source or prepare().
+    """
     from axiom_engine.core import ABI,SEMANTICS,FeaturePlan
     from .feature_catalog import build_feature_plan
     spec=source.manifest['spec']; a=source.arrays
@@ -56,7 +60,7 @@ def feature_column_plan(source, catalog, *, selection=None, normalized=True):
     header={'abi':ABI,'semantics':SEMANTICS,'recipe_ref':catalog.recipe_ref(selection,normalized=normalized),
         'calendar_ref':calendar_ref,'reference_ref':reference_ref,
         'reference_members':source._reference_members,
-        'input_schema':source.input_schema(),
+        'input_schema':source.input_schema() if input_schema is None else input_schema,
         'event_schema':{},'sources':sorted(source.source_bindings(),key=lambda b:b['id']),
         'observation_domain':'sessions','history_policy':'partial','nodes':[],'outputs':[],'obligations':[]}
     return build_feature_plan(FeaturePlan.from_dict(header),selection,catalog=catalog,normalized=normalized)

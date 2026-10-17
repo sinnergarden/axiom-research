@@ -6,7 +6,7 @@ adapter uses original Data adjustment and Core DAG/CS arithmetic.
 """
 from copy import deepcopy
 from collections.abc import Mapping
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from hashlib import sha256
 import json
 import sys
@@ -237,11 +237,11 @@ class SavedColumnFeatureSource:
         return {'source_profile':selected, 'contract_id':contract['contract_id'],
                 'logical_key':contract['logical_key'], 'field':contract['fields'][field]}
 
-    def plan(self, catalog, selection, *, normalized=False):
-        key=(catalog.identity,digest(selection),normalized)
+    def plan(self, catalog, selection, *, normalized=False, input_schema=None):
+        key=(catalog.identity,digest(selection),normalized,digest(input_schema))
         if key not in self._plans:
             with self.store.operation():
-                original=feature_column_plan(self.source,catalog,selection=selection,normalized=normalized).to_dict()
+                original=feature_column_plan(self.source,catalog,selection=selection,normalized=normalized,input_schema=input_schema).to_dict()
                 original['reference_members']={day:{s:g for s,g in members.items() if s in self._reference_set}
                                                for day,members in original['reference_members'].items()}
                 original['reference_ref']=digest({'original_reference_ref':original['reference_ref'],
@@ -524,10 +524,126 @@ class CatalogFeatureLibrary:
             normalized_view,stats=self.library.ensure_features(cs_request,adapter,progress=progress)
         return normalized_view,{'raw':raw_stats,'cross_sectional':stats}
 
+    def normalize_saved(self, raw_view, *, raw_bindings, selection, progress=None):
+        """Normalize saved raw cells using this facade's daily membership source.
+
+        raw_bindings is a sequence of (parent FeatureView, admitted
+        SavedColumnFeatureSource) pairs, explicitly naming each raw owner.
+        Parents may span dates/columns/libraries. This path never calls raw
+        ensure/prepare. It retains actual source IDs and requires equal PIT,
+        output cutoffs and calendars on the consumed dates; snapshot identities
+        may differ and remain distinct. It makes no cross-snapshot parity claim.
+        All handles remain caller-owned. Only normalized arrays are published.
+        """
+        request=_saved_normalization_request(raw_view,self.source,self.catalog,selection)
+        adapter=_RawCrossSectionSource(raw_view,self.source,raw_bindings=raw_bindings,
+                                       catalog=self.catalog,selection=selection)
+        with self.source.store.operation():
+            result,stats=self.library.ensure_features(request,adapter,progress=progress)
+        return result,{'raw':{'core_calls':0,'computed_output_cells':0},'cross_sectional':stats}
+
+
+def _saved_normalization_request(raw_view, source, catalog, selection):
+    require(catalog.to_dict()['input_contract']=={
+        'price_basis':'common_anchor_adjusted_v1','adjustment_anchor':'feature_session_visible_at_cutoff',
+        'amount_unit':'CNY'},'unsupported catalog input interpretation')
+    cap=raw_view.describe();names=[f['id'] for f in catalog.select(selection)]
+    require(names==cap['columns'] and cap['security_ids']==source.source.manifest['spec']['universe'],
+            'saved raw must cover the complete explicit membership source axis')
+    require(all(not d['reference_dependent'] for d in cap['definitions'].values()),
+            'saved normalization requires reference-independent raw Features')
+    # The membership owner need not provide raw price/volume fields. Compile
+    # the existing catalog normalization using the admitted raw input schemas.
+    schemas={}
+    for definition in cap['definitions'].values():
+        for name,entry in definition['semantic']['inputs'].items():
+            require(name not in schemas or schemas[name]==entry['schema'],'conflicting raw schemas')
+            schemas[name]=entry['schema']
+    full=source.plan(catalog,selection,normalized=True,input_schema=list(schemas.values())).to_dict()
+    full['input_schema']=[{**cap['definitions'][n]['schema'],'stage':'fact'} for n in names]
+    full['nodes']=[n for n in full['nodes'] if n['name'] in {name+'_cs_zscore' for name in names}]
+    semantics={n:{'derived_feature':cap['definitions'][n]['semantic']} for n in names}
+    return FeatureRequest(FeaturePlan.from_dict(full),tuple(cap['sessions']),tuple(cap['security_ids']),
+                          semantics,tuple(cap['sample_universe']))
+
+
+def _bound_raw_dependency_refs(view, reference, bindings, catalog, selection, days):
+    """Validate original full-axis receipts before deriving selected receipts.
+
+    Each block has exactly one explicit owner; no whole-axis aggregate is
+    relabelled as a subset digest. Separate owners are retained in the proof.
+    """
+    bindings=list(bindings)
+    with ExitStack() as stack:
+        for owner in {id(s):s for _,s in bindings}.values():
+            stack.enter_context(owner.store.operation())
+        return _bound_raw_refs(view,reference,bindings,catalog,selection,days)
+
+
+def _bound_raw_refs(view, reference, bindings, catalog, selection, days):
+    cap=view.describe();target=reference.source.manifest['spec'];result={}
+    require(bool(bindings),'explicit saved raw source bindings required')
+    parents=[]
+    for parent,source in bindings:
+        pc=parent.describe()
+        chosen=[s for s in selection if s['id'] in pc['columns']]
+        definitions=source.definitions(catalog,chosen,normalized=False) if chosen else {}
+        parents.append((parent,source,pc,definitions))
+    for day in days:
+        owners={}
+        for parent,source,pc,definitions in parents:
+            if day not in pc['sessions']:continue
+            names=[n for n in cap['columns'] if n in pc['columns']]
+            if not names:continue
+            for name,receipt in parent.column_receipts(day,names).items():
+                for block in receipt['blocks']:
+                    key=(name,block['partition']['partition_ref'])
+                    require(key not in owners,'ambiguous raw parent/source binding')
+                    owners[key]=(source,definitions)
+        result[day]={}
+        receipts=view.column_receipts(day)
+        groups={}
+        for name,receipt in receipts.items():
+            for block in receipt['blocks']:
+                key=(name,block['partition']['partition_ref'])
+                require(key in owners,'raw partition has no explicit admitted source')
+                owner,_=owners[key]
+                for axis in (block['security_ids'],block['selected_security_ids']):
+                    group=(id(owner),tuple(axis))
+                    groups.setdefault(group,(owner,{}))[1][name]=cap['definitions'][name]
+        refs={group:owner.dependency_refs(defs,[day],list(group[1]))[day]
+              for group,(owner,defs) in groups.items()}
+        for name,receipt in receipts.items():
+            rows=[];definition=cap['definitions'][name]
+            require(not definition['reference_dependent'],'reference-dependent raw reuse is not admitted')
+            for block in receipt['blocks']:
+                key=(name,block['partition']['partition_ref'])
+                require(key in owners,'raw partition has no explicit admitted source')
+                owner,definitions=owners[key];spec=owner.source.manifest['spec']
+                expected=definitions[name]
+                require(definition==expected,'raw source/catalog semantics mismatch')
+                require(spec['pit_policy']==target['pit_policy'] and
+                        spec['cutoff_by_session'][day]==target['cutoff_by_session'][day] and
+                        day in spec['calendar'] and day in target['calendar'],
+                        'raw/reference PIT, calendar or cutoff mismatch')
+                original=refs[id(owner),tuple(block['security_ids'])][name]
+                require(block['semantic_ref']==definition['semantic_ref'] and block['dependency_ref']==original,
+                        'raw parent/source local dependency mismatch')
+                axis=block['selected_security_ids']
+                selected=refs[id(owner),tuple(axis)][name]
+                rows.append({'partition':block['partition'],'source':owner.descriptor,
+                    'security_ids':axis,'dependency_ref':selected,'original_dependency_ref':original})
+            result[day][name]=digest({'contract_version':'bound_saved_raw_dependency_v1',
+                'blocks':sorted(rows,key=lambda r:tuple(r['security_ids']))})
+    for parent,owner in bindings:parent.validate_boundary();owner.store.check()
+    return result
+
 
 class _RawCrossSectionSource:
-    def __init__(self, raw_view, source):
+    def __init__(self, raw_view, source, *, raw_bindings=None, catalog=None, selection=None):
         self.raw_view,self.source=raw_view,source
+        self.raw_bindings=None if raw_bindings is None else list(raw_bindings)
+        self.catalog,self.selection=catalog,selection
         self._plans={};self._headers={};self._prepared_headers={}
 
     def source_bindings(self, day, columns):
@@ -556,7 +672,9 @@ class _RawCrossSectionSource:
         raw_definitions={name:cap['definitions'][name] for name in definitions}
         physical=self.source.source.manifest['spec']['universe']
         require(securities==physical,'CS dependencies require complete physical cohort')
-        raw=admitted_raw_dependency_refs(self.raw_view,self.source,raw_definitions,days,physical)
+        raw=(admitted_raw_dependency_refs(self.raw_view,self.source,raw_definitions,days,physical)
+             if self.raw_bindings is None else _bound_raw_dependency_refs(
+                 self.raw_view,self.source,self.raw_bindings,self.catalog,self.selection,days))
         return {day:{name:normalized_feature_dependency_ref(self.source,day,
             raw_definitions[name]['semantic_ref'],raw[day][name]) for name in definitions} for day in days}
 
