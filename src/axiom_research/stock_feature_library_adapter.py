@@ -21,7 +21,7 @@ from .stock_compact_store import OwnedStore, StockFeatureView, _TOKEN, _size
 VERSION='stock_feature_library_training_projection_v1'
 
 
-def _feature_source_compatibility(view, source, selection, *, raw_view=None, raw_bindings=None):
+def _feature_source_compatibility(view, source, selection, *, raw_view=None, raw_bindings=None, catalog=None):
     """Same semantics and local selected facts, allowing unchanged historical frames."""
     from axiom_engine.feature_library import feature_definitions
     from .feature_catalog import load_feature_catalog_ref
@@ -29,7 +29,9 @@ def _feature_source_compatibility(view, source, selection, *, raw_view=None, raw
     cap=view.describe(); physical=source.source; spec=physical.manifest['spec']
     require(cap['security_ids']==spec['universe'] and set(cap['sessions'])<=set(spec['feature_sessions']) and
             [s['id'] for s in selection]==cap['columns'], 'Feature/source axes or selection mismatch')
-    catalog=load_feature_catalog_ref(spec['catalog_ref']); catalog.select(selection)
+    require(catalog is None or raw_view is not None, 'explicit catalog requires saved raw binding')
+    catalog=load_feature_catalog_ref(spec['catalog_ref']) if catalog is None else catalog
+    catalog.select(selection)
     require(catalog.to_dict()['input_contract']=={'price_basis':'common_anchor_adjusted_v1',
         'adjustment_anchor':'feature_session_visible_at_cutoff','amount_unit':'CNY'},
         'unsupported training source/catalog input interpretation')
@@ -49,11 +51,16 @@ def _feature_source_compatibility(view, source, selection, *, raw_view=None, raw
             receipts=view.column_receipts(day,list(columns))
             require(all(receipts[n]['dependency_ref']==ref for n,ref in columns.items()),
                     'saved normalized raw/reference dependency mismatch')
+        # Cold readers resolve the same installed immutable catalog by digest.
+        load_feature_catalog_ref(catalog.identity)
         return seal({'contract_version':'stock_feature_source_compatibility_v1','layer':'normalized',
             'view_ref':view.identity,'semantic_refs':{n:expected[n]['semantic_ref'] for n in cap['columns']},
             'dependency_refs':dependencies,'reference_security_ids':list(source.reference_security_ids),
             'source':source.descriptor,'snapshot':spec['snapshot'],'pit_policy':spec['pit_policy'],
             'cutoff_by_session':{day:spec['cutoff_by_session'][day] for day in cap['sessions']},
+            'feature_catalog_ref':catalog.identity,
+            'feature_recipe_ref':catalog.recipe_ref(selection,normalized=True),
+            'member_catalog_ref':spec['catalog_ref'],
             'raw_view':raw_view.descriptor,
             'raw_bindings':[{'view':v.descriptor,'source':s.descriptor} for v,s in raw_bindings]},'compatibility_ref')
     raw=source.definitions(catalog,selection,normalized=False)
@@ -257,7 +264,7 @@ NATIVE_VERSION='stock_feature_library_training_native_v1'
 
 
 def build_feature_library_training_view(view, source, *, selection, destination,
-                                        maximum_working_bytes=512*1024**2, raw_view=None, raw_bindings=None):
+                                        maximum_working_bytes=512*1024**2, raw_view=None, raw_bindings=None, catalog=None):
     """Save a small native binding; no training value/metadata table is copied.
 
     Source compatibility is checked once at this publication boundary. Fresh
@@ -268,15 +275,19 @@ def build_feature_library_training_view(view, source, *, selection, destination,
     re-admit raw and member dependencies independently. source explicitly owns
     daily reference/sample membership and the training spec; raw source IDs
     and snapshots remain in the saved compatibility proof and Core lineage.
+    catalog independently selects an installed immutable feature catalog; it
+    does not replace the membership source catalog or evidence.
     """
     cap=view.describe(); physical=source.source
-    compatibility=_feature_source_compatibility(view,source,selection,raw_view=raw_view,raw_bindings=raw_bindings)
+    compatibility=_feature_source_compatibility(view,source,selection,raw_view=raw_view,raw_bindings=raw_bindings,catalog=catalog)
     compatibility={**{k:v for k,v in compatibility.items()
                       if k not in ('dependency_refs','compatibility_ref')},
                    'local_dependency_ref':digest(compatibility['dependency_refs'])}
     spec=deepcopy(physical.manifest['spec'])
     spec.update(universe=cap['sample_universe'],feature_sessions=cap['sessions'],
                 feature_selection=deepcopy(selection),ordered_features=cap['columns'])
+    if 'feature_catalog_ref' in compatibility:
+        spec['catalog_ref']=compatibility['feature_catalog_ref']
     schema=[deepcopy(cap['definitions'][n]['schema']) for n in cap['columns']]
     definition={'spec':spec,'library_view':view.descriptor,'source':source.descriptor,
                 'source_compatibility':compatibility}
@@ -392,11 +403,22 @@ def _load_native_training_view(descriptor,wire,store):
         require(wire['source_member_buffer']==original['buffers']['member'] and
                 wire['source_member_sessions']==original['spec']['read_sessions'] and
                 wire['source_member_securities']==original['spec']['universe'] and
-                all(spec[k]==original['spec'][k] for k in ('snapshot','pit_policy','calendar','catalog_ref')) and
+                all(spec[k]==original['spec'][k] for k in ('snapshot','pit_policy','calendar','scope')) and
                 set(days)<=set(original['spec']['feature_sessions']) and
                 set(securities)<=set(wire['source_member_securities']) and
                 all(spec['cutoff_by_session'][d]==original['spec']['cutoff_by_session'][d] for d in days),
                 'native training membership/cutoff binding mismatch')
+        if 'feature_catalog_ref' in compatibility:
+            from .feature_catalog import load_feature_catalog_ref
+            catalog=load_feature_catalog_ref(compatibility['feature_catalog_ref'])
+            require(catalog.identity==compatibility['feature_catalog_ref']==spec['catalog_ref'] and
+                    compatibility['member_catalog_ref']==original['spec']['catalog_ref'],
+                    'native feature/member catalog binding mismatch')
+            require(catalog.recipe_ref(spec['feature_selection'],normalized=True)==compatibility['feature_recipe_ref'],
+                    'native feature catalog selection mismatch')
+        else:
+            require(spec['catalog_ref']==original['spec']['catalog_ref'],
+                    'native training catalog binding mismatch')
         if wire['source_member_buffer'].get('layout') in ('date_segments_v1','security_segments_v1'):
             from .feature_input_buffers import SegmentedFeatureBuffer
             members=SegmentedFeatureBuffer(wire['source_member_buffer'],member_store)

@@ -534,7 +534,10 @@ class CatalogFeatureLibrary:
         ensure/prepare. It retains actual source IDs and requires equal PIT,
         output cutoffs and calendars on the consumed dates; snapshot identities
         may differ and remain distinct. It makes no cross-snapshot parity claim.
-        All handles remain caller-owned. Only normalized arrays are published.
+        Reference-dependent raw retains its original full-cohort dependency
+        and is an opaque saved fact for the outer normalization, not a recipe
+        reinterpreted under the new members. All handles remain caller-owned.
+        Only normalized arrays are published.
         """
         request=_saved_normalization_request(raw_view,self.source,self.catalog,selection)
         adapter=_RawCrossSectionSource(raw_view,self.source,raw_bindings=raw_bindings,
@@ -551,8 +554,6 @@ def _saved_normalization_request(raw_view, source, catalog, selection):
     cap=raw_view.describe();names=[f['id'] for f in catalog.select(selection)]
     require(names==cap['columns'] and cap['security_ids']==source.source.manifest['spec']['universe'],
             'saved raw must cover the complete explicit membership source axis')
-    require(all(not d['reference_dependent'] for d in cap['definitions'].values()),
-            'saved normalization requires reference-independent raw Features')
     # The membership owner need not provide raw price/volume fields. Compile
     # the existing catalog normalization using the admitted raw input schemas.
     schemas={}
@@ -563,7 +564,12 @@ def _saved_normalization_request(raw_view, source, catalog, selection):
     full=source.plan(catalog,selection,normalized=True,input_schema=list(schemas.values())).to_dict()
     full['input_schema']=[{**cap['definitions'][n]['schema'],'stage':'fact'} for n in names]
     full['nodes']=[n for n in full['nodes'] if n['name'] in {name+'_cs_zscore' for name in names}]
-    semantics={n:{'derived_feature':cap['definitions'][n]['semantic']} for n in names}
+    semantics={n:({'frozen_reference_feature':{
+        'semantic':cap['definitions'][n]['semantic'],'view_ref':raw_view.identity}}
+        if cap['definitions'][n]['reference_dependent'] else
+        {'derived_feature':cap['definitions'][n]['semantic']}) for n in names}
+    # A frozen inner reference operation is a saved fact, never expanded into
+    # the outer member cohort's DAG. Its view pins original partition receipts.
     return FeatureRequest(FeaturePlan.from_dict(full),tuple(cap['sessions']),tuple(cap['security_ids']),
                           semantics,tuple(cap['sample_universe']))
 
@@ -611,14 +617,15 @@ def _bound_raw_refs(view, reference, bindings, catalog, selection, days):
                 key=(name,block['partition']['partition_ref'])
                 require(key in owners,'raw partition has no explicit admitted source')
                 owner,_=owners[key]
-                for axis in (block['security_ids'],block['selected_security_ids']):
+                axes=([block['security_ids']] if cap['definitions'][name]['reference_dependent']
+                      else [block['security_ids'],block['selected_security_ids']])
+                for axis in axes:
                     group=(id(owner),tuple(axis))
                     groups.setdefault(group,(owner,{}))[1][name]=cap['definitions'][name]
         refs={group:owner.dependency_refs(defs,[day],list(group[1]))[day]
               for group,(owner,defs) in groups.items()}
         for name,receipt in receipts.items():
             rows=[];definition=cap['definitions'][name]
-            require(not definition['reference_dependent'],'reference-dependent raw reuse is not admitted')
             for block in receipt['blocks']:
                 key=(name,block['partition']['partition_ref'])
                 require(key in owners,'raw partition has no explicit admitted source')
@@ -633,7 +640,10 @@ def _bound_raw_refs(view, reference, bindings, catalog, selection, days):
                 require(block['semantic_ref']==definition['semantic_ref'] and block['dependency_ref']==original,
                         'raw parent/source local dependency mismatch')
                 axis=block['selected_security_ids']
-                selected=refs[id(owner),tuple(axis)][name]
+                selected=(digest({'frozen_reference_dependency':original,
+                    'original_security_ids':block['security_ids'],'selected_security_ids':axis,
+                    'partition':block['partition']}) if definition['reference_dependent']
+                    else refs[id(owner),tuple(axis)][name])
                 rows.append({'partition':block['partition'],'source':owner.descriptor,
                     'security_ids':axis,'dependency_ref':selected,'original_dependency_ref':original})
             result[day][name]=digest({'contract_version':'bound_saved_raw_dependency_v1',
