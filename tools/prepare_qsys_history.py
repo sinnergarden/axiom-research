@@ -13,32 +13,66 @@ import shutil
 import time
 
 
+CANONICAL_ENDPOINT_DOMAINS={'income_vip':'financial_events','balancesheet_vip':'balance_sheet_events',
+    'fina_indicator_vip':'financial_indicator_events','daily_basic':'valuation_daily',
+    'moneyflow':'money_flow_daily','margin_detail':'margin_daily',
+    'stk_holdernumber':'shareholder_count_events','forecast_vip':'forecast_events',
+    'index_member_all':'industry_membership_events'}
+
+
+def _input_domains(requirements):
+    required={'market_daily','adjustment_factors','universe_membership','trading_calendar',
+              *[v['domain'] for v in requirements['daily_fields'].values()],
+              *[v['domain'] for v in requirements['financial_fields'].values()]}
+    if requirements['benchmark_fields']:required.add('benchmark_daily')
+    if requirements['industry_fields']:required.add('industry_membership_events')
+    return required
+
+
+def _check_canonical_scope(path, snapshot, required, symbols=()):
+    if not path.exists():raise ValueError('canonical scope receipt is required')
+    receipt=json.loads(path.read_text())
+    missing=(set(required)&set(CANONICAL_ENDPOINT_DOMAINS.values()))-set(receipt['domains'])
+    if missing:raise ValueError('canonical scope receipt lacks required repaired domains: '+','.join(sorted(missing)))
+    if receipt['snapshot_id']!=snapshot or not set(symbols)<=set(receipt['canonical_security_ids']):
+        raise ValueError('canonical retained scope does not cover the pinned Snapshot and historical security union')
+    return receipt
+
+
 def prepare_candidate(cfg, root, requirements, progress):
     from axiom_data import Data
     from axiom_data.storage import LocalStore
     from axiom_research.stock_artifacts import digest
     from axiom_research.feature_input_checkpoint import atomic_json
     store=LocalStore(root/'data')
+    required=_input_domains(requirements)
+    repair_domains=required&set(CANONICAL_ENDPOINT_DOMAINS.values())
     binding={'candidate_root':cfg['candidate_root'],'candidate_snapshot':cfg['candidate_snapshot'],
              'market_root':cfg['market_root'],'market_snapshot':cfg['market_snapshot'],
              'raw_roots':cfg.get('raw_roots',[]),
              'canonical_raw_stage':cfg.get('canonical_raw_stage'),
-             'native_domains':cfg.get('native_domains',[])}
+             'native_domains':cfg.get('native_domains',[]),
+             'required_domains':sorted(required),'canonical_repair_domains':sorted(repair_domains)}
     raw_stage=None
+    selected={}
     if cfg.get('canonical_raw_stage'):
         raw_stage=json.loads(Path(cfg['canonical_raw_stage']).read_text())
+        selected={ep:domain for ep,domain in CANONICAL_ENDPOINT_DOMAINS.items() if domain in repair_domains}
+        missing=[ep for ep in selected if not raw_stage['endpoints'].get(ep)]
+        if missing:raise ValueError('MISSING_RETAINED_RAW_ENDPOINTS: '+','.join(sorted(missing)))
         binding['retained_stock_scope_ref']=digest(raw_stage)
-    required={'market_daily','adjustment_factors','universe_membership','trading_calendar',
-              *[v['domain'] for v in requirements['daily_fields'].values()],
-              *[v['domain'] for v in requirements['financial_fields'].values()]}
-    if requirements['benchmark_fields']:required.add('benchmark_daily')
-    if requirements['industry_fields']:required.add('industry_membership_events')
+    binding['canonical_rebuild_domains']=sorted(selected.values())
+    receipt_path=Path(cfg['canonical_scope_receipt']) if cfg.get('canonical_scope_receipt') else root/'canonical-scope.json'
+    needs_receipt=raw_stage is not None or bool(cfg.get('canonical_scope_receipt')) or bool(cfg.get('research_range') and not cfg.get('scope_seed'))
+    if cfg.get('canonical_scope_receipt'):
+        binding['canonical_scope_receipt_ref']=digest(json.loads(receipt_path.read_text()))
     marker=root/'candidate-snapshot.json'
     if marker.exists():
         saved=json.loads(marker.read_text())
         if saved.get('request_ref')==digest(binding):
             manifest=store.load_snapshot(saved['snapshot_id'])
             if required<=set(manifest['domains']):
+                if needs_receipt:_check_canonical_scope(receipt_path,saved['snapshot_id'],required)
                 return Data(root/'data',cache_bytes=cfg.get('event_cache_bytes',64*1024**2),max_readers=1),saved['snapshot_id']
     progress('candidate',required_domains=sorted(required))
     manifest=store.borrow_snapshot(cfg['candidate_root'],cfg['candidate_snapshot'])
@@ -71,13 +105,6 @@ def prepare_candidate(cfg, root, requirements, progress):
     if raw_stage is not None:
         # Original Raw retains the full market response. Rebuild the retained
         # historical candidate union once, rather than inherit a T01 subset.
-        endpoint_domains={'income_vip':'financial_events','balancesheet_vip':'balance_sheet_events',
-            'fina_indicator_vip':'financial_indicator_events','daily_basic':'valuation_daily',
-            'moneyflow':'money_flow_daily','margin_detail':'margin_daily',
-            'stk_holdernumber':'shareholder_count_events','forecast_vip':'forecast_events',
-            'index_member_all':'industry_membership_events'}
-        selected={ep:domain for ep,domain in endpoint_domains.items()
-                  if domain in required and ep in raw_stage['endpoints']}
         codes=sorted(raw_stage['identity_map'])
         ids=list(dict.fromkeys(bid for ep in selected for bid in raw_stage['endpoints'][ep]))
         require_domains=set(selected.values())
@@ -97,6 +124,7 @@ def prepare_candidate(cfg, root, requirements, progress):
             'canonical_security_ids':sorted(raw_stage['identity_map'].values()),'domains':sorted(require_domains),
             'raw_receipts':len(ids),'supplier_calls':0})
     data.describe_snapshot(snapshot=base,domains=sorted(required))
+    if needs_receipt:_check_canonical_scope(receipt_path,base,required)
     data.clear_cache()
     atomic_json(marker,{'snapshot_id':base,'root':str(root/'data'),'request_ref':digest(binding)})
     return data,base
@@ -190,10 +218,7 @@ def run(cfg, *, observer=None):
         outputs=list(spec['feature_sessions'])
         canonical_receipt=Path(cfg['canonical_scope_receipt']) if cfg.get('canonical_scope_receipt') else root/'canonical-scope.json'
         if cfg.get('research_range') and not cfg.get('scope_seed'):
-            if not canonical_receipt.exists():raise ValueError('independent production range requires an explicit canonical scope receipt')
-            canonical_scope=json.loads(canonical_receipt.read_text())
-            if canonical_scope['snapshot_id']!=base or not set(spec['universe'])<=set(canonical_scope['canonical_security_ids']):
-                raise ValueError('canonical retained scope does not cover the planned historical security union')
+            _check_canonical_scope(canonical_receipt,base,_input_domains(requirements),spec['universe'])
         request_ref=digest(spec)
         atomic_json(root/'request.json',{'request_ref':request_ref,'spec':spec,
             'research_range':cfg.get('research_range',['2019-01-02','2025-12-31'])})

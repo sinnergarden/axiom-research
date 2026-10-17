@@ -179,7 +179,7 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
             benchmark_snapshot=spec['snapshot'],industry_snapshot=spec['snapshot'],
             benchmark_security_id=source.manifest['source_profiles'].get('materialized_benchmark_daily',{}).get('source_profile',{}).get('benchmark_security_id'),
             block_sessions=block_sessions,maximum_added_bytes=8*1024**3,maximum_event_cache_bytes=event_cache_bytes,progress=progress)
-        return merge_security_sources([source,delta],spec=spec,destination=root,data=data)
+        return merge_security_sources([source,delta],spec=spec,destination=root,data=data,block_sessions=block_sessions)
 
     if missing_days:
         require(all(d['event_snapshot']==spec['snapshot'] for d in
@@ -336,7 +336,7 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
     return result,metrics
 
 
-def merge_security_sources(sources, *, spec, destination, data):
+def merge_security_sources(sources, *, spec, destination, data, block_sessions=16):
     """Join separately prepared, disjoint securities under one frozen scope.
 
     The caller prepares only new securities through the same input producers.
@@ -387,7 +387,8 @@ def merge_security_sources(sources, *, spec, destination, data):
     store=VerifiedMatrixStore(maximum_source_bytes=256*1024**3,maximum_matrix_bytes=8*1024**3)
     try:
         manifest['buffers']['member_pool_complete']=_merged_pool_complete(
-            data,spec=spec,buffers=manifest['buffers'],store=store,root=root,universe_id=universe)
+            data,spec=spec,buffers=manifest['buffers'],store=store,root=root,universe_id=universe,
+            block_sessions=block_sessions)
     except BaseException:
         store.close();raise
     manifest['universe_binding']=source_universe_binding(manifest)
@@ -396,21 +397,22 @@ def merge_security_sources(sources, *, spec, destination, data):
     return result,{'old_value_recomputations':0,'buffer_copy_bytes':0,'security_slabs':len(sources)}
 
 
-def _merged_pool_complete(data, *, spec, buffers, store, root, universe_id):
+def _merged_pool_complete(data, *, spec, buffers, store, root, universe_id, block_sessions=16):
     """Recheck changed CS membership closure, retaining every old numeric slab."""
     import numpy as np
     import pandas as pd
     from axiom_data import QuerySpec
     from .feature_input_buffers import SegmentedFeatureBuffer,allocate_feature_buffer,seal_feature_buffer
     from .stock_feature_columns import _membership_masks
+    require(type(block_sessions) is int and 0<block_sessions<=32,'bounded membership block required')
     def array(name):
         desc=buffers[name]
         return SegmentedFeatureBuffer(desc,store) if 'layout' in desc else store.buffer(desc).view('bool')
     days=spec['read_sessions'];symbols=spec['universe'];shape=(len(days),len(symbols))
     member=array('member');known=array('member_known')
     complete=allocate_feature_buffer(root,dtype='bool',shape=shape)
-    for offset in range(0,len(days),2):
-        selected=days[offset:offset+2];keys=[(s,d) for d in selected for s in symbols]
+    for offset in range(0,len(days),block_sessions):
+        selected=days[offset:offset+block_sessions];keys=[(s,d) for d in selected for s in symbols]
         query=QuerySpec('universe_membership',('is_member',),tuple(symbols),tuple(selected),
             spec['pit_policy'],{d:spec['cutoff_by_session'][d] for d in selected},universe_id=universe_id)
         batch=data.members(snapshot=spec['snapshot'],query=query,_borrow_context=True)
