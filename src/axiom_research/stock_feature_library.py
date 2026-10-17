@@ -79,11 +79,11 @@ class _SourceArrays(Mapping):
 class SavedColumnFeatureSource:
     """Admit an immutable source through the original owner, then borrow mmap."""
     def __init__(self, descriptor, *, reference_security_ids=None, maximum_source_bytes=8*1024**3,
-                 maximum_working_bytes=512*1024**2):
+                 maximum_working_bytes=512*1024**2, maximum_parent_bytes=64*1024**2):
         self._leaf_cache_bytes=0
         self._leaf_spool=None
         self.store=VerifiedMatrixStore(maximum_source_bytes=maximum_source_bytes,
-            maximum_matrix_bytes=maximum_working_bytes,
+            maximum_matrix_bytes=maximum_working_bytes, maximum_parent_bytes=maximum_parent_bytes,
             _caller_retained_bytes=lambda:self._leaf_cache_bytes)
         # This owner retains private admitted metadata without mutating its graphs.
         # Reuse the existing incremental ledger rather than walking all ancestors per receipt.

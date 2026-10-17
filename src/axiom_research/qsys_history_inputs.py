@@ -19,13 +19,15 @@ def source_descriptor(path):
     return {'path':str(path),'file_digest':file_digest(path),'source_ref':m['source_ref']}
 
 
-def open_physical_source(path):
+def open_physical_source(path, *, maximum_source_bytes=256*1024**3,
+                         maximum_working_bytes=2*1024**3, maximum_parent_bytes=64*1024**2):
     """Admit the header and hash/map each published buffer on its first use."""
     from .stock_feature_columns import FeatureColumnSource
     from .stock_feature_library import _SourceArrays
     from .stock_matrix_reader import VerifiedMatrixStore
     descriptor=source_descriptor(path)
-    store=VerifiedMatrixStore(maximum_source_bytes=256*1024**3,maximum_matrix_bytes=2*1024**3)
+    store=VerifiedMatrixStore(maximum_source_bytes=maximum_source_bytes,
+        maximum_matrix_bytes=maximum_working_bytes,maximum_parent_bytes=maximum_parent_bytes)
     manifest=store.read_json(descriptor,'source_ref')
     source=FeatureColumnSource(manifest,_SourceArrays(manifest,store))
     source._history_store=store

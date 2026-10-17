@@ -170,7 +170,10 @@ def run(cfg, *, observer=None):
         # rebuild membership or scan arrays in a disposable preparation owner.
         progress('input_reuse')
         source_path=Path(cfg['reuse_source']).resolve()
-        original=open_physical_source(source_path)
+        original=open_physical_source(source_path,
+            maximum_source_bytes=cfg.get('maximum_source_bytes',256*1024**3),
+            maximum_working_bytes=cfg.get('working_bytes',2*1024**3),
+            maximum_parent_bytes=cfg.get('maximum_parent_bytes',64*1024**2))
         from axiom_research.financial_feature_columns import QUARTER_POLICY
         if any('quarters_back' in d and d['selection']!=QUARTER_POLICY
                for d in original.manifest.get('financial_materializations',{}).values()):
@@ -179,7 +182,7 @@ def run(cfg, *, observer=None):
         if not outputs or outputs!=sorted(set(outputs)) or not set(outputs)<=set(spec['feature_sessions']):
             raise ValueError('prepared continuation outside published output scope')
         from axiom_research.stock_feature_inputs import _spec
-        universe_id=_spec(spec)
+        universe_id=_spec(spec,reader=original._history_store.read_json)
         if cfg.get('universe_id',universe_id)!=universe_id:raise ValueError('configured universe differs from saved scope')
         if cfg.get('candidate_snapshot',spec['snapshot'])!=spec['snapshot']:raise ValueError('prepared Snapshot differs')
         required=set(requirements['daily_fields'])|set(requirements['benchmark_fields'])
@@ -270,7 +273,8 @@ def run(cfg, *, observer=None):
                            maximum_source_bytes=cfg.get('maximum_source_bytes',256*1024**3))
     views=[]
     with library.execution_session(), SavedColumnFeatureSource(source_descriptor(source_path),maximum_source_bytes=cfg.get('maximum_source_bytes',256*1024**3),
-                                 maximum_working_bytes=cfg.get('working_bytes',2*1024**3)) as admitted:
+                                 maximum_working_bytes=cfg.get('working_bytes',2*1024**3),
+                                 maximum_parent_bytes=cfg.get('maximum_parent_bytes',64*1024**2)) as admitted:
         progress('features')
         owner=CatalogFeatureLibrary(library,admitted,catalog)
         block=cfg.get('output_block_sessions',len(outputs))
