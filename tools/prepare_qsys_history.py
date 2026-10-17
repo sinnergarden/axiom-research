@@ -53,7 +53,8 @@ def prepare_candidate(cfg, root, requirements, progress):
         if restored:
             # Publication verifies newly attached Raw IDs. Borrow their exact
             # receipts before attaching the restored canonical domain.
-            store.borrow_raw([cfg['market_root'],*cfg.get('raw_roots',[])],domains=restored)
+            store.borrow_raw([cfg['market_root'],*cfg.get('raw_roots',[])],
+                raw_batch_ids=sorted({bid for name in restored for bid in domains[name]['raw_batch_ids']}))
             base=store.publish_snapshot(domains,parent_snapshot=base,promote=False,
                 build_context={'purpose':'retain prior domains and bind explicitly selected frozen native domains',
                                'original_roots':[cfg['candidate_root'],cfg['market_root']]})['snapshot_id']
