@@ -131,6 +131,48 @@ def _project_chunks(chunks, days, symbols, root):
     return result
 
 
+def _reason_alignment(sources):
+    """Local uint8 ordinals share meaning only through their reason names."""
+    import numpy as np
+    codes=[];maps={}
+    for source in sources:
+        local=source.manifest['reason_codes']
+        require(local and local[0] is None and all(isinstance(v,str) for v in local[1:])
+                and len(set(local))==len(local),'invalid local reason dictionary')
+        for reason in local:
+            if reason not in codes:codes.append(reason)
+        require(len(codes)<=256,'merged reason dictionary exceeds uint8')
+        mapping=[codes.index(reason) for reason in local]
+        maps[id(source)]=None if mapping==list(range(len(local))) else np.asarray(mapping,dtype='u1')
+    return codes,maps
+
+
+def _is_reason_buffer(name):
+    return name in ('reasons','member_reasons') or name.endswith('::reasons')
+
+
+def _aligned_reason_descriptor(source, name, mapping, root):
+    """Retain unchanged slabs; rewrite only differently encoded reason bytes."""
+    from .feature_input_buffers import allocate_feature_buffer,seal_feature_buffer
+    desc=source.manifest['buffers'][name]
+    if mapping is None or not _is_reason_buffer(name):return desc,0
+    require(desc['dtype']=='uint8','reason buffer must use uint8')
+    original=source.arrays[name]
+    target=allocate_feature_buffer(root,dtype='u1',shape=original.shape)
+    try:
+        for start in range(0,original.shape[0],16):
+            values=original[start:start+16]
+            require(bool((values<len(mapping)).all()),'reason ordinal outside local dictionary')
+            target[start:start+16]=mapping[values]
+        descriptor,published=seal_feature_buffer(root,target,dtype='uint8',shape=original.shape)
+        published._mmap.close()
+        return descriptor,original.nbytes
+    except BaseException:
+        if not target._mmap.closed:target._mmap.close()
+        Path(target.filename).unlink(missing_ok=True)
+        raise
+
+
 def reuse_history_source(data, *, source, spec, catalog, destination,
                          event_cache_bytes=64*1024**2, block_sessions=16, progress=None):
     """Reuse existing cells and prepare only missing date rectangles.
@@ -205,7 +247,9 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
                 block_sessions=block_sessions,maximum_added_bytes=8*1024**3,maximum_event_cache_bytes=event_cache_bytes,progress=progress)
         require(set(delta.manifest['buffers'])==set(source.manifest['buffers']),'gap source fields differ from reused source')
         sources.append(delta)
+    reason_codes,reason_maps=_reason_alignment(sources)
     manifest=deepcopy(source.manifest);manifest['spec']=deepcopy(spec)
+    manifest['reason_codes']=reason_codes
     arrays={};same_axes=days==old['read_sessions'] and symbols==old['universe']
     positions={d:i for i,d in enumerate(days)};security_positions={s:i for i,s in enumerate(symbols)}
     metrics={'reused_dates':len(overlap),'reused_securities':len(set(symbols)&set(old['universe'])),
@@ -218,9 +262,11 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
             ordered_parts=sorted(sources,key=lambda part:part.manifest['spec']['read_sessions'][0])
             require([d for part in ordered_parts for d in part.manifest['spec']['read_sessions']]==days,
                     'append input slabs must form the exact frozen calendar')
-            require(all(part.manifest['reason_codes']==source.manifest['reason_codes'] for part in ordered_parts),
-                    'append reason dictionaries differ; remap only the new slab before publication')
-            manifest['buffers'][name]=segmented_buffer([part.manifest['buffers'][name] for part in ordered_parts])
+            descriptors=[]
+            for part in ordered_parts:
+                aligned,copied=_aligned_reason_descriptor(part,name,reason_maps[id(part)],root)
+                descriptors.append(aligned);metrics['buffer_copy_bytes']+=copied
+            manifest['buffers'][name]=segmented_buffer(descriptors)
             continue
         # Explicit axis projection retains the original bounded copy route.
         original=source.arrays[name];shape=(len(days),len(symbols),*original.shape[2:])
@@ -231,7 +277,13 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
             cols=[(j,security_positions[s]) for j,s in enumerate(old_symbols) if s in security_positions]
             if not selected or not cols:continue
             src_cols,dst_cols=zip(*cols);value=part.arrays[name]
-            for src_row,dst_row in selected:target[dst_row,list(dst_cols)]=value[src_row,list(src_cols)]
+            mapping=reason_maps[id(part)] if _is_reason_buffer(name) else None
+            for src_row,dst_row in selected:
+                row=value[src_row,list(src_cols)]
+                if mapping is not None:
+                    require(bool((row<len(mapping)).all()),'reason ordinal outside local dictionary')
+                    row=mapping[row]
+                target[dst_row,list(dst_cols)]=row
         manifest['buffers'][name],arrays[name]=seal_feature_buffer(root,target,dtype=desc['dtype'],shape=shape)
         metrics['buffer_copy_bytes']+=int(np.prod(shape))*original.dtype.itemsize
     # Validation and the published source borrow the same descriptor-backed mapping.
@@ -304,7 +356,7 @@ def reuse_history_source(data, *, source, spec, catalog, destination,
                 if group_index<3:proofs.append(desc)
                 else:manifest['daily_extensions'][group_index-3]['chunks'].append({'sessions':selected,'evidence':[desc]})
             manifest['chunks'].append({'sessions':selected,'evidence':proofs})
-        manifest['evidence_mode']='block_receipts_v1';manifest['reason_codes']=list(REASONS)
+        manifest['evidence_mode']='block_receipts_v1'
         metrics['imported_block_receipts']=len(manifest['chunks'])*len(groups)
         metrics['legacy_cell_proof_decodes']=0
     else:
@@ -363,9 +415,8 @@ def merge_security_sources(sources, *, spec, destination, data, block_sessions=1
                 old['cutoff_by_session']==spec['cutoff_by_session'] and _spec(old)==universe,
                 'security merge scope or PIT differs')
         require(manifest.get('evidence_mode')=='block_receipts_v1' and
-                manifest['reason_codes']==first['reason_codes'] and
                 manifest.get('daily_fields')==first.get('daily_fields') and set(manifest['buffers'])==set(first['buffers']),
-                'security merge needs identical typed fields and reason codes')
+                'security merge needs identical typed fields')
         actual={}
         chunks=list(manifest['chunks'])+[c for ext in manifest.get('daily_extensions',[]) for c in ext['chunks']]
         for chunk in chunks:
@@ -377,9 +428,15 @@ def merge_security_sources(sources, *, spec, destination, data, block_sessions=1
                     for field,metadata in child['field_meta'].items():actual[field,day]=metadata
         require(bindings is None or actual==bindings,'field source versions differ across security slabs')
         bindings=actual
-    manifest=deepcopy(first);manifest['spec']=deepcopy(spec)
-    manifest['buffers']={name:security_segmented_buffer([s.manifest['buffers'][name] for s in sources],axes,symbols)
-                         for name in first['buffers']}
+    reason_codes,reason_maps=_reason_alignment(sources)
+    manifest=deepcopy(first);manifest['spec']=deepcopy(spec);manifest['reason_codes']=reason_codes
+    copied_bytes=0
+    for name in first['buffers']:
+        descriptors=[]
+        for source in sources:
+            aligned,copied=_aligned_reason_descriptor(source,name,reason_maps[id(source)],root)
+            descriptors.append(aligned);copied_bytes+=copied
+        manifest['buffers'][name]=security_segmented_buffer(descriptors,axes,symbols)
     manifest['chunks']=_project_chunks(first['chunks'],days,symbols,root)
     manifest['daily_extensions']=[{**ext,'chunks':_project_chunks(ext['chunks'],days,symbols,root)}
                                   for ext in first.get('daily_extensions',[])]
@@ -394,7 +451,7 @@ def merge_security_sources(sources, *, spec, destination, data, block_sessions=1
     manifest['universe_binding']=source_universe_binding(manifest)
     manifest.pop('source_ref');manifest=seal(manifest,'source_ref');atomic_json(root/'source.json',manifest)
     result=FeatureColumnSource(manifest,_SourceArrays(manifest,store));result._history_store=store
-    return result,{'old_value_recomputations':0,'buffer_copy_bytes':0,'security_slabs':len(sources)}
+    return result,{'old_value_recomputations':0,'buffer_copy_bytes':copied_bytes,'security_slabs':len(sources)}
 
 
 def _merged_pool_complete(data, *, spec, buffers, store, root, universe_id, block_sessions=16):
