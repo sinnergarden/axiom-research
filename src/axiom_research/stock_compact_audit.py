@@ -11,8 +11,6 @@ from .stock_compact_controls import evaluation_parts
 
 def _check_budget(state):
     state._sync_shared(); state.store.reserve(0)
-    require(state.store.shared_source_bytes+state.store.metrics['source_bytes']<=
-        state.store.limits['maximum_source_bytes'],'audit combined source byte budget exceeded')
 
 
 def _compare_fold(saved,replay,left,right):

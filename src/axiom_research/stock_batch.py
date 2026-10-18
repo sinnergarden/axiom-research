@@ -292,7 +292,6 @@ def load_stock_ml_batch_inputs(batch_manifest, *, feature_inputs=None, limits=No
             descriptors[path] = desc
     fingerprints = {p: _fingerprint(p) for p in descriptors}
     source_bytes = sum(mark[2] for mark in fingerprints.values())
-    require(source_bytes <= budgets['maximum_source_bytes'], 'saved batch source byte budget exceeded')
     first = manifest['folds'][0]['input_manifest']
     rows = sum(len(p['sessions']) * len(first['universe']) for p in first['feature_parents'])
     matrix_bytes = rows * len(first['ordered_features']) * 8

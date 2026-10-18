@@ -36,3 +36,5 @@ The focused saved-input comparison is supplied with the change handoff. It reads
 one existing F88 fold under both revisions, compares X/y/P and ordered keys, and
 compares saved model/prediction output. No Feature generation or model fitting is
 needed. Execute once when the active long research run has released memory.
+
+Cumulative distinct source-file bytes remain telemetry, not a memory limit. The legacy maximum_source_bytes argument stays accepted for saved configuration compatibility; it does not cap published-input traversal or streaming publication. Actual matrix/workspace, parent-document and lease/residency limits remain enforced.

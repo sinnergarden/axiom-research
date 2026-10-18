@@ -770,7 +770,6 @@ def _prepare_legacy_compact_batch(data, *, feature_inputs,fold_specs,destination
         if model_binding is not None:
             spec={**source_spec,'ordered_features':model_binding['ordered_features'],'feature_selection':model_binding['selection']}
         require(fd['store'].resident_bytes<=budgets['maximum_matrix_bytes'] and
-                fd['store'].metrics['source_bytes']<=budgets['maximum_source_bytes'] and
                 fd['store'].metrics['largest_parent_bytes']<=budgets['maximum_parent_bytes'],'borrowed Feature budget incompatible')
         definition={'version':'axiom.stock_ml_batch_inputs/4' if compact else 'axiom.stock_ml_batch_inputs/3','feature_view':feature.to_dict(),
             'fold_specs':deepcopy(fold_specs),'preparation_options':options,'implementation_ref':_implementation(),
@@ -1064,7 +1063,6 @@ class _IncrementalPreparation:
                 require(self.readonly or column_source is not None,'shared public column source required for v5 preparation')
             self.width=len(self.spec['universe']);self.positions={d:i for i,d in enumerate(self.spec['feature_sessions'])}
             require(fd['store'].resident_bytes<=self.budgets['maximum_matrix_bytes'] and
-                fd['store'].metrics['source_bytes']<=self.budgets['maximum_source_bytes'] and
                 fd['store'].metrics['largest_parent_bytes']<=self.budgets['maximum_parent_bytes'],'borrowed Feature budget incompatible')
             self.definition={'version':'axiom.stock_ml_batch_inputs/4','feature_view':self.feature.to_dict(),
                 'fold_specs':deepcopy(fold_specs),'preparation_options':self.options,'implementation_ref':_implementation(),
@@ -1532,8 +1530,7 @@ def _load_compact_checkpoint_owner(path,*,feature_inputs=None):
         admission.limits=limits({'maximum_matrix_bytes':options['maximum_resident_bytes'],
             **{k:options[k] for k in ('maximum_source_bytes','maximum_parent_bytes') if k in options}})
         admission.reserve(0)
-        require(admission.metrics['source_bytes']<=admission.limits['maximum_source_bytes'] and
-            admission.metrics['largest_parent_bytes']<=admission.limits['maximum_parent_bytes'],'checkpoint plan byte budget exceeded')
+        require(admission.metrics['largest_parent_bytes']<=admission.limits['maximum_parent_bytes'],'checkpoint plan byte budget exceeded')
         saved=definition['feature_view']
         source=feature_inputs if feature_inputs is not None else Path(saved['source_index']['path']).parent
         selection=definition.get('model_feature_selection')

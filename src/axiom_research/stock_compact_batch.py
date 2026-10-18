@@ -535,8 +535,7 @@ class CompactState:
 
     def compatible(self,budgets):
         fd=_view_data(self.feature); fstore=fd['store']
-        require(fstore.metrics['source_bytes']+self.store.metrics['source_bytes']<=budgets['maximum_source_bytes'] and
-                self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes<=budgets['maximum_matrix_bytes'] and
+        require(self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes<=budgets['maximum_matrix_bytes'] and
                 max(fstore.metrics['largest_parent_bytes'],self.store.metrics['largest_parent_bytes'])<=budgets['maximum_parent_bytes'],
                 'admitted compact accounting exceeds requested budget')
         self.store.limits={k:min(v,budgets[k]) for k,v in self.store.limits.items()}
@@ -862,7 +861,6 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
                 'sequential Feature requires sequential batch residency')
         require(feature.to_dict()==expected,'compact Feature view exact identity/cutoff mismatch')
         require(fd['store'].resident_bytes<=budgets['maximum_matrix_bytes'] and
-                fd['store'].metrics['source_bytes']<=budgets['maximum_source_bytes'] and
                 fd['store'].metrics['largest_parent_bytes']<=budgets['maximum_parent_bytes'],
                 'borrowed Feature budget incompatible')
         store=publication_store or OwnedStore(budgets,resolver,shared_bytes=fd['store'].resident_bytes,
@@ -872,8 +870,6 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
             store.shared_bytes=max(store.shared_bytes,fd['store'].resident_bytes)
             store.shared_source_bytes=max(store.shared_source_bytes,fd['store'].metrics['source_bytes'])
             store.reserve(0)
-            require(store.shared_source_bytes+store.metrics['source_bytes']<=budgets['maximum_source_bytes'],
-                    'compact source byte budget exceeded')
         if resolver is not None: store.resolve=resolver
         store.check_hook=fd['store'].check
         columnar=manifest['contract_version']=='stock_ml_batch_inputs_v5'

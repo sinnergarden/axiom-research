@@ -210,10 +210,7 @@ class VerifiedMatrixStore(_EngineMatrixStore):
             require(self._coverage_verified[path]==(descriptor['file_digest'],mark[2],mark) and
                     self.fingerprints[path]==mark,'saved coverage source changed')
             return
-        if path not in self._hashes:
-            require(self.metrics['source_bytes']+mark[2]<=self.maximum_source_bytes,
-                    'matrix source byte budget exceeded')
-        else:
+        if path in self._hashes:
             require(self._hashes[path]==descriptor['file_digest'] and self.fingerprints[path]==mark,
                     'saved coverage source changed')
         base=self._native_caller_bytes(parent)

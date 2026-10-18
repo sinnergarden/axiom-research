@@ -36,7 +36,6 @@ def _owners(signals, owners, bindings, budget, retained=0, source_retained=0):
     with OwnedStore(budget, shared_bytes=resident+retained, shared_source_bytes=source+source_retained) as store:
         store.reserve(_size([s.batch for s in states.values()], maximum=store.maximum_matrix_bytes,
             retained=store.shared_bytes)*2+65536)
-        require(source+source_retained <= budget['maximum_source_bytes'], 'joint source byte budget exceeded')
         manifests = {ref: batch.to_dict() for ref, batch in owners.items()}
     consumed = {}
     for name, items in signals.items():
@@ -81,8 +80,6 @@ def _joint_owner(state, states, retained, budget, source_retained=0):
     local_charge = 0
     try:
         state._sync_shared(); state.store.reserve(0)
-        require(state.store.shared_source_bytes+state.store.metrics['source_bytes'] <=
-            state.store.limits['maximum_source_bytes'], 'joint source byte budget exceeded')
         def check(graph, workspace):
             nonlocal local_charge
             charge = _size(graph, maximum=budget['maximum_matrix_bytes'],
@@ -423,7 +420,7 @@ def _audit_multi_input(ref):
                 retained=ingress.resident_bytes+resident)*2+65536)
             remaining = {**budget,
                 'maximum_matrix_bytes':budget['maximum_matrix_bytes']-ingress.resident_bytes-resident,
-                'maximum_source_bytes':budget['maximum_source_bytes']-ingress.metrics['source_bytes']-source}
+                'maximum_source_bytes':budget['maximum_source_bytes']}
             require(all(v > 0 for v in remaining.values()), 'joint audit byte budget exceeded')
             owner = stack.enter_context(load_stock_ml_batch_inputs(manifest, residency='sequential', limits=remaining))
             state = _data(owner)['matrix_state']; states[owner_ref] = state; owners[owner_ref] = owner
@@ -434,8 +431,6 @@ def _audit_multi_input(ref):
             resident, source = _live(states)
             ingress.shared_bytes = resident; ingress.shared_source_bytes = source
             ingress.reserve(0)
-            require(source+ingress.metrics['source_bytes'] <= budget['maximum_source_bytes'],
-                'joint audit source byte budget exceeded')
         usage = {}
         admitted, records, epochs, manifests, labels = _admit_multi(
             {n:receipt['signal_inputs'][n] for n in root['signal_order']}, receipt['raw_label_input'],

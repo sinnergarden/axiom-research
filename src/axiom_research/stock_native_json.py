@@ -642,7 +642,6 @@ def make_native_carrier(root, value, ref_key, *, maximum_source_bytes, maximum_p
         if 'coverage' not in context:
             desc = existing[id(context)][1]
             unique[desc['buffer_digest']] = desc['shape'][0]
-            _require(sum(unique.values()) <= maximum_source_bytes, 'unique coverage source byte budget exceeded')
             budget.reserve(128+_graph_bytes(list(path)))
             slots.append({'path': list(path), 'bytes': desc})
             continue
@@ -658,12 +657,10 @@ def make_native_carrier(root, value, ref_key, *, maximum_source_bytes, maximum_p
                     budget.increment('coverage_encode_calls')
                     for chunk in _json_chunks(coverage, budget=budget, registry={}, path_resolver=None):
                         size += len(chunk)
-                        _require(size <= maximum_source_bytes, 'coverage source byte budget exceeded')
                         stream.write(chunk); h.update(chunk)
                         budget.increment('coverage_encode_bytes', len(chunk))
                 ref = 'sha256:'+h.hexdigest(); actual = buffers/(ref[7:]+'.bin')
                 unique[ref] = size
-                _require(sum(unique.values()) <= maximum_source_bytes, 'unique coverage source byte budget exceeded')
                 created = _publish(temporary, actual)
                 _require(actual.stat().st_size == size and _file_hash(actual, budget) == ref, 'published coverage bytes mismatch')
                 if created: budget.increment('created_coverage_source_bytes', size)
@@ -723,7 +720,7 @@ def _make_label_wire_carrier(root, value, ref_key, *, budget, registry,
     binding = registry.get(id(wire))
     if binding is not None and len(binding) == 3:
         desc = binding[1]
-        _require(desc['buffer_digest'] == ref and desc['shape'][0] <= maximum_source_bytes,
+        _require(desc['buffer_digest'] == ref,
                  'Label wire original content/source mismatch')
     else:
         temporary = None
@@ -733,7 +730,6 @@ def _make_label_wire_carrier(root, value, ref_key, *, budget, registry,
                 budget.increment('label_wire_encode_calls')
                 for chunk in _json_chunks(wire, budget=budget, registry=registry, path_resolver=path_resolver):
                     size += len(chunk)
-                    _require(size <= maximum_source_bytes, 'Label wire source byte budget exceeded')
                     stream.write(chunk); h.update(chunk)
                     budget.increment('label_wire_encode_bytes', len(chunk))
             _require('sha256:'+h.hexdigest() == ref, 'Label wire original child reference mismatch')
