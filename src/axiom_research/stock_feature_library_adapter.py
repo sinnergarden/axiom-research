@@ -322,6 +322,28 @@ class _NativeTrainingBlocks:
     def close(self):
         self.member_arrays.clear();self.library.close();self.member_store.close();self.members=None
 
+    def evaluation_sources(self, days, columns):
+        """Reuse the admitted native partitions and membership owner records."""
+        from axiom_engine.feature_library.coverage import partition_descriptor
+        from axiom_engine.feature_library.library import _partition_buffer_paths
+        self.check()
+        library=self.library; paths={library.descriptor['path']}
+        for day in days:
+            for column in columns:
+                for tile in library._tiles[day,column]:
+                    descriptor=partition_descriptor(tile['partition'])
+                    require(tile['partition']['partition_ref'] in library._loaded,
+                            'evaluation native Feature partition not admitted')
+                    part=library._parts[tile['partition']['partition_ref']]
+                    paths.add(descriptor['path']);paths.update(_partition_buffer_paths(part))
+                    wire=library._store.json[descriptor['path']]
+                    if 'path' in wire['core_header']:paths.add(wire['core_header']['path'])
+        records={};marks={}
+        for owner,chosen in ((library._store,paths),(self.member_store,self.member_store._hashes)):
+            for path in chosen:
+                records[path]=owner._hashes[path];marks[path]=owner.fingerprints[path]
+        return records,marks
+
     def admit(self, value, block, columns):
         import numpy as np
         from .stock_matrix_reader import _CompactRows

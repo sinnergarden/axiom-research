@@ -607,7 +607,12 @@ class CompactState:
             targets.append((descriptor,header,rows))
         feature_paths=set(fd['control_paths']); ordinals=set()
         for day in set(training+inference): ordinals.update(fd['day_admissions'][self.positions[day]])
-        for ordinal in ordinals:
+        native_records={};native_marks={}
+        if 'native' in fd:
+            columns=(fd['definition']['spec']['ordered_features'] if self.model_binding is None
+                     else self.model_binding['ordered_features'])
+            native_records,native_marks=fd['native'].evaluation_sources(set(training+inference),columns)
+        for ordinal in (() if 'native' in fd else ordinals):
             block=fd['blocks'][ordinal]
             if self.model_binding is None:
                 require(block['parts'] is not None,'evaluation Feature block not admitted')
@@ -623,7 +628,7 @@ class CompactState:
             for part in descriptors:
                 feature_paths.add(part['metadata']['path'])
                 feature_paths.update(d['path'] for d in part['buffers'].values())
-        records={}; marks={}
+        records=native_records; marks=native_marks
         for store,chosen in ((self.store,paths),(fd['store'],feature_paths)):
             for path in chosen:
                 require(path in store.hashes and path in store.marks,'evaluation source not admitted')
