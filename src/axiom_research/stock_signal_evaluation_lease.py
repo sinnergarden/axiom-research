@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 import os
+import sys
 
 from .stock_fold_inputs import require
 from .stock_compact_store import OwnedStore, _size, reference
@@ -63,15 +64,19 @@ class _FoldLease:
                 ('snapshot','pit_policy','calendar','universe',*(['target_spec'] if 'target_spec' in projection.common else []))},
                 'evaluation_targets':[{'descriptor':d,'header':h} for d,h,_ in targets],
                 'source_records':tuple(sorted(records.items())),'source_fingerprints':marks}
-            estimate=_size(metadata,maximum=store.maximum_matrix_bytes,
-                           retained=store.shared_bytes+store.resident_bytes+store.lease_bytes)
-            # Both source metadata and its detached public copy coexist briefly.
-            store.reserve(estimate*2+4096*(len(targets)+1))
-            value=deepcopy(metadata)
-            charge=_size(value)+4096*(len(targets)+1)
-            store.reserve(charge); store.lease_bytes+=charge; self._charge=charge
+            # Ingress owns the immutable documents; the active batch/projection
+            # owns target headers and common values. This lease borrows them.
+            # Charge only new containers, not a deep copy of already charged roots.
+            value=metadata
+            charge=sum(sys.getsizeof(item) for item in (
+                value,selected,value['common'],value['evaluation_targets'],
+                value['source_records'],marks,*value['evaluation_targets'],
+                *value['source_records']))
             for target,(_,_,rows) in zip(value['evaluation_targets'],targets):
                 view=_TargetRows(self,rows); self._rows.append(view); target['rows']=view
+                charge+=sys.getsizeof(view)
+            charge+=sys.getsizeof(self._rows)
+            store.reserve(charge); store.lease_bytes+=charge; self._charge=charge
             self._value=value; self._projection=projection
         except BaseException:
             self._value=None

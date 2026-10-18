@@ -102,11 +102,11 @@ class _BuildOOSWriter:
         self.metrics={'folds':0,'build_projection_borrows':0,'saved_oos_admissions':0,'shards':0,
                       'maximum_fold_rows':0,'retained_control_bytes':0}
         try:
-            self._manifest_charge=_size(self.manifest,maximum=self.state.store.maximum_matrix_bytes,
+            # _ready_manifest returns the batch-owned graph, not a new copy.
+            self._manifest_charge=0
+            initial=_size(self.scope,maximum=self.state.store.maximum_matrix_bytes,
                 retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes)
-            initial=self._manifest_charge+_size(self.scope,maximum=self.state.store.maximum_matrix_bytes,
-                retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes)
-            self._retain(initial+65536)
+            self._retain(initial)
             self.state._build_oos_borrowers=getattr(self.state,'_build_oos_borrowers',0)+1
             self.borrowed_owner=True
         except BaseException:
@@ -143,12 +143,8 @@ class _BuildOOSWriter:
             value=_data(self.batch)
             if value.get('incomplete',False) and len(value['manifest']['folds'])==len(self.manifest['folds']):return
             current=self.batch._ready_manifest()
-            charge=_size(current,maximum=self.state.store.maximum_matrix_bytes,
-                retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes)
-            self._retain(charge)
+            # Refresh the borrowed reference; its owner already charges it.
             self.manifest=current;current=None
-            self.state._fixed_shared_bytes-=self._manifest_charge;self.charge-=self._manifest_charge
-            self._manifest_charge=charge;self.state._sync_shared()
             self._manifest_pending=value.get('incomplete',False)
         finally:current=value=None
 
@@ -164,9 +160,7 @@ class _BuildOOSWriter:
             days=sorted(spec['inference_cutoff_by_session'])
             selected=[d for d in days if d in self.scope['sessions']]
             local={**self.scope,'sessions':selected}
-            # Current lease plus one detached OOS child coexist. No training matrix
-            # is included in this admission or the emitted date shards.
-            self.state.store.reserve(lease._charge*2+len(days)*len(lease.common['universe'])*16384+65536)
+            # Borrow the admitted fold; charge the actual retained delta below.
             admitted,records,marks,_=_admit_compact({self.name:[descriptor]},None,local,self.batch,
                 _borrowed_lease=lease,_manifest=self.manifest)
             raw=admitted['raw']
@@ -182,7 +176,7 @@ class _BuildOOSWriter:
                    new_records,{p:marks[Path(p)] for p in new_records},new_sources,new_lineages,
                    raw['label_shard_refs']]
             self._retain(_size(delta,maximum=self.state.store.maximum_matrix_bytes,
-                retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes)+65536)
+                retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes))
             for p,r in records.items():
                 require(p not in self.records or self.records[p]==r,'conflicting build OOS source pin')
                 require(Path(p) not in self.marks or self.marks[Path(p)]==marks[Path(p)],'build OOS source changed')
@@ -222,7 +216,8 @@ class _BuildOOSWriter:
             require(not self.state.incomplete,'complete checkpoint batch required before OOS publication')
             require(set(self.shards)==set(self.scope['sessions']),'complete build OOS date scope required')
             self._complete_owner_sources()
-            self.state.store.reserve(self.charge*4+len(self.scope['universe'])*16384+65536)
+            # Existing controls are already owned and charged; publication does
+            # not allocate four additional copies of the retained history.
             self.raw['sources']={r:self.raw['sources'][r] for r in sorted(self.raw['sources'])}
             self.raw['label_inputs']=[self.lineages[r] for r in sorted(self.lineages)]
             self.raw['label_ref']=_label_projection_ref(self.raw)

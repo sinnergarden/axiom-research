@@ -38,3 +38,13 @@ compares saved model/prediction output. No Feature generation or model fitting i
 needed. Execute once when the active long research run has released memory.
 
 Cumulative distinct source-file bytes remain telemetry, not a memory limit. The legacy maximum_source_bytes argument stays accepted for saved configuration compatibility; it does not cap published-input traversal or streaming publication. Actual matrix/workspace, parent-document and lease/residency limits remain enforced.
+
+Resource accounting measures ownership, not a second copy of the graph being
+measured. Object traversal no longer rejects reads using hypothetical per-object
+workspace multipliers. The OOS writer borrows the batch manifest; evaluation
+leases borrow immutable documents/target headers from their live owners and
+charge only their new containers. Leases and writer charges still release on
+context exit. Existing matrix/buffer allocation and retained-byte checks remain,
+and full runs require their process RSS/disk guard for actual physical usage.
+This bookkeeping change does not change preparation or model-definition source
+identities; existing complete folds remain eligible for exact builder HITs.

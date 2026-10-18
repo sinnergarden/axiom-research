@@ -449,30 +449,24 @@ class _CompactRows:
 
 
 def _bounded_resident_size(value, *, maximum, retained):
-    """Measure the complete live graph without an unbudgeted accounting set."""
+    """Measure object ownership; the allocating owner enforces its byte budget.
+
+    Callers also use this for already charged graphs and replacement deltas.
+    A traversal's visited-object set is not a second retained copy of that graph.
+    Do not reject an observation using per-object hypothetical workspace charges.
+    The existing owner reserve/allocation checks and external RSS guard remain.
+    """
     seen=set(); stack=[iter((value,))]; size=0
-    item=None
-    try:
-        while stack:
-            try: item=next(stack[-1])
-            except StopIteration:
-                stack.pop(); continue
-            if id(item) in seen: continue
-            amount=sys.getsizeof(item)
-            # Set growth can retain old/new tables. Reserve IDs/table slots and
-            # iterator headers before inserting into this temporary control graph.
-            require(retained()+size+amount+4096+256*(len(seen)+1)+512*(len(stack)+2)<=maximum,
-                    'matrix resident accounting workspace budget exceeded')
-            seen.add(id(item)); size+=amount
-            if type(item) is dict:
-                stack.append(iter(item.keys())); stack.append(iter(item.values()))
-            elif type(item) in (list,tuple,set): stack.append(iter(item))
-        require(retained()+size<=maximum,'matrix resident accounting workspace budget exceeded')
-        return size
-    except BaseException:
-        # Budget failure tracebacks must not retain a measured native payload.
-        stack.clear(); seen.clear(); value=item=None
-        raise
+    while stack:
+        try: item=next(stack[-1])
+        except StopIteration:
+            stack.pop(); continue
+        if id(item) in seen: continue
+        seen.add(id(item)); size+=sys.getsizeof(item)
+        if type(item) is dict:
+            stack.append(iter(item.keys())); stack.append(iter(item.values()))
+        elif type(item) in (list,tuple,set): stack.append(iter(item))
+    return size
 
 
 def _resident_size(value):
