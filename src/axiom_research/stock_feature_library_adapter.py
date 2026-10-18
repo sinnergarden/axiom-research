@@ -212,6 +212,7 @@ class _NativeTrainingBlocks:
     def __init__(self, library, members, member_store, wire):
         self.library=library;self.members=members;self.member_store=member_store;self.wire=wire
         self._operation_depth=0
+        self.partition_sources={}
         self.days={d:i for i,d in enumerate(wire['source_member_sessions'])}
         self.securities={s:i for i,s in enumerate(wire['source_member_securities'])}
         from .stock_feature_library import _SourceArrays
@@ -235,24 +236,50 @@ class _NativeTrainingBlocks:
             self.library.validate_boundary();self.member_store.check()
 
     def close(self):
+        self.partition_sources.clear()
         self.member_arrays.clear();self.library.close();self.member_store.close();self.members=None
+
+    def _project_day(self, keys, columns):
+        """Detach one day, retaining source pins rather than duplicate backing."""
+        from axiom_engine.feature_library.coverage import partition_descriptor
+        from axiom_engine.feature_library.library import _partition_buffer_paths
+        library=self.library;store=library._store
+        try:
+            cells=library.project(keys,columns=columns)
+            # project() returns bytes-backed arrays owned by its result. None
+            # of the source mmaps or decoded parent graphs are borrowed by it.
+            descriptors={tile['partition']['partition_ref']:partition_descriptor(tile['partition'])
+                for day in {day for _,day in keys} for column in columns
+                for tile in library._tiles[day,column]}
+            for ref in cells['partition_refs']:
+                part=library._parts[ref]
+                descriptor=descriptors[ref]
+                paths={descriptor['path'],*_partition_buffer_paths(part)}
+                wire=store.json[descriptor['path']]
+                if 'path' in wire['core_header']:paths.add(wire['core_header']['path'])
+                self.partition_sources[ref]=tuple(sorted(paths))
+            return cells
+        finally:
+            library._loaded.clear();library._parts.clear()
+            for array in store.arrays.values():
+                if hasattr(array,'_mmap'):array._mmap.close()
+            store.arrays.clear()
+            # Keep the selected view and immutable descriptor/hash/mark ledger.
+            # OOS provenance uses those pins without reopening historical data.
+            for path in list(store.json):
+                if path!=library.descriptor['path']:del store.json[path]
 
     def evaluation_sources(self, days, columns):
         """Reuse the admitted native partitions and membership owner records."""
-        from axiom_engine.feature_library.coverage import partition_descriptor
-        from axiom_engine.feature_library.library import _partition_buffer_paths
         self.check()
         library=self.library; paths={library.descriptor['path']}
         for day in days:
             for column in columns:
                 for tile in library._tiles[day,column]:
-                    descriptor=partition_descriptor(tile['partition'])
-                    require(tile['partition']['partition_ref'] in library._loaded,
+                    ref=tile['partition']['partition_ref']
+                    require(ref in self.partition_sources,
                             'evaluation native Feature partition not admitted')
-                    part=library._parts[tile['partition']['partition_ref']]
-                    paths.add(descriptor['path']);paths.update(_partition_buffer_paths(part))
-                    wire=library._store.json[descriptor['path']]
-                    if 'path' in wire['core_header']:paths.add(wire['core_header']['path'])
+                    paths.update(self.partition_sources[ref])
         records={};marks={}
         for owner,chosen in ((library._store,paths),(self.member_store,self.member_store._hashes)):
             for path in chosen:
@@ -271,7 +298,7 @@ class _NativeTrainingBlocks:
         owned=block.setdefault('native_columns',{})
         missing=[name for name in columns if name not in owned]
         if missing:
-            cells=self.library.project([(s,day) for s in securities],columns=missing)
+            cells=self._project_day([(s,day) for s in securities],missing)
             known=cells['available_at_utc_us']!=cells['null_available_at_utc_us']
             from .stock_matrix_storage import instant_us
             require(bool(np.isfinite(cells['values'][cells['validity']]).all()) and
