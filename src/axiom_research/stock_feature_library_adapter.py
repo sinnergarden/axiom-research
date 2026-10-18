@@ -501,6 +501,9 @@ def _load_native_training_view(descriptor,wire,store):
         from .stock_matrix_reader import VerifiedMatrixStore as MembershipStore
         member_store=MembershipStore(maximum_matrix_bytes=store.maximum_matrix_bytes,
                                         maximum_source_bytes=store.limits['maximum_source_bytes'])
+        # This native membership owner is private and retains immutable metadata.
+        # Reuse the existing ledger instead of walking its graph per legacy chunk.
+        member_store._begin_publication_accounting()
         original=member_store.read_json(definition['source'],'source_ref')
         require(wire['source_member_buffer']==original['buffers']['member'] and
                 wire['source_member_sessions']==original['spec']['read_sessions'] and

@@ -1053,6 +1053,8 @@ def iter_feature_eligibility(handle, offsets, *, model_feature_selection=None):
 def training_matrix(handle,offsets,cutoff,*,model_feature_selection=None):
     """Gather X in block batches, preserving the caller's exact row order."""
     import numpy as np
+    from time import perf_counter
+    started=perf_counter()
     value=_view_data(handle); spec=value['definition']['spec']; instant=instant_us(cutoff)
     binding=_model_feature_binding(value,model_feature_selection)
     columns=spec['ordered_features'] if binding is None else binding['ordered_features']
@@ -1093,7 +1095,9 @@ def training_matrix(handle,offsets,cutoff,*,model_feature_selection=None):
                 matrix[first:first+len(indexes),positions]=np.where(valid,values,np.nan)
                 value['store'].metrics['training_block_gathers']=value['store'].metrics.get('training_block_gathers',0)+1
         require(not bool(np.isinf(matrix).any()),'selected training Feature values cannot contain infinity')
-        matrix.flags.writeable=False; value['store'].check(); return matrix
+        matrix.flags.writeable=False; value['store'].check()
+        value['store'].metrics['training_matrix_seconds']=value['store'].metrics.get('training_matrix_seconds',0.0)+perf_counter()-started
+        return matrix
     except BaseException:
         matrix=indexes=arrays=rows=flags=maximum=block=cache=parts=None
         raise
