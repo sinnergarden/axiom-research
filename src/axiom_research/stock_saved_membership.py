@@ -90,7 +90,7 @@ class LegacyMembershipMasks:
         index=self.by_row[position];chunk=self.manifest['chunks'][index]
         desc=chunk['evidence'][-1]
         if self.cached!=index:
-            _physical(desc,self.store);child=_saved_json(desc,'evidence_ref',self.store)
+            child=self.store.read_json(desc,'evidence_ref')
             spec=self.manifest['spec'];begin,end=self.spans[index]
             require(child['sessions']==chunk['sessions']==spec['read_sessions'][begin:end],
                     'legacy membership chunk alignment mismatch')

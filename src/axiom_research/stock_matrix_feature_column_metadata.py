@@ -67,6 +67,7 @@ def _physical(desc, store):
     require(not physical.is_symlink(),'fixed column source file required')
     if store is not None:
         store._register(desc)
+        require(store._hash_once(desc['path'])==desc['file_digest'], 'column source file digest mismatch')
     else:
         mark=file_fingerprint(desc['path'])
         require(file_digest(desc['path'])==desc['file_digest'] and

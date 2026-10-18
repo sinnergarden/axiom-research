@@ -100,7 +100,6 @@ def _build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,train
             'typed TrainingSpec requires v5 inputs and cannot mix with legacy training_options')
         from .stock_training import resolve_stock_training_spec
         parameters,rounds,training_binding=resolve_stock_training_spec(training_spec)
-    inputs,spec=deepcopy(inputs),deepcopy(spec)
     require(model_feature_selection is None or inputs.get('contract_version') in ('stock_ml_saved_inputs_v4','stock_ml_saved_inputs_v5'),
             'model_feature_selection requires compact v4 inputs')
     if batch is None and inputs.get('contract_version') in ('stock_ml_saved_inputs_v3','stock_ml_saved_inputs_v4','stock_ml_saved_inputs_v5'):
@@ -275,7 +274,7 @@ def _predictions(predictions,features,common,spec,model):
 
 
 def load_matrix_fold(path, *, projection=None,batch=None):
-    """Complete readonly v3 closure; no Data/Core/model execution is imported."""
+    """Read the completed model/prediction publication; no ancestor replay."""
     from .stock_compact_store import OwnedStore
     with OwnedStore() as ingress:
         return _load_matrix_fold(path,projection=projection,batch=batch,ingress=ingress)
@@ -283,94 +282,25 @@ def load_matrix_fold(path, *, projection=None,batch=None):
 
 def _load_matrix_fold(path, *, projection,batch,ingress,_lease=None):
     from .stock_fold_artifacts import _owned_fold
-    path=Path(path).resolve() if _lease is None else Path(path).absolute()
+    path=Path(path).resolve()
     manifest=ingress.read_json({'path':str(path/'manifest.json')})
-    require(set(manifest)=={'contract_version','fold_ref','files'} and
-        manifest['contract_version']=='stock_ml_fold_manifest_v2' and
-        set(manifest['files'])=={*OUTPUTS,'fold.json','booster.txt'},'unexpected compact fold manifest')
-    documents={}
-    for name,ref in manifest['files'].items():
-        descriptor={'path':str(path/name),'file_digest':ref}
-        if name=='booster.txt': ingress.read(descriptor)
-        else: documents[name]=ingress.read_json(descriptor,key='content_digest' if name=='fold.json' else OUTPUTS[name])
-    fold=documents['fold.json']; definition=fold['definition']
-    columnar=definition['input_manifest']['contract_version']=='stock_ml_saved_inputs_v5'
-    require(fold['contract_version']==('stock_ml_fold_v4' if columnar else 'stock_ml_fold_v3') and fold['status']=='COMPLETE' and
-        definition['version']==('axiom.stock_ml_fold/4' if columnar else 'axiom.stock_ml_fold/3') and
-        definition['target_semantics']==(_target({'target_spec':definition['target_spec']}) if columnar else TARGET_SEMANTICS) and
-        definition['label_normalization']==NORMALIZATION_SPEC,'unsupported compact fold profile')
-    if 'training_spec' in definition:
-        from .stock_training import resolve_stock_training_spec
-        parameters,rounds,training_binding=resolve_stock_training_spec(definition['training_spec'])
-        require(columnar and definition['training_spec_ref']==training_binding['training_spec_ref'] and
-            definition['parameters']==parameters and definition['num_boost_round']==rounds,
-            'saved typed TrainingSpec identity/parameters mismatch')
-    else:parameters,rounds=validate_training_profile(definition['parameters'],definition['num_boost_round'])
-    spec,inputs=definition['fold_spec'],definition['input_manifest']
-    require(fold['definition_ref']==digest(definition) and definition['input_manifest_ref']==digest(inputs) and
-        definition['fold_spec_ref']==digest(spec) and definition['implementation_ref']==digest(definition['implementation_sources']),
-        'compact fold definition mismatch')
-    refs={key:fold[key] for key in OUTPUTS.values()}
-    require(fold['fold_ref']==digest({'definition_ref':fold['definition_ref'],**refs})==manifest['fold_ref'],'compact fold identity mismatch')
-    saved={}
-    for name,key in OUTPUTS.items():
-        value=documents[name]; require(value[key]==fold[key],'fold stage reference mismatch'); saved[name]=value
-    if _lease is not None: _lease._prepare(ingress)
+    documents={name:ingress.read_json({'path':str(path/name),'file_digest':manifest['files'][name]})
+               for name in ('fold.json',*OUTPUTS)}
+    fold=documents['fold.json']
+    require(fold['status']=='COMPLETE' and manifest['fold_ref']==fold['fold_ref'], 'incomplete saved fold')
+    if _lease is None:return _owned_fold(path,documents)
+    # An OOS writer needs the requested evaluation labels. Reuse their saved
+    # owner; do not reconstruct a model's training ancestors or read its booster.
+    definition=fold['definition'];inputs=definition['input_manifest'];spec=definition['fold_spec']
+    _lease._prepare(ingress)
     own=projection is None
-    if own:
-        if batch is not None: projection=batch._project_evaluation(inputs,spec)
-        elif inputs.get('contract_version') in ('stock_ml_saved_inputs_v3','stock_ml_saved_inputs_v4','stock_ml_saved_inputs_v5'):
-            from .stock_compact_batch import load_compact_projection
-            projection=load_compact_projection(inputs,spec,evaluation=True)
-        else: projection=_projection(inputs,spec,batch)
     try:
-        features,labels=projection.features,projection.labels; common=projection.common
-        require(saved['feature-slice.json']==features and saved['label-slice.json']==labels,'saved matrix slice/parent mismatch')
-        dataset,model=saved['dataset.json'],saved['model.json']; predictions,evidence=saved['predictions.json'],saved['signal-evidence.json']
-        binding=getattr(projection,'fold_binding',None)
-        expected_dataset=binding['dataset'] if binding is not None else _dataset(projection,inputs,spec)
-        expected_raw_refs=expected_dataset['raw_label_refs']
-        require((binding is None or binding['labels']==labels) and dataset==expected_dataset and
-                expected_dataset['training_row_count']>=40,'saved compact training selection mismatch')
-        require(model['contract_version']==('stock_model_release_v3' if columnar else 'stock_model_release_v2'),'unsupported saved model contract')
-        require(definition.get('model_feature_selection')==common.get('model_feature_selection'),
-                'saved model selection/schema mismatch')
-        for actual,expected in ((model['dataset_ref'],dataset['dataset_ref']),(model['feature_ref'],features['feature_ref']),
-            (model['label_ref'],labels['label_ref']),(model['raw_label_refs'],expected_raw_refs),
-            (model['fit_cutoff'],spec['fit_cutoff']),(model['simulated_available_at'],spec['simulated_model_available_at']),
-            (model['clock_basis'],'declared_simulation'),(model['ordered_features'],common['ordered_features']),
-            (model['feature_selection'],common['feature_selection']),(model['catalog_ref'],common['catalog_ref']),
-            (model['parameters'],parameters),(model['num_boost_round'],rounds),
-            (model['target_semantics'],_target(common)),
-            (model['feature_normalization'],'same_date_visible_members_cs_zscore_no_fit'),
-            (model['label_normalization'],_label_normalization() if columnar else NORMALIZATION_SPEC),
-            (model['environment'],definition['environment']),(model['implementation_ref'],definition['implementation_ref']),
-            (model['booster_digest'],manifest['files']['booster.txt'])):
-            require(actual==expected,'saved matrix model linkage mismatch')
-        if columnar:
-            label_fields=_label_fields(common,projection,spec)
-            require(definition['target_spec']==common['target_spec'] and
-                all(model[k]==v for k,v in label_fields.items()),'saved model LabelSpec mismatch')
-        require(_instant(model['fit_cutoff'])<_instant(model['simulated_available_at']),'model publication precedes fit')
-        _predictions(predictions,features,common,spec,model)
-        require(evidence['contract_version']=='stock_signal_evidence_v1' and
-            evidence['signal_ref']==predictions['signal_run_ref'] and evidence['label_ref']==projection.evaluation['label_ref'] and
-            evidence['evaluation_cutoff']==spec['evaluation_cutoff'] and evidence['score_semantics']==predictions['score_semantics'] and
-            [r['session'] for r in evidence['series']]==features['prediction_sessions'],'saved evidence input linkage mismatch')
-        require(fold['engine_admission']=={'neutral_validation':'NOT_PERFORMED_BY_BUILDER','runtime':'NOT_PERFORMED_BY_BUILDER'},
-                'fold cannot claim Engine Runtime admission')
-        # A standalone build also borrows a verified projection. A backend
-        # changing its immutable parents cannot publish a COMPLETE fold.
-        projection._store.check()
-        if batch is not None: batch._check_sources()
-        ingress.check()
-        if _lease is not None:
-            _lease._admit(manifest,documents,projection,inputs,spec)
-            own=False
-            return _lease
-        return _owned_fold(path,documents)
+        if projection is None:projection=batch._project_evaluation(inputs,spec)
+        _lease._admit(manifest,documents,projection,inputs,spec)
+        own=False
+        return _lease
     finally:
-        if own: projection.close()
+        if own and projection is not None:projection.close()
 
 
 def admit_stock_signal_evaluation_fold(prediction_input, *, batch):

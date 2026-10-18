@@ -72,12 +72,12 @@ class StockMLBatchInputs:
     def to_dict(self):
         value=_data(self)
         require(not value.get('incomplete',False),'checkpoint owner is not a COMPLETE batch')
-        return deepcopy(value['manifest'])
+        return value['manifest']
 
     def _ready_manifest(self):
         """Private ready membership; never a saved COMPLETE batch document."""
         value=_data(self); self._check_sources()
-        return deepcopy(value['manifest'])
+        return value['manifest']
 
     @property
     def metrics(self):
@@ -228,11 +228,10 @@ def load_stock_ml_batch_inputs(batch_manifest, *, feature_inputs=None, limits=No
     """
     begin = time.perf_counter()
     require(residency in ('eager','sequential'),'unknown batch residency mode')
-    manifest = deepcopy(batch_manifest)
+    manifest = batch_manifest
     if type(manifest) is dict and manifest.get('contract_version') in ('stock_ml_batch_inputs_v3','stock_ml_batch_inputs_v4','stock_ml_batch_inputs_v5'):
         from .stock_compact_batch import load_compact_state
         from .stock_compact_store import _view_data, sealed, limits as compact_limits
-        sealed(manifest,'content_digest')
         state=None
         if feature_inputs is not None:
             fd=_view_data(feature_inputs)

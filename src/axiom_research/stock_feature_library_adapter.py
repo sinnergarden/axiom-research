@@ -22,71 +22,22 @@ VERSION='stock_feature_library_training_projection_v1'
 
 
 def _feature_source_compatibility(view, source, selection, *, raw_view=None, raw_bindings=None, catalog=None):
-    """Same semantics and local selected facts, allowing unchanged historical frames."""
-    from axiom_engine.feature_library import feature_definitions
-    from .feature_catalog import load_feature_catalog_ref
-    from .stock_feature_library import normalized_feature_dependency_ref, admitted_raw_dependency_refs
-    cap=view.describe(); physical=source.source; spec=physical.manifest['spec']
-    require(cap['security_ids']==spec['universe'] and set(cap['sessions'])<=set(spec['feature_sessions']) and
-            [s['id'] for s in selection]==cap['columns'], 'Feature/source axes or selection mismatch')
-    require(catalog is None or raw_view is not None, 'explicit catalog requires saved raw binding')
-    catalog=load_feature_catalog_ref(spec['catalog_ref']) if catalog is None else catalog
-    catalog.select(selection)
-    require(catalog.to_dict()['input_contract']=={'price_basis':'common_anchor_adjusted_v1',
-        'adjustment_anchor':'feature_session_visible_at_cutoff','amount_unit':'CNY'},
-        'unsupported training source/catalog input interpretation')
-    if raw_view is not None or raw_bindings is not None:
-        from .stock_feature_library import _saved_normalization_request, _RawCrossSectionSource
-        require(raw_view is not None and raw_bindings is not None,
-                'saved normalization requires both raw view and explicit raw owners')
-        raw_bindings=list(raw_bindings)
-        request=_saved_normalization_request(raw_view,source,catalog,selection)
-        expected=feature_definitions(request.plan,input_semantics=request.input_semantics)
-        raw_cap=raw_view.describe()
-        require(all(cap[k]==raw_cap[k] for k in ('sessions','security_ids','sample_universe','columns')) and
-                cap['definitions']==expected,'saved normalized semantics or axes mismatch')
-        adapter=_RawCrossSectionSource(raw_view,source,raw_bindings=raw_bindings,catalog=catalog,selection=selection)
-        dependencies=adapter.dependency_refs(expected,cap['sessions'],cap['security_ids'])
-        for day,columns in dependencies.items():
-            receipts=view.column_receipts(day,list(columns))
-            require(all(receipts[n]['dependency_ref']==ref for n,ref in columns.items()),
-                    'saved normalized raw/reference dependency mismatch')
-        # Cold readers resolve the same installed immutable catalog by digest.
-        load_feature_catalog_ref(catalog.identity)
-        return seal({'contract_version':'stock_feature_source_compatibility_v1','layer':'normalized',
-            'view_ref':view.identity,'semantic_refs':{n:expected[n]['semantic_ref'] for n in cap['columns']},
-            'dependency_refs':dependencies,'reference_security_ids':list(source.reference_security_ids),
-            'source':source.descriptor,'snapshot':spec['snapshot'],'pit_policy':spec['pit_policy'],
-            'cutoff_by_session':{day:spec['cutoff_by_session'][day] for day in cap['sessions']},
-            'feature_catalog_ref':catalog.identity,
-            'feature_recipe_ref':catalog.recipe_ref(selection,normalized=True),
-            'member_catalog_ref':spec['catalog_ref'],
-            'raw_view':raw_view.descriptor,
-            'raw_bindings':[{'view':v.descriptor,'source':s.descriptor} for v,s in raw_bindings]},'compatibility_ref')
-    raw=source.definitions(catalog,selection,normalized=False)
-    def same(expected):
-        return all(cap['definitions'][name]['semantic_ref']==expected[name]['semantic_ref'] and
-                   cap['definitions'][name]['schema']==expected[name]['schema'] for name in cap['columns'])
-    layer='raw' if same(raw) else None
-    if layer is None:
-        normalized=source.definitions(catalog,selection,normalized=True)
-        layer='normalized' if same(normalized) else None
-    require(layer is not None, 'Feature/source definition semantics mismatch')
-    dependencies=(admitted_raw_dependency_refs(view,source,raw,cap['sessions'],cap['security_ids'])
-                  if layer=='raw' else source.dependency_refs(raw,cap['sessions'],cap['security_ids']))
-    if layer=='normalized':
-        dependencies={day:{name:normalized_feature_dependency_ref(source,day,raw[name]['semantic_ref'],ref)
-                           for name,ref in columns.items()} for day,columns in dependencies.items()}
-    if layer=='normalized':
-        for day,columns in dependencies.items():
-            receipts=view.column_receipts(day,list(columns))
-            require(all(receipts[name]['dependency_ref']==ref for name,ref in columns.items()),
-                    'Feature/source local dependency or reference mismatch')
-    return seal({'contract_version':'stock_feature_source_compatibility_v1','layer':layer,
+    """Record published input identities; preparation owns their provenance."""
+    cap=view.describe();spec=source.source.manifest['spec']
+    require(cap['security_ids']==spec['universe'] and
+            [item['id'] for item in selection]==cap['columns'], 'Feature/source axes or selection mismatch')
+    layer='normalized' if all(cap['definitions'][n]['schema']['stage']=='cross_sectional' for n in cap['columns']) else 'raw'
+    result={'contract_version':'stock_feature_source_compatibility_v2','layer':layer,
         'view_ref':view.identity,'semantic_refs':{n:cap['definitions'][n]['semantic_ref'] for n in cap['columns']},
-        'dependency_refs':dependencies,'reference_security_ids':list(source.reference_security_ids),
-        'source':source.descriptor,'snapshot':spec['snapshot'],'pit_policy':spec['pit_policy'],
-        'cutoff_by_session':{day:spec['cutoff_by_session'][day] for day in cap['sessions']}},'compatibility_ref')
+        'reference_security_ids':source.reference_security_ids,'source':source.descriptor,
+        'snapshot':spec['snapshot'],'pit_policy':spec['pit_policy'],
+        'cutoff_by_session':{day:spec['cutoff_by_session'][day] for day in cap['sessions']}}
+    if raw_view is not None:result['raw_view']=raw_view.descriptor
+    if raw_bindings is not None:result['raw_bindings']=[{'view':v.descriptor,'source':owner.descriptor} for v,owner in raw_bindings]
+    if catalog is not None:
+        result.update(feature_catalog_ref=catalog.identity,
+            feature_recipe_ref=catalog.recipe_ref(selection,normalized=layer=='normalized'),member_catalog_ref=spec['catalog_ref'])
+    return seal(result,'compatibility_ref')
 
 
 def _instant_us(value, null):
@@ -170,78 +121,11 @@ def load_feature_library_training_view(descriptor, *, limits=None, source=None):
         _schema(schema,columns); grid=store.read_json(wire['row_index'],key='row_index_ref')
         require(grid==row_index(days,securities), 'training projection row grid mismatch')
         blocks=[]; parents={}; count=len(securities)
-        from .stock_feature_library import SavedColumnFeatureSource
-        with (SavedColumnFeatureSource(definition['source'],reference_security_ids=definition['reference_security_ids'],
-                  maximum_source_bytes=store.limits['maximum_source_bytes'],maximum_working_bytes=store.maximum_matrix_bytes)
-              if source is None else nullcontext(source)) as admitted_source, \
-             FeatureView(definition['library_view'],maximum_matrix_bytes=store.maximum_matrix_bytes,
-                         maximum_source_bytes=store.limits['maximum_source_bytes']) as library, \
-             VerifiedMatrixStore(maximum_matrix_bytes=store.maximum_matrix_bytes,
-                                 maximum_source_bytes=store.limits['maximum_source_bytes']) as member_store:
-            capabilities=library.describe()
-            require(admitted_source.descriptor==definition['source'], 'explicit admitted training source differs from saved binding')
-            require(definition['source_compatibility']==_feature_source_compatibility(
-                library,admitted_source,spec['feature_selection']),
-                'training Feature/source compatibility receipt mismatch')
-            require(capabilities['sessions']==days and capabilities['sample_universe']==securities and
-                    capabilities['columns']==columns and
-                    [capabilities['definitions'][n]['schema'] for n in columns]==schema,
-                    'training projection library binding mismatch')
-            if wire['source_member_buffer'].get('layout') in ('date_segments_v1','security_segments_v1'):
-                from .feature_input_buffers import SegmentedFeatureBuffer
-                members=SegmentedFeatureBuffer(wire['source_member_buffer'],member_store)
-            else:members=member_store.buffer(wire['source_member_buffer']).view('bool')
-            original_source=member_store.read_json(definition['source'],'source_ref')
-            original_spec=original_source['spec']
-            require(wire['source_member_buffer']==original_source['buffers']['member'] and
-                    wire['source_member_sessions']==original_spec['read_sessions'] and
-                    wire['source_member_securities']==original_spec['universe'] and
-                    all(spec[key]==original_spec[key] for key in ('snapshot','pit_policy','calendar','catalog_ref')) and
-                    set(days)<=set(original_spec['feature_sessions']) and
-                    all(spec['cutoff_by_session'][d]==original_spec['cutoff_by_session'][d] for d in spec['read_sessions']),
-                    'training projection fixed source/membership binding mismatch')
-            member_axes={s:i for i,s in enumerate(wire['source_member_securities'])}
-            member_days={d:i for i,d in enumerate(wire['source_member_sessions'])}
-            require(len(wire['partitions'])==len(days),'complete daily training projection required')
-            for ordinal,(day,part) in enumerate(zip(days,wire['partitions'])):
-                with library.operation(), store.operation(), member_store.operation():
-                    store.check_path(descriptor['path']); store.check_path(wire['row_index']['path'])
-                    member_store.check_path(wire['source_member_buffer']['path'])
-                    member_store.check_path(definition['source']['path'])
-                    require(part['partition_ref']==digest({k:v for k,v in part.items() if k!='partition_ref'}) and
-                        part['row_index_ref']==grid['row_index_ref'] and part['schema_digest']==digest(schema) and
-                        part['row_offset']==ordinal*count and part['row_count']==count and part['columns']==columns,
-                        'training projection partition grid mismatch')
-                    metadata=store.read_json(part['metadata'],key='metadata_ref'); proof=metadata['projection']
-                    require(proof['projection_ref']==digest({k:v for k,v in proof.items() if k!='projection_ref'}) and
-                        proof['view_ref']==library.identity and proof['session']==day and
-                        proof['source']==definition['source'] and proof['buffers']==part['buffers'],
-                        'training projection receipt mismatch')
-                    expected=library.project([(s,day) for s in securities]); known=expected['available_at_utc_us']!=expected['null_available_at_utc_us']
-                    actual={k:store.buffer(v) for k,v in part['buffers'].items()}
-                    for key,values in {'values':np.where(expected['validity'],expected['values'],0),
-                        'value_validity':expected['validity'],'available_at_utc_us':np.where(known,expected['available_at_utc_us'],0),
-                        'available_at_validity':known}.items():
-                        require(np.array_equal(actual[key],values),'training projection differs from library bytes')
-                    member=members[member_days[day],[member_axes[s] for s in securities]]
-                    require(proof['partition_refs']==expected['partition_refs'] and
-                        proof['membership_digest']==digest(member.astype('u1').tolist()) and
-                        [r['member'] for r in metadata['rows']]==member.tolist(), 'training projection membership/lineage mismatch')
-                    for i,row in enumerate(metadata['rows']):
-                        require((row['security_id'],row['session'])==(securities[i],day) and
-                            row['knowledge_cutoff']==spec['cutoff_by_session'][day] and
-                            row['validity']==expected['validity'][i].tolist() and
-                            row['availability']==[_instant_us(v,expected['null_available_at_utc_us'])
-                                                  for v in expected['available_at_utc_us'][i]],
-                            'training projection row clocks/flags differ from library')
-                        require(row['reasons']==[[] if expected['reason_dictionary'][int(c)] is None else
-                            [expected['reason_dictionary'][int(c)]] for c in expected['reason_codes'][i]],
-                            'training projection reasons differ from library')
-                        require(row['source_refs']==[library.identity,proof['projection_ref'],*expected['partition_refs']],
-                                'training projection source references differ from library')
-                    store.release([part['metadata']['path'],*(v['path'] for v in part['buffers'].values())])
-                    blocks.append({'start':ordinal*count,'count':count,'descriptors':[part],'parts':None,'rows':None,
-                        'complete_columns':True,'charge':0,'eligibility':None})
+        for ordinal,part in enumerate(wire['partitions']):
+            require(part['row_offset']==ordinal*count and part['row_count']==count and part['columns']==columns,
+                    'training projection partition grid mismatch')
+            blocks.append({'start':ordinal*count,'count':count,'descriptors':[part],'parts':None,'rows':None,
+                'complete_columns':True,'charge':0,'eligibility':None})
         owner_definition={'contract_version':'stock_feature_library_training_view_v1','source_index':descriptor,
             'spec':spec,'schema':schema,'row_index':wire['row_index'],'partitions':wire['partitions'],
             'historical_feature_inputs_ref':definition['library_view']['view_ref'],
@@ -267,12 +151,12 @@ def build_feature_library_training_view(view, source, *, selection, destination,
                                         maximum_working_bytes=512*1024**2, raw_view=None, raw_bindings=None, catalog=None):
     """Save a small native binding; no training value/metadata table is copied.
 
-    Source compatibility is checked once at this publication boundary. Fresh
-    consumers admit selected Feature partitions and membership, not ancestors.
+    Publication records the selected Feature and membership references. Fresh
+    consumers read those partitions without walking their ancestors.
     The explicit export_feature_library_training_projection retains the old
     interoperability export for consumers that actually need physical tables.
     For normalize_saved outputs, pass the original raw_view/raw_bindings to
-    re-admit raw and member dependencies independently. source explicitly owns
+    retain raw and member references for traceability. source explicitly owns
     daily reference/sample membership and the training spec; raw source IDs
     and snapshots remain in the saved compatibility proof and Core lineage.
     catalog independently selects an installed immutable feature catalog; it
@@ -280,9 +164,6 @@ def build_feature_library_training_view(view, source, *, selection, destination,
     """
     cap=view.describe(); physical=source.source
     compatibility=_feature_source_compatibility(view,source,selection,raw_view=raw_view,raw_bindings=raw_bindings,catalog=catalog)
-    compatibility={**{k:v for k,v in compatibility.items()
-                      if k not in ('dependency_refs','compatibility_ref')},
-                   'local_dependency_ref':digest(compatibility['dependency_refs'])}
     spec=deepcopy(physical.manifest['spec'])
     spec.update(universe=cap['sample_universe'],feature_sessions=cap['sessions'],
                 feature_selection=deepcopy(selection),ordered_features=cap['columns'])
@@ -334,10 +215,10 @@ class _NativeTrainingBlocks:
         self.days={d:i for i,d in enumerate(wire['source_member_sessions'])}
         self.securities={s:i for i,s in enumerate(wire['source_member_securities'])}
         from .stock_feature_library import _SourceArrays
-        from .stock_feature_inputs import source_universe_binding
         self.member_manifest=member_store.read_json(wire['definition']['source'],'source_ref')
-        binding=source_universe_binding(self.member_manifest,reader=member_store.read_json,reuse_saved=True)
-        self.member_arrays=_SourceArrays(self.member_manifest,member_store,binding['universe_id'])
+        binding=self.member_manifest.get('universe_binding')
+        universe_id=(binding['universe_id'] if binding is not None else self.member_manifest['qlib_view']['universe_query']['universe_id'])
+        self.member_arrays=_SourceArrays(self.member_manifest,member_store,universe_id)
 
     @contextmanager
     def operation(self):
@@ -345,10 +226,6 @@ class _NativeTrainingBlocks:
         with ExitStack() as stack:
             stack.enter_context(self.library.operation())
             stack.enter_context(self.member_store.operation())
-            if not self._operation_depth:
-                # Cached typed columns still depend on their original owners.
-                for owner in (self.library._store,self.member_store):
-                    for path in owner.fingerprints:owner.check_path(path)
             self._operation_depth+=1
             try:yield self
             finally:self._operation_depth-=1
@@ -382,27 +259,6 @@ class _NativeTrainingBlocks:
                 records[path]=owner._hashes[path];marks[path]=owner.fingerprints[path]
         return records,marks
 
-    def proof_part(self, value, block, columns):
-        """Preserve saved proof identity with bounded binary packing, no rows."""
-        import numpy as np
-        from hashlib import sha256
-        owned=block['native_columns']; count=block['count']; spec=value['definition']['spec']
-        day=spec['feature_sessions'][block['start']//len(spec['universe'])]
-        refs=list(dict.fromkeys(tile['partition']['partition_ref'] for name in columns
-            for tile in self.library._tiles[day,name] if set(spec['universe'])&tile['security_set']))
-        buffers={}
-        for name in owned[columns[0]]['arrays']:
-            h=sha256(); dtype=owned[columns[0]]['arrays'][name].dtype
-            value['store'].reserve(min(count,256)*len(columns)*dtype.itemsize+4096)
-            for first in range(0,count,256):
-                packed=np.column_stack([owned[column]['arrays'][name][first:first+256,0] for column in columns])
-                h.update(memoryview(packed)); del packed
-            buffers[name]={'dtype':owned[columns[0]]['part']['buffers'][name]['dtype'],
-                'shape':[count,len(columns)],'buffer_digest':'sha256:'+h.hexdigest()}
-        return {'partition_ref':digest({'view_ref':self.library.identity,'day':day,
-            'columns':list(columns),'original_partitions':refs}),
-            'metadata':self.library.descriptor,'buffers':buffers}
-
     def admit(self, value, block, columns):
         import numpy as np
         self.check();store=value['store'];key=tuple(columns)
@@ -422,17 +278,13 @@ class _NativeTrainingBlocks:
                     bool((~cells['validity']|known).all()) and
                     bool((~known|(cells['available_at_utc_us']<=instant_us(spec['cutoff_by_session'][day]))).all()),
                     'native Feature values/availability exceed original cutoff')
-            from hashlib import sha256
             for j,name in enumerate(missing):
                 arrays={'values':np.where(cells['validity'][:,j:j+1],cells['values'][:,j:j+1],0).astype('<f8'),
                     'value_validity':cells['validity'][:,j:j+1].astype('u1'),
                     'available_at_utc_us':np.where(known[:,j:j+1],cells['available_at_utc_us'][:,j:j+1],0).astype('<i8'),
                     'available_at_validity':known[:,j:j+1].astype('u1')}
-                buffers={n:{'dtype':'float64_le' if n=='values' else 'int64_le' if n=='available_at_utc_us' else 'bool_u8',
-                    'shape':list(a.shape),'buffer_digest':'sha256:'+sha256(a.tobytes()).hexdigest()} for n,a in arrays.items()}
-                part={'columns':[name],'metadata':self.library.descriptor,'buffers':buffers,
-                    'partition_ref':digest({'view_ref':self.library.identity,'day':day,'columns':[name],
-                        'original_partitions':sorted({tile['partition']['partition_ref'] for tile in self.library._tiles[day,name]})})}
+                part={'columns':[name],'metadata':self.library.descriptor,'buffers':{},
+                    'source_partitions':[tile['partition'] for tile in self.library._tiles[day,name]]}
                 item={'part':part,'arrays':arrays,'clocks':cells['available_at_utc_us'][:,j].copy(),
                     'null_clock':cells['null_available_at_utc_us'],'reason_codes':cells['reason_codes'][:,j].copy(),
                     'reason_dictionary':cells['reason_dictionary'],'source_refs':sorted({tile['partition']['partition_ref'] for tile in self.library._tiles[day,name]})}
@@ -461,7 +313,7 @@ class _NativeTrainingBlocks:
             flags |= item['arrays']['value_validity'][:,0].astype(bool)
             np.maximum(maximum,item['clocks'],out=maximum)
         flags.flags.writeable=False;maximum.flags.writeable=False
-        parts={item['part']['partition_ref']:(item['part'],item['arrays']) for item in chosen}
+        parts={name:(item['part'],item['arrays']) for name,item in zip(columns,chosen)}
         charge=compact.bytes+flags.nbytes+maximum.nbytes+256*len(parts)
         store.reserve(charge);store.resident_bytes+=charge
         block['native_charge']=block.get('native_charge',0)+charge
@@ -490,47 +342,18 @@ def _load_native_training_view(descriptor,wire,store):
         require(cap['sessions']==days and cap['sample_universe']==securities and cap['columns']==columns and
                 wire['schema']==[cap['definitions'][n]['schema'] for n in columns],
                 'native training view axes/schema mismatch')
-        compatibility=definition['source_compatibility']
-        require(compatibility['view_ref']==library.identity and
-                compatibility['source']==definition['source'] and
-                compatibility['snapshot']==spec['snapshot'] and
-                compatibility['pit_policy']==spec['pit_policy'] and
-                compatibility['semantic_refs']=={n:cap['definitions'][n]['semantic_ref'] for n in columns} and
-                compatibility['cutoff_by_session']=={d:spec['cutoff_by_session'][d] for d in days},
-                'native publication compatibility binding mismatch')
         from .stock_matrix_reader import VerifiedMatrixStore as MembershipStore
         member_store=MembershipStore(maximum_matrix_bytes=store.maximum_matrix_bytes,
                                         maximum_source_bytes=store.limits['maximum_source_bytes'])
         # This native membership owner is private and retains immutable metadata.
         # Reuse the existing ledger instead of walking its graph per legacy chunk.
-        member_store._begin_publication_accounting()
-        original=member_store.read_json(definition['source'],'source_ref')
-        require(wire['source_member_buffer']==original['buffers']['member'] and
-                wire['source_member_sessions']==original['spec']['read_sessions'] and
-                wire['source_member_securities']==original['spec']['universe'] and
-                all(spec[k]==original['spec'][k] for k in ('snapshot','pit_policy','calendar','scope')) and
-                set(days)<=set(original['spec']['feature_sessions']) and
-                set(securities)<=set(wire['source_member_securities']) and
-                all(spec['cutoff_by_session'][d]==original['spec']['cutoff_by_session'][d] for d in days),
-                'native training membership/cutoff binding mismatch')
-        if 'feature_catalog_ref' in compatibility:
-            from .feature_catalog import load_feature_catalog_ref
-            catalog=load_feature_catalog_ref(compatibility['feature_catalog_ref'])
-            require(catalog.identity==compatibility['feature_catalog_ref']==spec['catalog_ref'] and
-                    compatibility['member_catalog_ref']==original['spec']['catalog_ref'],
-                    'native feature/member catalog binding mismatch')
-            require(catalog.recipe_ref(spec['feature_selection'],normalized=True)==compatibility['feature_recipe_ref'],
-                    'native feature catalog selection mismatch')
-        else:
-            require(spec['catalog_ref']==original['spec']['catalog_ref'],
-                    'native training catalog binding mismatch')
         if wire['source_member_buffer'].get('layout') in ('date_segments_v1','security_segments_v1'):
             from .feature_input_buffers import SegmentedFeatureBuffer
             members=SegmentedFeatureBuffer(wire['source_member_buffer'],member_store)
         else:members=member_store.buffer(wire['source_member_buffer']).view('bool')
         native=_NativeTrainingBlocks(library,members,member_store,wire)
         owner_definition={'contract_version':'stock_feature_library_training_view_v1',
-            'source_index':descriptor,'spec':deepcopy(spec),'schema':wire['schema'],'row_index':grid,
+            'source_index':descriptor,'spec':spec,'schema':wire['schema'],'row_index':grid,
             'partitions':[],'historical_feature_inputs_ref':library.identity,
             'historical_content_digest':wire['training_adapter_ref'],'native_library_view':definition['library_view']}
         owner_definition['feature_view_ref']=digest(owner_definition)

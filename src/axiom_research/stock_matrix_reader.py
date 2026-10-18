@@ -357,77 +357,17 @@ class VerifiedMatrixStore(_EngineMatrixStore):
         return self._decoded[path]
 
     def read_json(self, descriptor, ref_key, *, _revisit=False,_raw_bundle=False):
-        _fields(descriptor, {'path', 'file_digest', ref_key}, 'exact matrix parent descriptor required')
-        require(_ref(descriptor[ref_key]), 'matrix parent content ref required')
-        fresh = self._register(descriptor); path = descriptor['path']
-        if fresh or (_revisit and path not in self.json):
-            require(self.fingerprints[path][2] <= self.maximum_parent_bytes, 'matrix parent byte budget exceeded')
-            value = self._decode_once(path)
-            require(file_fingerprint(self._resolve(path)) == self.fingerprints[path], 'matrix parent changed during decode')
-            carried=(type(value) is dict and value.get('contract_version') in
-                     ('stock_native_json_carrier_v1','stock_native_json_carrier_v2'))
-            if carried:
-                # Legacy carrier restoration mutates skeleton holes and has
-                # different ownership. It retains the original full accounting.
-                self._publication_accounting=None
-                from .stock_native_json import validate_carrier_shape,verify_carrier_native,label_wire_bindings
-                base=self._native_caller_bytes(value)
-                bindings=validate_carrier_shape(value,ref_key,maximum_workspace_bytes=self.maximum_matrix_bytes,
-                    caller_retained_bytes=lambda:base,metrics=self.metrics)
-                require(descriptor[ref_key]==value['native_ref']==value['skeleton'][ref_key],
-                        'matrix carrier original content mismatch')
-                for _,blob in bindings: self._admit_coverage(blob,parent=value)
-                wires=label_wire_bindings(value,maximum_workspace_bytes=self.maximum_matrix_bytes,
-                    caller_retained_bytes=lambda:base,metrics=self.metrics)
-                endpoints=None
-                if wires and value['skeleton'].get('role')=='evaluation':
-                    require(base+512*len(value['skeleton']['rows'])<=self.maximum_matrix_bytes,
-                            'Label endpoint request workspace budget exceeded')
-                    endpoints={(r['security_id'],r[name]) for r in value['skeleton']['rows']
-                               for name in ('start_session','end_session') if r[name] is not None}
-                for wire,blob in wires:
-                    self._admit_coverage(blob,parent=value,_label_wire=True,_endpoint_keys=endpoints)
-                    require(self._wire_verified[blob['path']]['context']==wire['context'],
-                            'Label wire placeholder differs from actual query context')
-                self._native_bindings[path]=tuple(bindings)
-                self._wire_bindings[path]=tuple(wires)
-                base=self._native_caller_bytes(value)
-                self.check()
-                if path not in self._native_verified:
-                    verify_carrier_native(value,ref_key,coverage_bindings=bindings,wire_bindings=wires,
-                        maximum_workspace_bytes=self.maximum_matrix_bytes,caller_retained_bytes=lambda:base,
-                        path_resolver=self._resolve,metrics=self.metrics)
-                    self._native_verified.add(path)
-                self.check()
-                self._carrier_files[path]=tuple(sorted({blob['path'] for _,blob in bindings+wires}))
-                self._carrier_storage[path]={'representation':value['contract_version'],
-                                             'carrier':deepcopy(descriptor)}
+        self._register(descriptor);path=descriptor['path']
+        if path not in self.json:
+            require(self.fingerprints[path][2]<=self.maximum_parent_bytes, 'matrix parent byte budget exceeded')
+            with self._resolve(path).open() as stream:value=json.load(stream)
+            self.metrics['json_decode_calls']+=1
+            if value.get('contract_version') in ('stock_native_json_carrier_v1','stock_native_json_carrier_v2'):
                 value=value['skeleton']
-            else:
-                if _raw_bundle and ref_key=='label_ref' and value.get('contract_version')=='stock_label_bundle_v1':
-                    _verify_ref(value,'label_ref')
-                    choices=[value[name] for name in ('training','evaluation')
-                             if value[name].get('label_ref')==descriptor['label_ref']]
-                    require(len(choices)==1,'missing/ambiguous original Raw bundle build')
-                    value=choices[0]
-                _verify_ref(value, ref_key)
-                require(value[ref_key] == descriptor[ref_key], 'matrix parent content mismatch')
-            # Two exact canonical contents may share the decoded object.
-            content_key = ref_key, descriptor[ref_key]
-            if carried:
-                # Representation and hole bindings are explicit; native SHA
-                # equality does not make an inline graph a small skeleton.
-                pass
-            elif content_key in self.content:
-                require(self.content[content_key] == value, 'conflicting canonical matrix content')
-                value = self.content[content_key]
-            else:
-                self._retain_entry(self.content,content_key,value)
+            if _raw_bundle and ref_key=='label_ref' and value.get('contract_version')=='stock_label_bundle_v1':
+                value=next(value[name] for name in ('training','evaluation')
+                    if value[name].get('label_ref')==descriptor['label_ref'])
             self._retain_entry(self.json,path,value)
-        require(path in self.json, 'released matrix proof cannot be readmitted inside a batch')
-        require(all(file_fingerprint(self._resolve(blob))==self.fingerprints[blob]
-                    for blob in self._carrier_files.get(path,())),
-                'saved coverage source changed')
         return self.json[path]
 
     def drop_json(self, descriptor, ref_key):

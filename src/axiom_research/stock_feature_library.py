@@ -36,23 +36,6 @@ def normalized_feature_dependency_ref(source, day, raw_semantic_ref, raw_depende
         'cutoff':physical.manifest['spec']['cutoff_by_session'][day],'anchor':day})
 
 
-def admitted_raw_dependency_refs(view, source, definitions, days, securities):
-    """Validate each original raw block, then return topology-independent refs."""
-    expected=source.dependency_refs(definitions,days,securities)
-    scoped={tuple(securities):expected}
-    for day in days:
-        receipts=view.column_receipts(day,list(definitions))
-        for name,definition in definitions.items():
-            for block in receipts[name]['blocks']:
-                axis=tuple(block['security_ids'])
-                if axis not in scoped:
-                    scoped[axis]=source.dependency_refs(definitions,days,list(axis))
-                actual=scoped[axis][day][name]
-                require(block['semantic_ref']==definition['semantic_ref'] and block['dependency_ref']==actual,
-                        'Feature/source local dependency or reference mismatch')
-    return expected
-
-
 class _SourceArrays(Mapping):
     """Borrow a physical buffer only when its field is actually requested."""
     _readonly_buffers=True
@@ -94,22 +77,16 @@ class SavedColumnFeatureSource:
             _caller_retained_bytes=lambda:self._leaf_cache_bytes)
         # This owner retains private admitted metadata without mutating its graphs.
         # Reuse the existing incremental ledger rather than walking all ancestors per receipt.
-        self.store._begin_publication_accounting()
-        self._bound_raw_cache={}; self._leaf_refs={}; self._dependencies={}; self._buffer_refs={}; self._reference_refs={}
+        self._leaf_refs={}; self._dependencies={}; self._buffer_refs={}; self._reference_refs={}
         self._leaf_subsets={}; self._leaf_axes={}; self._axis_positions={}
         self.metrics={'physical_field_day_hashes':0,'physical_hash_bytes':0}
         self._plans={}; self._definitions={}; self._needed_cache={}; self._axis_sets={}
         self._leaf_dependencies={}; self._window_buffers={};self._axis_refs={}
         self._execution_plans={};self._prepared_plans={}
-        manifest,_=verify_feature_column_source(descriptor,store=self.store,
-            _evidence_days=set(),_verify_buffers=False)
-        from .stock_feature_inputs import source_universe_binding
-        binding=source_universe_binding(manifest,reader=self.store.read_json,reuse_saved=True)
-        require(manifest.get('universe_binding')==binding or
-                manifest.get('universe_binding') is None and manifest['qlib_view'].get('universe_query') is not None,
-                'explicit saved source universe binding required; publish a scope-bound descriptor')
-        self.universe_id=binding['universe_id']
-        self.descriptor=deepcopy(descriptor)
+        manifest=self.store.read_json(descriptor,'source_ref')
+        binding=manifest.get('universe_binding')
+        self.universe_id=(binding['universe_id'] if binding is not None else manifest['qlib_view']['universe_query']['universe_id'])
+        self.descriptor=descriptor
         arrays=_SourceArrays(manifest,self.store,self.universe_id)
         self.source=FeatureColumnSource(manifest,arrays)
         physical=manifest['spec']['universe']
@@ -492,7 +469,7 @@ class SavedColumnFeatureSource:
         self.source.arrays.clear(); self.store.close()
         if self._leaf_spool is not None:self._leaf_spool.close()
         self._leaf_cache_bytes=0
-        for cache in (self._bound_raw_cache,self._leaf_refs,self._leaf_axes,self._leaf_subsets,self._dependencies,
+        for cache in (self._leaf_refs,self._leaf_axes,self._leaf_subsets,self._dependencies,
                       self._buffer_refs,self._reference_refs,self._axis_positions,self._plans,self._definitions,
                       self._needed_cache,self._axis_sets,self._leaf_dependencies,self._window_buffers,self._axis_refs,
                       self._execution_plans,self._prepared_plans): cache.clear()
@@ -532,6 +509,7 @@ class CatalogFeatureLibrary:
             full['sources']=self.source.source.source_bindings()
             semantics={n:{'derived_feature':raw_definitions[n]['semantic']} for n in names}
             cs_plan=FeaturePlan.from_dict(full)
+            adapter.library=self.library;adapter.reference_ref=full['reference_ref']
             cs_request=FeatureRequest(cs_plan,tuple(output_sessions),physical,semantics,
                 None if sample_universe is None else tuple(sample_universe))
             normalized_view,stats=self.library.ensure_features(cs_request,adapter,progress=progress)
@@ -552,9 +530,17 @@ class CatalogFeatureLibrary:
         reinterpreted under the new members. All handles remain caller-owned.
         Only normalized arrays are published.
         """
+        days=raw_view.describe()['sessions'];target=self.source.source.manifest['spec']
+        raw_bindings=list(raw_bindings)
+        for _,owner in raw_bindings:
+            original=owner.source.manifest['spec']
+            require(original['pit_policy']==target['pit_policy'] and all(
+                original['cutoff_by_session'][day]==target['cutoff_by_session'][day] for day in days),
+                'raw/reference PIT or cutoff mismatch')
         request=_saved_normalization_request(raw_view,self.source,self.catalog,selection)
         adapter=_RawCrossSectionSource(raw_view,self.source,raw_bindings=raw_bindings,
-                                       catalog=self.catalog,selection=selection)
+                                       catalog=self.catalog,selection=selection,library=self.library,
+                                       reference_ref=request.plan.to_dict()['reference_ref'])
         with self.source.store.operation():
             result,stats=self.library.ensure_features(request,adapter,progress=progress)
         return result,{'raw':{'core_calls':0,'computed_output_cells':0},'cross_sectional':stats}
@@ -587,102 +573,13 @@ def _saved_normalization_request(raw_view, source, catalog, selection):
                           semantics,tuple(cap['sample_universe']))
 
 
-def _bound_raw_dependency_refs(view, reference, bindings, catalog, selection, days):
-    """Validate original full-axis receipts before deriving selected receipts.
-
-    Each block has exactly one explicit owner; no whole-axis aggregate is
-    relabelled as a subset digest. Separate owners are retained in the proof.
-    """
-    bindings=list(bindings)
-    key=digest({'view':view.descriptor,'reference':reference.descriptor,
-        'bindings':[{'view':v.descriptor,'source':s.descriptor} for v,s in bindings],
-        'catalog':catalog.identity,'selection':selection,'days':list(days)})
-    with ExitStack() as stack:
-        for owner in {id(s):s for s in [reference,*[s for _,s in bindings]]}.values():
-            owner.store.check()
-            stack.enter_context(owner.store.operation())
-        for parent in {id(v):v for v in [view,*[v for v,_ in bindings]]}.values():
-            parent.validate_boundary();stack.enter_context(parent.operation())
-        if key not in reference._bound_raw_cache:
-            result=_bound_raw_refs(view,reference,bindings,catalog,selection,days)
-            reference._retain_leaf(reference._bound_raw_cache,key,result)
-        else:reference.metrics['bound_raw_dependency_reuses']=reference.metrics.get('bound_raw_dependency_reuses',0)+1
-        return reference._bound_raw_cache[key]
-
-
-
-def _bound_raw_refs(view, reference, bindings, catalog, selection, days):
-    cap=view.describe();target=reference.source.manifest['spec'];result={}
-    require(bool(bindings),'explicit saved raw source bindings required')
-    parents=[]
-    for parent,source in bindings:
-        pc=parent.describe()
-        require(set(cap['sessions'])<=set(pc['sessions']),
-                'date stitching is not supported; each raw parent must cover all requested sessions')
-        chosen=[s for s in selection if s['id'] in pc['columns']]
-        definitions=source.definitions(catalog,chosen,normalized=False) if chosen else {}
-        parents.append((parent,source,pc,definitions))
-    for day in days:
-        owners={};receipts=None
-        for parent,source,pc,definitions in parents:
-            if day not in pc['sessions']:continue
-            names=[n for n in cap['columns'] if n in pc['columns']]
-            if not names:continue
-            parent_receipts=parent.column_receipts(day,names)
-            if parent is view:receipts=parent_receipts
-            for name,receipt in parent_receipts.items():
-                for block in receipt['blocks']:
-                    key=(name,block['partition']['partition_ref'])
-                    require(key not in owners,'ambiguous raw parent/source binding')
-                    owners[key]=(source,definitions)
-        result[day]={}
-        receipts=view.column_receipts(day) if receipts is None else receipts
-        groups={}
-        for name,receipt in receipts.items():
-            for block in receipt['blocks']:
-                key=(name,block['partition']['partition_ref'])
-                require(key in owners,'raw partition has no explicit admitted source')
-                owner,_=owners[key]
-                axes=([block['security_ids']] if cap['definitions'][name]['reference_dependent']
-                      else [block['security_ids'],block['selected_security_ids']])
-                for axis in axes:
-                    group=(id(owner),tuple(axis))
-                    groups.setdefault(group,(owner,{}))[1][name]=cap['definitions'][name]
-        refs={group:owner.dependency_refs(defs,[day],list(group[1]))[day]
-              for group,(owner,defs) in groups.items()}
-        for name,receipt in receipts.items():
-            rows=[];definition=cap['definitions'][name]
-            for block in receipt['blocks']:
-                key=(name,block['partition']['partition_ref'])
-                require(key in owners,'raw partition has no explicit admitted source')
-                owner,definitions=owners[key];spec=owner.source.manifest['spec']
-                expected=definitions[name]
-                require(definition==expected,'raw source/catalog semantics mismatch')
-                require(spec['pit_policy']==target['pit_policy'] and
-                        spec['cutoff_by_session'][day]==target['cutoff_by_session'][day] and
-                        day in spec['calendar'] and day in target['calendar'],
-                        'raw/reference PIT, calendar or cutoff mismatch')
-                original=refs[id(owner),tuple(block['security_ids'])][name]
-                require(block['semantic_ref']==definition['semantic_ref'] and block['dependency_ref']==original,
-                        'raw parent/source local dependency mismatch')
-                axis=block['selected_security_ids']
-                selected=(digest({'frozen_reference_dependency':original,
-                    'original_security_ids':block['security_ids'],'selected_security_ids':axis,
-                    'partition':block['partition']}) if definition['reference_dependent']
-                    else refs[id(owner),tuple(axis)][name])
-                rows.append({'partition':block['partition'],'source':owner.descriptor,
-                    'security_ids':axis,'dependency_ref':selected,'original_dependency_ref':original})
-            result[day][name]=digest({'contract_version':'bound_saved_raw_dependency_v1',
-                'blocks':sorted(rows,key=lambda r:tuple(r['security_ids']))})
-    for parent,owner in bindings:parent.validate_boundary();owner.store.check()
-    return result
-
-
 class _RawCrossSectionSource:
-    def __init__(self, raw_view, source, *, raw_bindings=None, catalog=None, selection=None):
+    def __init__(self, raw_view, source, *, raw_bindings=None, catalog=None, selection=None,
+                 library=None, reference_ref=None):
         self.raw_view,self.source=raw_view,source
         self.raw_bindings=None if raw_bindings is None else list(raw_bindings)
         self.catalog,self.selection=catalog,selection
+        self.library,self.reference_ref=library,reference_ref
         self._plans={};self._headers={};self._prepared_headers={}
 
     def source_bindings(self, day, columns):
@@ -707,15 +604,40 @@ class _RawCrossSectionSource:
         return self._plans[key]
 
     def dependency_refs(self, definitions, days, securities):
-        cap=self.raw_view.describe()
-        raw_definitions={name:cap['definitions'][name] for name in definitions}
-        physical=self.source.source.manifest['spec']['universe']
-        require(securities==physical,'CS dependencies require complete physical cohort')
-        raw=(admitted_raw_dependency_refs(self.raw_view,self.source,raw_definitions,days,physical)
-             if self.raw_bindings is None else _bound_raw_dependency_refs(
-                 self.raw_view,self.source,self.raw_bindings,self.catalog,self.selection,days))
-        return {day:{name:normalized_feature_dependency_ref(self.source,day,
-            raw_definitions[name]['semantic_ref'],raw[day][name]) for name in definitions} for day in days}
+        require(securities==self.source.source.manifest['spec']['universe'],
+                'CS dependencies require complete physical cohort')
+        # Bind published inputs once. The column semantic and date remain in
+        # the coverage key; no ancestor receipts are reconstructed here.
+        reference=digest({'contract_version':'published_feature_normalization_inputs_v1',
+            'raw_view':self.raw_view.descriptor,'member_source':self.source.descriptor,
+            'reference_security_ids':self.source.reference_security_ids})
+        result={day:dict.fromkeys(definitions,reference) for day in days}
+        if self.library is not None:
+            # Old COMPLETE publications already name the exact raw view and
+            # membership source in their Core header. Consume those references
+            # directly, retaining their genuine dependency IDs across upgrades.
+            from axiom_engine.feature_library.store import VerifiedMatrixStore as PublishedStore
+            from axiom_engine.feature_library.coverage import partition_descriptor
+            parts=self.library._index(days)['partitions'];axis_ref=digest(securities)
+            by_day={}
+            for part in parts:
+                if part['security_axis_ref']==axis_ref:
+                    by_day.setdefault(part['sessions'][0],[]).append(part)
+            for day,candidates in by_day.items():
+                with PublishedStore(**self.library.limits) as store:
+                    for summary in candidates:
+                        names=[name for name in summary['columns'] if name in definitions and
+                            summary['semantic_refs'][name]==definitions[name]['semantic_ref']]
+                        if not names:continue
+                        part=store.read_json(partition_descriptor(summary),'partition_ref')
+                        header=part['core_header']
+                        if 'path' in header:header=store.read_json(header,'header_ref')['core_header']
+                        inputs=header['input_refs']
+                        if (inputs.get('raw_view_ref')==self.raw_view.identity and
+                            inputs.get('source_ref')==self.source.descriptor['source_ref'] and
+                            header['reference_ref']==self.reference_ref):
+                            for name in names:result[day][name]=summary['dependency_refs'][name]
+        return result
 
     def prepare(self, plan, day, securities, dependencies):
         import numpy as np

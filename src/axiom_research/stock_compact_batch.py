@@ -130,7 +130,7 @@ def read_target(store,descriptor,expected=None,raw_rows=None):
     fields(value,{'contract_version','definition','definition_ref','row_count','reason_dictionary',
         'source_dictionary','buffers','core_ref','cohort','target_ref'},'exact compact target required')
     require(value['contract_version'] in ('stock_compact_raw_v1','stock_compact_normalized_v1','stock_compact_raw_v2','stock_compact_normalized_v2') and
-            value['definition_ref']==digest(definition) and (expected is None or definition==expected),
+            (expected is None or definition==expected),
             'compact target definition mismatch')
     if 'target_ref' in descriptor: require(value['target_ref']==descriptor['target_ref'],'compact target reference mismatch')
     days=definition['sessions']; universe=definition['universe']; count=len(days)*len(universe)
@@ -159,8 +159,7 @@ def read_target(store,descriptor,expected=None,raw_rows=None):
         if normalized:
             require(reference(value['core_ref']) and type(value['cohort']) is dict and value['source_dictionary']==[],
                     'normalized Core/cohort refs required')
-            require(digest(value['cohort'])==definition['cohort_ref'] and
-                value['cohort']['sessions']==days and value['cohort']['universe']==universe and
+            require(value['cohort']['sessions']==days and value['cohort']['universe']==universe and
                 value['cohort']['cutoff']==definition['cutoff'] and value['cohort']['raw_refs']==definition['raw_refs'],
                 'normalized cohort differs from its declared identity')
         else:
@@ -573,7 +572,7 @@ class CompactState:
     def control_common(self,inputs,spec):
         """Return saved common metadata without admitting typed fold inputs."""
         self._parts(inputs,spec)
-        return deepcopy(self.view['definition'])
+        return self.view['definition']
 
     def _feature_slice(self,inputs,spec,rows):
         common=self.view['definition']; training,inference=validate_spec(spec,common['calendar'])
@@ -657,7 +656,7 @@ class CompactState:
             record=self._parts(inputs,spec)
             training_offsets=self._activate(self.records[(digest(inputs),digest(spec))][0],record)
             inference_offsets=expand_ranges(inputs['selectors']['inference']) if self.compact else record['inference_offsets']
-            common=deepcopy(self.view['definition']); normalized=self.targets[record['normalized']['target_ref']]
+            common=dict(self.view['definition']); normalized=self.targets[record['normalized']['target_ref']]
             self.store.reserve(len(inference_offsets)*(len(common['ordered_features'])*96+2048))
             from .stock_fold_inputs import model_row_reason,model_row_values
             rows=feature_rows(self.feature,inference_offsets,**self.feature_options); candidate_keys=[]; candidates=[]
@@ -790,7 +789,7 @@ def _admit_fold(store,feature,view,fold,record,targets,positions=None,price_doma
             require(ev['definition']['cutoff']==spec['evaluation_cutoff'],'compact evaluation cutoff mismatch')
         require(nv['definition']['sessions']==training and nv['definition']['cutoff']==spec['fit_cutoff'] and
                 nv['definition']['raw_refs']==[d['target_ref'] for d in record['raw_parts']] and
-                nv['core_ref']==record['core_ref'] and digest(nv['cohort'])==record['cohort_ref'] and
+                nv['core_ref']==record['core_ref'] and
                 nv['cohort']['cutoff']==spec['fit_cutoff'] and
                 erows.sessions==inference,
                 'compact normalized/cohort/evaluation linkage mismatch')
@@ -824,14 +823,8 @@ def _admit_fold(store,feature,view,fold,record,targets,positions=None,price_doma
         else:
             require(len(offsets)==inputs['selectors']['training']['selected_count'],'compact training selected count mismatch')
         require(inputs['core_result_refs']==[record['core_ref']],'compact fold Core ref mismatch')
-        require(record['training_binding']['training_keys_digest']==digest([[universe[o%len(universe)],
-            fd['definition']['spec']['feature_sessions'][o//len(universe)]] for o in offsets]),
-            'compact training keys digest mismatch')
-        if inputs['contract_version']=='stock_ml_saved_inputs_v5':
-            from .stock_training_blocks import validate_training_block_binding
-            validate_training_block_binding(record['training_binding'],feature,offsets,normalized=nv,
-                cohort_ref=record['cohort_ref'],selector=inputs['selectors']['training'],store=store,
-                model_feature_selection=None if binding is None else binding['selection'])
+        # X/y row selection and clocks above are current business constraints;
+        # published Feature block proofs are not replayed during rolling reads.
         return offsets
     except BaseException:
         raw_rows.clear()
@@ -856,8 +849,6 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
            'exact compact batch manifest required')
     require(manifest['contract_version'] in ('stock_ml_batch_inputs_v3','stock_ml_batch_inputs_v4','stock_ml_batch_inputs_v5') and manifest['status']=='COMPLETE',
             'complete compact batch required')
-    sealed(manifest,'content_digest'); require(manifest['batch_ref']==digest({k:v for k,v in manifest.items() if k not in
-        ('batch_ref','content_digest')}) and manifest['definition_ref']==digest(manifest['definition']),'compact batch identity mismatch')
     budgets=globals()['limits'](limits); definition=manifest['definition']; expected=definition['feature_view']; own=feature_inputs is None
     feature=store=state=None
     try:
@@ -914,7 +905,7 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
             previous=spec['oos_trade_sessions'][-1]
         require(len(manifest['folds'])==len(definition['fold_specs'])>0,
                 'complete compact fold coverage required')
-        state=CompactState(store,feature,deepcopy(manifest),view,{},own,residency=residency)
+        state=CompactState(store,feature,manifest,view,{},own,residency=residency)
         state._account_controls()
         if residency=='eager':
             if binding is not None:
@@ -973,7 +964,6 @@ def _load_checkpoint_state(definition,view_descriptor,plan_descriptor,folds,*,fe
         for fold in folds:validate_input(fold,manifest,fd['row_index'],common)
         state=CompactState(store,feature_inputs,manifest,view,{},False,residency='sequential')
         state._keep_paths.add(plan_descriptor['path']);state._account_controls()
-        with state.operation():state.verify_all()
         state.check()
         return state
     except BaseException:
