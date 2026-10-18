@@ -46,3 +46,34 @@ No other raw column needs recomputation. Old v4 remains installed for saved iden
 
 Unexplained financial missingness retains its original masks/reasons. This model
 policy does not certify those gaps as normal and does not forward-fill financials.
+
+
+## Shared owner consumption
+
+`CompactState.operation()` borrows the native Feature library and membership
+stores through their existing operation scopes. Native checks still run when
+entering an external operation; nested helpers use immutable admitted buffers.
+The native adapter retains typed per-column buffers and reason codes. Only
+requested row projections materialize Python rows. Overlapping model selections
+reuse columns still retained in the Feature window; trimming releases them.
+Training dependency digests reuse column digests. A bounded binary packing pass
+preserves the historical grouped source proof so saved prepared batches remain
+eligible for exact validation, without a disk panel or wide Python rows.
+
+`reuse_raw_from_batch` also finds an exactly matching normalized target in the
+borrowed batch. Cohort, raw references, cutoff and normalization definition must
+match; each model still produces its own selector. No Feature validity enters
+the label cohort. Raw dependency derivation is cached on the existing source
+owner and boundary-validated before reuse.
+
+`load_stock_feature_view` binds independent membership from the saved source
+descriptor. Older saved Features without that descriptor accept an explicit
+`membership_source` descriptor from their original source. The example options
+pass this argument through. Boolean Feature membership alone cannot establish
+known/complete membership; missing evidence remains an error. Native format is
+not required. `prepared_batch` continues through the configured public entry.
+
+Feature-library progress emits only the current `core_work` item; final returned
+statistics retain the full history. Timings from a fresh preparation root and
+saved-batch consumption must be reported separately, including actual model
+`cache_hit`, `train_calls`, fit and predict times.

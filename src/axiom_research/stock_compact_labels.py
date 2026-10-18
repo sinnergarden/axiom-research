@@ -581,6 +581,19 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics,*,target_spec=N
             definition.update(implementation_ref=numerical_implementation,
                 core_implementation_ref=numerical_implementation)
         key=digest(definition); target=(Path(cache)/'normalized'/key[7:]).resolve(); artifact=target/'target.json'
+        origin=metrics.get('_raw_origin')
+        if origin is not None and not artifact.exists():
+            # Reuse the exact cohort/normalization identity; selectors stay local.
+            for fold in origin.batch['folds']:
+                control=origin.store.read_json(fold['input_manifest']['fold_control'],key='fold_control_ref')
+                descriptor=control['normalized']
+                header=origin.store.read_json(descriptor,key='target_ref')
+                logical={k:v for k,v in header['definition'].items() if k not in
+                         ('normalization_proof_version','numerical_origins')}
+                if logical==definition:
+                    artifact=Path(descriptor['path'])
+                    metrics['normalized_target_reuses']=metrics.get('normalized_target_reuses',0)+1
+                    break
         if artifact.exists():
             from .stock_compact_batch import read_target
             store=metrics['_store']; desc={'path':str(artifact.absolute())}

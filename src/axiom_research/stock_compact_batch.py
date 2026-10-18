@@ -268,7 +268,14 @@ class CompactState:
     def operation(self):
         """Borrow the same Feature/target owners through nested helpers."""
         fd=_view_data(self.feature,check=False)
+        from .stock_compact_store import _membership_binding
+        _membership_binding(fd)
         with ExitStack() as stack:
+            if 'native' in fd:stack.enter_context(fd['native'].operation())
+            elif fd.get('membership_owner') is not None:
+                member_store=fd['membership_owner'].store
+                member_store.check();stack.enter_context(member_store.operation())
+                for path in member_store.fingerprints:member_store.check_path(path)
             stack.enter_context(fd['store'].operation());stack.enter_context(self.store.operation())
             for path in fd['control_paths']:fd['store'].check_path(path)
             for path in self._keep_paths:self.store.check_path(path)

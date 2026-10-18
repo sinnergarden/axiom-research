@@ -442,12 +442,14 @@ class StockFeatureView:
         if 'native' in value:
             value['store'].check_hook=None
             value['native'].close()
+        if value.get('membership_owner') is not None:
+            value['store'].check_hook=None; value['membership_owner'].close()
         value['store'].close(); value['closed']=True
     def __enter__(self): _view_data(self); return self
     def __exit__(self,*args): self.close()
 
 
-def load_stock_feature_view(path, *, limits=None, residency="eager",model_feature_selection=None):
+def load_stock_feature_view(path, *, limits=None, residency="eager",model_feature_selection=None, membership_source=None):
     """Admit table files; an explicit subset narrows eager buffer admission.
 
     The Feature identity and schema remain original. Pass the selection again
@@ -540,7 +542,8 @@ def load_stock_feature_view(path, *, limits=None, residency="eager",model_featur
             'parents':parents,'row_index':row_index,'column_positions':column_positions,'day_blocks':day_blocks,
             'day_admissions':day_admissions,
             'control_paths':{index_path,index['row_index']['path']},'residency':residency,
-            'closed':False,'borrowers':0,'prepared':{}})
+            'closed':False,'borrowers':0,'prepared':{},
+            'membership_source':membership_source or index['definition'].get('column_source') or index['definition'].get('source')})
         binding=_model_feature_binding(_view_data(handle,check=False),model_feature_selection)
         if residency=='eager':
             value=_view_data(handle,check=False)
@@ -841,6 +844,7 @@ def _trim_feature_window(value, wanted):
     for ordinal,block in enumerate(value['blocks']):
         if ordinal not in wanted and 'native_cache' in block:
             block.pop('native_cache').clear()
+            block.pop('native_columns',{}).clear()
             store.resident_bytes-=block.pop('native_charge',0)
         if ordinal not in wanted and 'training_block_proofs' in block:
             store.resident_bytes-=block.pop('training_block_proof_charge',0)
@@ -904,12 +908,18 @@ def _feature_training_blocks(handle, offsets, *, model_feature_selection=None, b
                         for buffer_name,a in arrays.items():
                             # A single strided column copy is bounded before it is
                             # hashed, never a full fit-window text projection.
-                            store.reserve(block['count']*a.dtype.itemsize+4096)
-                            payload=a[:,i].tobytes(order='C')
+                            if value.get('native') is not None and a.shape[1]==1:
+                                buffer_digest=part['buffers'][buffer_name]['buffer_digest']
+                            else:
+                                store.reserve(block['count']*a.dtype.itemsize+4096)
+                                payload=a[:,i].tobytes(order='C')
+                                buffer_digest='sha256:'+sha256(payload).hexdigest()
+                                payload=None
                             refs[buffer_name]={'dtype':part['buffers'][buffer_name]['dtype'],
-                                'shape':[block['count']], 'buffer_digest':'sha256:'+sha256(payload).hexdigest()}
-                            payload=None
+                                'shape':[block['count']], 'buffer_digest':buffer_digest}
                         fields_by_name[name]=refs
+                if value.get('native') is not None:
+                    source_parts=[value['native'].proof_part(value,block,columns)]
                 store.reserve(block['count']*8+4096)
                 # Knowledge codes are local interning slots. Bind their actual
                 # clocks rather than unrelated dictionary/code assignments.
@@ -978,7 +988,7 @@ def iter_feature_rows(handle, offsets, *, model_feature_selection=None):
                     if c not in positions: continue
                     k=positions[c]; flag=bool(arrays['value_validity'][local,j]); flags[k]=flag
                     values[k]=float(arrays['values'][local,j]) if flag else None
-            if binding is None:
+            if binding is None or 'native' in value:
                 row=compact.row(local,security=spec['universe'][off%width],
                     session=spec['feature_sessions'][off//width],values=values,validity=flags)
             else:
@@ -1089,16 +1099,48 @@ def training_matrix(handle,offsets,cutoff,*,model_feature_selection=None):
         raise
 
 
+def _membership_binding(value):
+    """Bind independent membership at the common Feature view boundary."""
+    if 'membership_binding' in value:return value['membership_binding']
+    native=value.get('native')
+    if native is not None:
+        binding={'arrays':native.member_arrays,'manifest':native.member_manifest,
+                 'days':native.days,'securities':native.securities}
+    else:
+        descriptor=value.get('membership_source')
+        if descriptor is None:
+            first=value['blocks'][0]['descriptors'][0]['metadata']
+            metadata=value['store'].read_json(first,legacy=True)
+            descriptor=metadata.get('source_descriptor')
+        require(descriptor is not None,
+                'saved Feature membership evidence unavailable; bind its original membership_source descriptor')
+        from .stock_feature_library import SavedColumnFeatureSource
+        owner=SavedColumnFeatureSource(descriptor,
+            maximum_source_bytes=value['store'].limits['maximum_source_bytes'],
+            maximum_working_bytes=value['store'].maximum_matrix_bytes)
+        manifest=owner.source.manifest;spec=value['definition']['spec'];source=manifest['spec']
+        require(all(source[k]==spec[k] for k in ('snapshot','pit_policy','scope')) and
+                set(spec['universe'])<=set(source['universe']) and
+                all(source['cutoff_by_session'][d]==spec['cutoff_by_session'][d] for d in spec['feature_sessions']),
+                'Feature/member source scope or cutoff mismatch')
+        value['membership_owner']=owner
+        value['store'].check_hook=lambda: owner.store.check() if not owner.store._operation_depth else None
+        binding={'arrays':owner.source.arrays,'manifest':manifest,
+            'days':{d:i for i,d in enumerate(source['read_sessions'])},
+            'securities':{security:i for i,security in enumerate(source['universe'])}}
+    value['membership_binding']=binding
+    return binding
+
+
 def membership_columns(handle, offsets):
     """Read the existing member facts independently of selected Feature cells."""
     import numpy as np
     value=_view_data(handle);spec=value['definition']['spec'];width=len(spec['universe'])
-    native=value.get('native')
-    require(native is not None,'independent label cohort requires saved membership facts')
-    a=native.member_arrays;out={k:[] for k in ('member','member_known','member_pool_complete','member_available','member_available_validity')}
+    binding=_membership_binding(value)
+    a=binding['arrays'];out={k:[] for k in ('member','member_known','member_pool_complete','member_available','member_available_validity')}
     for _,block,locals_ in _offset_runs(value,offsets):
-        day=spec['feature_sessions'][block['start']//width];i=native.days[day]
-        positions=[native.securities[spec['universe'][j]] for j in locals_]
+        day=spec['feature_sessions'][block['start']//width];i=binding['days'][day]
+        positions=[binding['securities'][spec['universe'][j]] for j in locals_]
         for name in out:out[name].extend(a[name][i,positions].tolist())
     for name in out:out[name]=np.asarray(out[name],dtype='<i8' if name=='member_available' else '?')
     cutoffs=np.asarray([instant_us(spec['cutoff_by_session'][spec['feature_sessions'][off//width]]) for off in offsets],dtype='<i8')
@@ -1109,7 +1151,7 @@ def membership_columns(handle, offsets):
 
 def membership_ref(handle, offsets):
     a=membership_columns(handle,offsets);spec=_view_data(handle)['definition']['spec'];width=len(spec['universe'])
-    native=_view_data(handle)['native'];manifest=native.member_manifest
+    manifest=_membership_binding(_view_data(handle))['manifest']
     source_identity={'buffers':{k:v for k,v in manifest['buffers'].items() if k.startswith('member')},
         'profile':manifest['source_profiles']['universe_membership'],'universe_binding':manifest.get('universe_binding')}
     return digest({'contract_version':'research_label_membership_v2','scope':spec['scope'],'membership_source':source_identity,

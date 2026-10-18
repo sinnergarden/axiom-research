@@ -6,7 +6,7 @@ their genuine StockFeatureView owner handle; cold restoration uses this loader
 and passes that handle explicitly to load_stock_ml_batch_inputs.
 """
 from copy import deepcopy
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager, ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -304,10 +304,33 @@ def build_feature_library_training_view(view, source, *, selection, destination,
     return write_part(target,wire,'training_adapter_ref')
 
 
+class _NativeCellRows:
+    """Typed facts; materialize strings/lists only for requested OOS rows."""
+    def __init__(self, member, cutoff, columns, sources):
+        import numpy as np
+        self.member=member; self.member.flags.writeable=False; self.columns=columns
+        self.dictionary=[cutoff,sources]
+        self.knowledge=np.zeros(len(member),dtype='<u4')
+        self.sources=np.ones(len(member),dtype='<u4')
+        self.bytes=self.knowledge.nbytes+self.sources.nbytes+member.nbytes+_size(self.dictionary)+128*len(columns)
+        self.knowledge.flags.writeable=False;self.sources.flags.writeable=False
+
+    def row(self, ordinal, *, security, session, values, validity):
+        reasons=[];clocks=[]
+        for item in self.columns:
+            reason=item['reason_dictionary'][int(item['reason_codes'][ordinal])]
+            reasons.append([] if reason is None else [reason])
+            clocks.append(_instant_us(item['clocks'][ordinal],item['null_clock']))
+        return {'security_id':security,'session':session,'member':bool(self.member[ordinal]),
+            'knowledge_cutoff':self.dictionary[0],'source_refs':list(self.dictionary[1]),
+            'values':values,'validity':validity,'reasons':reasons,'availability':clocks}
+
+
 class _NativeTrainingBlocks:
     """Day-local projections owned by the existing StockFeatureView lifetime."""
     def __init__(self, library, members, member_store, wire):
         self.library=library;self.members=members;self.member_store=member_store;self.wire=wire
+        self._operation_depth=0
         self.days={d:i for i,d in enumerate(wire['source_member_sessions'])}
         self.securities={s:i for i,s in enumerate(wire['source_member_securities'])}
         from .stock_feature_library import _SourceArrays
@@ -316,8 +339,23 @@ class _NativeTrainingBlocks:
         binding=source_universe_binding(self.member_manifest,reader=member_store.read_json,reuse_saved=True)
         self.member_arrays=_SourceArrays(self.member_manifest,member_store,binding['universe_id'])
 
+    @contextmanager
+    def operation(self):
+        if not self._operation_depth:self.check()
+        with ExitStack() as stack:
+            stack.enter_context(self.library.operation())
+            stack.enter_context(self.member_store.operation())
+            if not self._operation_depth:
+                # Cached typed columns still depend on their original owners.
+                for owner in (self.library._store,self.member_store):
+                    for path in owner.fingerprints:owner.check_path(path)
+            self._operation_depth+=1
+            try:yield self
+            finally:self._operation_depth-=1
+
     def check(self):
-        self.library.validate_boundary();self.member_store.check()
+        if not self._operation_depth:
+            self.library.validate_boundary();self.member_store.check()
 
     def close(self):
         self.member_arrays.clear();self.library.close();self.member_store.close();self.members=None
@@ -344,9 +382,29 @@ class _NativeTrainingBlocks:
                 records[path]=owner._hashes[path];marks[path]=owner.fingerprints[path]
         return records,marks
 
+    def proof_part(self, value, block, columns):
+        """Preserve saved proof identity with bounded binary packing, no rows."""
+        import numpy as np
+        from hashlib import sha256
+        owned=block['native_columns']; count=block['count']; spec=value['definition']['spec']
+        day=spec['feature_sessions'][block['start']//len(spec['universe'])]
+        refs=list(dict.fromkeys(tile['partition']['partition_ref'] for name in columns
+            for tile in self.library._tiles[day,name] if set(spec['universe'])&tile['security_set']))
+        buffers={}
+        for name in owned[columns[0]]['arrays']:
+            h=sha256(); dtype=owned[columns[0]]['arrays'][name].dtype
+            value['store'].reserve(min(count,256)*len(columns)*dtype.itemsize+4096)
+            for first in range(0,count,256):
+                packed=np.column_stack([owned[column]['arrays'][name][first:first+256,0] for column in columns])
+                h.update(memoryview(packed)); del packed
+            buffers[name]={'dtype':owned[columns[0]]['part']['buffers'][name]['dtype'],
+                'shape':[count,len(columns)],'buffer_digest':'sha256:'+h.hexdigest()}
+        return {'partition_ref':digest({'view_ref':self.library.identity,'day':day,
+            'columns':list(columns),'original_partitions':refs}),
+            'metadata':self.library.descriptor,'buffers':buffers}
+
     def admit(self, value, block, columns):
         import numpy as np
-        from .stock_matrix_reader import _CompactRows
         self.check();store=value['store'];key=tuple(columns)
         cache=block.setdefault('native_cache',{})
         if key in cache:return cache[key]
@@ -354,17 +412,37 @@ class _NativeTrainingBlocks:
         securities=spec['universe'];count=len(securities)
         day=spec['feature_sessions'][block['start']//count]
         store.reserve(count*(len(columns)*136+256)+4096)
-        cells=self.library.project([(s,day) for s in securities],columns=columns)
-        known=cells['available_at_utc_us']!=cells['null_available_at_utc_us']
-        arrays={'values':np.where(cells['validity'],cells['values'],0).astype('<f8'),
-            'value_validity':cells['validity'].astype('u1'),
-            'available_at_utc_us':np.where(known,cells['available_at_utc_us'],0).astype('<i8'),
-            'available_at_validity':known.astype('u1')}
+        owned=block.setdefault('native_columns',{})
+        missing=[name for name in columns if name not in owned]
+        if missing:
+            cells=self.library.project([(s,day) for s in securities],columns=missing)
+            known=cells['available_at_utc_us']!=cells['null_available_at_utc_us']
+            from .stock_matrix_storage import instant_us
+            require(bool(np.isfinite(cells['values'][cells['validity']]).all()) and
+                    bool((~cells['validity']|known).all()) and
+                    bool((~known|(cells['available_at_utc_us']<=instant_us(spec['cutoff_by_session'][day]))).all()),
+                    'native Feature values/availability exceed original cutoff')
+            from hashlib import sha256
+            for j,name in enumerate(missing):
+                arrays={'values':np.where(cells['validity'][:,j:j+1],cells['values'][:,j:j+1],0).astype('<f8'),
+                    'value_validity':cells['validity'][:,j:j+1].astype('u1'),
+                    'available_at_utc_us':np.where(known[:,j:j+1],cells['available_at_utc_us'][:,j:j+1],0).astype('<i8'),
+                    'available_at_validity':known[:,j:j+1].astype('u1')}
+                buffers={n:{'dtype':'float64_le' if n=='values' else 'int64_le' if n=='available_at_utc_us' else 'bool_u8',
+                    'shape':list(a.shape),'buffer_digest':'sha256:'+sha256(a.tobytes()).hexdigest()} for n,a in arrays.items()}
+                part={'columns':[name],'metadata':self.library.descriptor,'buffers':buffers,
+                    'partition_ref':digest({'view_ref':self.library.identity,'day':day,'columns':[name],
+                        'original_partitions':sorted({tile['partition']['partition_ref'] for tile in self.library._tiles[day,name]})})}
+                item={'part':part,'arrays':arrays,'clocks':cells['available_at_utc_us'][:,j].copy(),
+                    'null_clock':cells['null_available_at_utc_us'],'reason_codes':cells['reason_codes'][:,j].copy(),
+                    'reason_dictionary':cells['reason_dictionary'],'source_refs':sorted({tile['partition']['partition_ref'] for tile in self.library._tiles[day,name]})}
+                for a in [*arrays.values(),item['clocks'],item['reason_codes']]:a.flags.writeable=False
+                charge=sum(a.nbytes for a in arrays.values())+item['clocks'].nbytes+item['reason_codes'].nbytes+_size(part)+_size(item['reason_dictionary'])+_size(item['source_refs'])+1024
+                store.reserve(charge);store.resident_bytes+=charge
+                block['native_charge']=block.get('native_charge',0)+charge;owned[name]=item
+            store.metrics['native_feature_column_projections']=store.metrics.get('native_feature_column_projections',0)+len(missing)
         cutoff=spec['cutoff_by_session'][day]
         from .stock_matrix_storage import instant_us
-        require(bool(np.isfinite(arrays['values']).all()) and
-                bool((~known|(arrays['available_at_utc_us']<=instant_us(cutoff))).all()),
-                'native Feature values/availability exceed original cutoff')
         member_positions=[self.securities[s] for s in securities]
         member_day=self.days[day]
         member=self.members[member_day,member_positions]
@@ -374,40 +452,27 @@ class _NativeTrainingBlocks:
                 bool(ma['member_available_validity'][member_day,member_positions].all()) and
                 bool((ma['member_available'][member_day,member_positions]<=instant_us(cutoff)).all()),
                 'model research membership must be known, complete and visible')
-        positions=[value['column_positions'][n] for n in columns]
-        rows=[]
-        for i,s in enumerate(securities):
-            flags=[False]*len(columns);clocks=[None]*len(columns);reasons=[[] for _ in columns]
-            for j,k in enumerate(range(len(columns))):
-                flags[k]=bool(cells['validity'][i,j])
-                clocks[k]=_instant_us(cells['available_at_utc_us'][i,j],cells['null_available_at_utc_us'])
-                reason=cells['reason_dictionary'][int(cells['reason_codes'][i,j])]
-                reasons[k]=[] if reason is None else [reason]
-            rows.append({'member':bool(member[i]),'knowledge_cutoff':cutoff,
-                'validity':flags,'availability':clocks,'reasons':reasons,
-                'source_refs':[self.library.identity,*cells['partition_refs']]})
-        compact=_CompactRows(rows,len(columns),np);rows=None
-        compact.column_positions={original:selected for selected,original in enumerate(positions)}
-        require(bool((~cells['validity']|known).all()),'valid Feature requires a source clock in Research profile')
-        flags=np.any(cells['validity'],axis=1)
-        maximum=np.max(cells['available_at_utc_us'],axis=1)
+        chosen=[owned[n] for n in columns]
+        sources=list(dict.fromkeys(tile['partition']['partition_ref'] for name in columns
+            for tile in self.library._tiles[day,name] if set(securities)&tile['security_set']))
+        compact=_NativeCellRows(member,cutoff,chosen,[self.library.identity,*sources])
+        flags=np.zeros(count,dtype=bool);maximum=np.full(count,-(2**63),dtype='<i8')
+        for item in chosen:
+            flags |= item['arrays']['value_validity'][:,0].astype(bool)
+            np.maximum(maximum,item['clocks'],out=maximum)
         flags.flags.writeable=False;maximum.flags.writeable=False
-        from hashlib import sha256
-        buffers={name:{'dtype':'float64_le' if name=='values' else 'int64_le' if name=='available_at_utc_us' else 'bool_u8',
-                      'shape':list(a.shape),'buffer_digest':'sha256:'+sha256(a.tobytes()).hexdigest()}
-                 for name,a in arrays.items()}
-        part={'columns':list(columns),'metadata':self.library.descriptor,'buffers':buffers,
-              'partition_ref':digest({'view_ref':self.library.identity,'day':day,'columns':list(columns),
-                                      'original_partitions':cells['partition_refs']})}
-        for a in arrays.values():a.flags.writeable=False
-        charge=compact.bytes+sum(a.nbytes for a in arrays.values())+flags.nbytes+maximum.nbytes+_size(part)+1024
+        parts={item['part']['partition_ref']:(item['part'],item['arrays']) for item in chosen}
+        charge=compact.bytes+flags.nbytes+maximum.nbytes+256*len(parts)
         store.reserve(charge);store.resident_bytes+=charge
         block['native_charge']=block.get('native_charge',0)+charge
-        cache[key]=({part['partition_ref']:(part,arrays)},compact,(flags,maximum))
-        value['parents'][day]={'feature_ref':part['partition_ref'],'qlib_view_ref':self.wire['qlib_view_ref']}
+        cache[key]=(parts,compact,(flags,maximum))
+        value['parents'][day]={'feature_ref':digest({'view_ref':self.library.identity,'day':day,
+            'columns':list(columns),'original_partitions':sources}),
+                               'qlib_view_ref':self.wire['qlib_view_ref']}
         store.metrics['native_feature_projections']=store.metrics.get('native_feature_projections',0)+1
         self.check()
         return cache[key]
+
 
 
 def _load_native_training_view(descriptor,wire,store):

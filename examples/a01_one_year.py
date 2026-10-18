@@ -107,7 +107,8 @@ def execute(args, options, configured, output, registration):
             feature=owners.enter_context(load_feature_library_training_view(options['feature_library_training_view'],limits=limits))
         else:
             feature_path = read(options['feature_result'])['path']
-            feature=owners.enter_context(load_stock_feature_view(feature_path,limits=limits,residency='sequential'))
+            feature=owners.enter_context(load_stock_feature_view(feature_path,limits=limits,residency='sequential',
+                membership_source=options.get('membership_source')))
         metrics['feature_cold_admission_seconds']=time.perf_counter()-before
         before=time.perf_counter()
         reuse = owners.enter_context(load_stock_ml_batch_inputs(reuse_manifest,

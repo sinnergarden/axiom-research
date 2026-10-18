@@ -95,7 +95,7 @@ class SavedColumnFeatureSource:
         # This owner retains private admitted metadata without mutating its graphs.
         # Reuse the existing incremental ledger rather than walking all ancestors per receipt.
         self.store._begin_publication_accounting()
-        self._leaf_refs={}; self._dependencies={}; self._buffer_refs={}; self._reference_refs={}
+        self._bound_raw_cache={}; self._leaf_refs={}; self._dependencies={}; self._buffer_refs={}; self._reference_refs={}
         self._leaf_subsets={}; self._leaf_axes={}; self._axis_positions={}
         self.metrics={'physical_field_day_hashes':0,'physical_hash_bytes':0}
         self._plans={}; self._definitions={}; self._needed_cache={}; self._axis_sets={}
@@ -492,7 +492,7 @@ class SavedColumnFeatureSource:
         self.source.arrays.clear(); self.store.close()
         if self._leaf_spool is not None:self._leaf_spool.close()
         self._leaf_cache_bytes=0
-        for cache in (self._leaf_refs,self._leaf_axes,self._leaf_subsets,self._dependencies,
+        for cache in (self._bound_raw_cache,self._leaf_refs,self._leaf_axes,self._leaf_subsets,self._dependencies,
                       self._buffer_refs,self._reference_refs,self._axis_positions,self._plans,self._definitions,
                       self._needed_cache,self._axis_sets,self._leaf_dependencies,self._window_buffers,self._axis_refs,
                       self._execution_plans,self._prepared_plans): cache.clear()
@@ -594,10 +594,21 @@ def _bound_raw_dependency_refs(view, reference, bindings, catalog, selection, da
     relabelled as a subset digest. Separate owners are retained in the proof.
     """
     bindings=list(bindings)
+    key=digest({'view':view.descriptor,'reference':reference.descriptor,
+        'bindings':[{'view':v.descriptor,'source':s.descriptor} for v,s in bindings],
+        'catalog':catalog.identity,'selection':selection,'days':list(days)})
     with ExitStack() as stack:
-        for owner in {id(s):s for _,s in bindings}.values():
+        for owner in {id(s):s for s in [reference,*[s for _,s in bindings]]}.values():
+            owner.store.check()
             stack.enter_context(owner.store.operation())
-        return _bound_raw_refs(view,reference,bindings,catalog,selection,days)
+        for parent in {id(v):v for v in [view,*[v for v,_ in bindings]]}.values():
+            parent.validate_boundary();stack.enter_context(parent.operation())
+        if key not in reference._bound_raw_cache:
+            result=_bound_raw_refs(view,reference,bindings,catalog,selection,days)
+            reference._retain_leaf(reference._bound_raw_cache,key,result)
+        else:reference.metrics['bound_raw_dependency_reuses']=reference.metrics.get('bound_raw_dependency_reuses',0)+1
+        return reference._bound_raw_cache[key]
+
 
 
 def _bound_raw_refs(view, reference, bindings, catalog, selection, days):
