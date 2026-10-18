@@ -74,10 +74,10 @@ def target_eligibility_reasons(raw,feature,offsets,cutoff,common,*,model_feature
     """Apply the scalar admission precedence to admitted typed columns."""
     try:
         import numpy as np
-        from .stock_compact_store import feature_eligibility_columns
+        from .stock_compact_store import membership_columns
         from .stock_matrix_storage import instant_us
-        member,complete,knowledge,maximum=feature_eligibility_columns(feature,offsets,
-            model_feature_selection=model_feature_selection)
+        membership=membership_columns(feature,offsets)
+        member=membership['member']
         reasons=np.empty(len(raw),dtype=object);reasons[:]=None
         at=raw.column('availability');clock=instant_us(cutoff);first=0
         cutoff_day=_instant(cutoff).date().isoformat()
@@ -92,19 +92,18 @@ def target_eligibility_reasons(raw,feature,offsets,cutoff,common,*,model_feature
             boundary=sum(day<=cutoff_day for day in calendar)-1
             r[(r==None)&((a['end_session']>boundary)|(a['availability']>clock))]='LABEL_NOT_MATURE'
             first=end
+        reasons[(reasons==None)&~membership['member_known']]='MEMBERSHIP_UNKNOWN'
+        reasons[(reasons==None)&~membership['member_pool_complete']]='MEMBERSHIP_INCOMPLETE'
         reasons[(reasons==None)&~member]='NOT_MEMBER'
-        reasons[(reasons==None)&~complete]='FEATURE_MISSING'
-        reasons[(reasons==None)&(knowledge>clock)]='FEATURE_NOT_AVAILABLE'
+        reasons[(reasons==None)&(~membership['member_available_validity']|(membership['member_available']>clock))]='MEMBERSHIP_NOT_AVAILABLE'
         eligible=reasons==None
-        require(bool(((maximum[eligible]!=-(2**63))&(maximum[eligible]<=clock)).all()),
-            'training Feature native clock exceeds fit')
         target=common.get('target_spec')
         if target is not None and target['label_spec']['maturity']['rule']=='all_outcome_dependencies_strictly_before_fit_cutoff':
             reasons[eligible&(at>=clock)]='LABEL_NOT_MATURE'
         return reasons.tolist()
 
     finally:
-        raw=feature=member=complete=knowledge=maximum=reasons=at=part=a=r=valid=known=eligible=None
+        raw=feature=member=membership=reasons=at=part=a=r=valid=known=eligible=None
 
 
 def read_target(store,descriptor,expected=None,raw_rows=None):
@@ -347,7 +346,8 @@ class CompactState:
             for descriptor in [*record['raw_parts'],record['normalized'],*evaluation_parts(record)]:
                 read_target(self.store,descriptor)
             width=len(self.view['definition']['universe'])
-            selected=[self.positions[training[i//width]]*width+i%width for i,valid in enumerate(rows.arrays['validity']) if valid]
+            from .stock_compact_store import model_training_selector
+            selected,_=model_training_selector(self.feature,rows,training,spec['fit_cutoff'],**self.feature_options)
             require(fold['input_manifest']['selectors']['training']['selected_count']==len(selected) and
                 record['training_binding']['training_row_count']==len(selected), 'produced training selection mismatch')
             for descriptor in record['training_binding']['feature_blocks']:
@@ -647,10 +647,11 @@ class CompactState:
             inference_offsets=expand_ranges(inputs['selectors']['inference']) if self.compact else record['inference_offsets']
             common=deepcopy(self.view['definition']); normalized=self.targets[record['normalized']['target_ref']]
             self.store.reserve(len(inference_offsets)*(len(common['ordered_features'])*96+2048))
+            from .stock_fold_inputs import model_row_reason,model_row_values
             rows=feature_rows(self.feature,inference_offsets,**self.feature_options); candidate_keys=[]; candidates=[]
             for row in rows:
-                if row['member'] and all(row['validity']) and all(type(v) in (int,float) and math.isfinite(v) for v in row['values']) and feature_available(row) is not None:
-                    candidates.append(row['values']); candidate_keys.append([row['security_id'],row['session']])
+                if model_row_reason(row) is None:
+                    candidates.append(model_row_values(row)); candidate_keys.append([row['security_id'],row['session']])
             features=self._feature_slice(inputs,spec,rows); nrows=normalized[1]
             fspec=_view_data(self.feature)['definition']['spec']; width=len(common['universe'])
             keys=[[common['universe'][off%width],fspec['feature_sessions'][off//width]] for off in training_offsets]
@@ -659,6 +660,8 @@ class CompactState:
             for code,flag in zip(nrows.arrays['reason_codes'],nrows.arrays['validity']):
                 if not flag:
                     reason=nrows.value['reason_dictionary'][int(code)]; excluded[reason]=excluded.get(reason,0)+1
+            model_excluded=int(nrows.arrays['validity'].sum())-len(training_offsets)
+            if model_excluded:excluded['MODEL_ROW_UNAVAILABLE']=model_excluded
             labels=seal({'contract_version':'stock_fold_label_slice_v3','input_manifest_ref':digest(inputs),
                 'prepared_view_ref':self.view['prepared_view_ref'],'fold_spec_ref':digest(spec),'cutoff':spec['fit_cutoff'],
                 'selectors':{k:deepcopy(inputs['selectors'][k]) for k in ('training_labels','evaluation_labels')},
@@ -677,9 +680,16 @@ class CompactState:
                 workspace=gather_rows*feature_width*8+gather_rows*32+len(nrows)
                 self.store.reserve((len(keys)+len(candidates))*feature_width*8+len(keys)*8+workspace)
                 X=training_matrix(self.feature,training_offsets,spec['fit_cutoff'],**self.feature_options)
-                y=nrows.arrays['values'][nrows.arrays['validity'].astype(bool)]
+                from .stock_compact_store import model_training_selector
+                checked_offsets,target_positions=model_training_selector(self.feature,nrows,validate_spec(spec,common['calendar'])[0],spec['fit_cutoff'],**self.feature_options)
+                require(checked_offsets==training_offsets,'training selector changed before X/y projection')
+                y=nrows.arrays['values'][target_positions]
                 P=np.asarray(candidates,dtype='<f8').reshape(len(candidates),len(common['ordered_features']))
-                require(bool(np.isfinite(X).all()) and bool(np.isfinite(y).all()) and bool(np.isfinite(P).all()),'compact active matrix must be finite')
+                require(not bool(np.isinf(X).any()) and bool(np.isfinite(y).all()) and not bool(np.isinf(P).any()),'compact matrices require finite y and no infinite X/P')
+                self.store.metrics.update(model_row_policy='research_member_any_valid_native_nan_v2',
+                    training_nan_cells=int(np.isnan(X).sum()),prediction_nan_cells=int(np.isnan(P).sum()),
+                    training_partial_rows=int(np.isnan(X).any(axis=1).sum()),
+                    training_usable_dates=len({k[1] for k in keys}),training_rows=len(keys))
                 for a in (X,y,P): a.flags.writeable=False
                 payload.update(X=X,y=y,P=P)
                 self.store.metrics['training_projection_calls']=self.store.metrics.get('training_projection_calls',0)+1
@@ -769,7 +779,7 @@ def _admit_fold(store,feature,view,fold,record,targets,positions=None,price_doma
         require(nv['definition']['sessions']==training and nv['definition']['cutoff']==spec['fit_cutoff'] and
                 nv['definition']['raw_refs']==[d['target_ref'] for d in record['raw_parts']] and
                 nv['core_ref']==record['core_ref'] and digest(nv['cohort'])==record['cohort_ref'] and
-                nv['cohort']['feature_view_ref']==fd['definition']['feature_view_ref'] and nv['cohort']['cutoff']==spec['fit_cutoff'] and
+                nv['cohort']['cutoff']==spec['fit_cutoff'] and
                 erows.sessions==inference,
                 'compact normalized/cohort/evaluation linkage mismatch')
         require(nv['definition']['universe']==common['universe'] and nv['definition']['calendar']==common['calendar'] and
@@ -782,8 +792,9 @@ def _admit_fold(store,feature,view,fold,record,targets,positions=None,price_doma
                 for i,reason in enumerate(nv['cohort']['eligibility_reasons']) if reason is None],
             'compact cohort/schema mismatch')
         binding=common.get('model_feature_selection')
-        require(nv['cohort'].get('model_feature_eligibility_ref')==model_eligibility_ref(binding),
-                'compact selected cohort mismatch')
+        from .stock_compact_store import membership_ref,model_training_selector
+        cohort_offsets=[fd['definition']['spec']['feature_sessions'].index(d)*len(common['universe'])+i for d in training for i in range(len(common['universe']))]
+        require(nv['cohort']['membership_ref']==membership_ref(feature,cohort_offsets),'compact membership cohort mismatch')
         if binding is not None or inputs['contract_version']=='stock_ml_saved_inputs_v5':
             from .stock_compact_store import iter_feature_eligibility
             from .stock_label_contracts import _eligible_reason
@@ -794,8 +805,7 @@ def _admit_fold(store,feature,view,fold,record,targets,positions=None,price_doma
             require(reasons==nv['cohort']['eligibility_reasons'],'selected Feature cohort differs from admitted bytes')
         if positions is None: positions={d:i for i,d in enumerate(fd['definition']['spec']['feature_sessions'])}
         universe=view['definition']['universe']
-        offsets=[positions[training[i//len(universe)]]*len(universe)+i%len(universe)
-                 for i,flag in enumerate(nrows.arrays['validity']) if flag]
+        offsets,target_positions=model_training_selector(feature,nrows,training,spec['fit_cutoff'],model_feature_selection=None if binding is None else binding['selection'])
         if 'training_offsets' in record:
             require(offsets==record['training_offsets'] and record['inference_offsets']==[positions[d]*len(universe)+i for d in inference for i in range(len(universe))],
                     'compact fold key selectors mismatch')

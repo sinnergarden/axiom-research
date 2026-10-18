@@ -249,7 +249,7 @@ def _column_normalization_implementation():
     from .stock_target_spec import eligible_target_reason
     from .stock_column_inputs import ColumnMathReuse
     from .stock_compact_batch import target_eligibility_reasons
-    from .stock_compact_store import feature_eligibility_columns
+    from .stock_compact_store import membership_columns
     from importlib.metadata import version
     import platform
     return digest({'operator':'core_cs_zscore_batch_v1','core':{
@@ -259,7 +259,7 @@ def _column_normalization_implementation():
             ('_Cell','_merge','_std','_cs_zscore_scale','_cs_zscore_value')},
         'eligibility':inspect.getsource(eligible_target_reason),
         'vector_eligibility':inspect.getsource(target_eligibility_reasons),
-        'feature_eligibility':inspect.getsource(feature_eligibility_columns),
+        'membership_eligibility':inspect.getsource(membership_columns),
         'normalization_projection':inspect.getsource(_normalized),
         'numerical_binding':inspect.getsource(ColumnMathReuse.vector_ref),
         'normalization_reuse':inspect.getsource(ColumnMathReuse.normalization),
@@ -546,33 +546,32 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics,*,target_spec=N
         from .stock_compact_batch import ConcatRows,TargetRows,target_eligibility_reasons
         fd=_view_data(feature); spec=fd['definition']['spec']; width=len(spec['universe'])
         columnar=isinstance(rows,ConcatRows) and metrics.get('_column_targets') is not None
-        feature_ref=fd['definition']['feature_view_ref']
+        from .stock_compact_store import membership_ref,membership_columns
         positions={d:i for i,d in enumerate(spec['feature_sessions'])}
         offsets=[positions[d]*width+i for d in days for i in range(width)]
         _working(metrics,len(rows)*4096+len(spec['ordered_features'])*96+3072)
+        feature_ref=membership_ref(feature,offsets)
+        membership=membership_columns(feature,offsets)
         reasons=[]; instant=_instant(cutoff); cutoff_us=instant_us(cutoff)
         selection=metrics.get('_model_feature_selection')
         eligibility_common=spec if target_spec is None else {**spec,'target_spec':target_spec}
         from .stock_compact_store import model_feature_binding,model_eligibility_ref
         binding=model_feature_binding(feature,selection)
         feature_count=len(spec['ordered_features']) if binding is None else len(binding['ordered_features'])
-        for row,facts in ([] if columnar else zip(rows,iter_feature_eligibility(feature,offsets,model_feature_selection=selection))):
+        for i,row in ([] if columnar else enumerate(rows)):
             from .stock_target_spec import eligible_target_reason
-            reason=eligible_target_reason(row,facts,feature_count,instant,eligibility_common)
-            if reason is None:
-                require(facts.maximum_available_at_utc_us is not None and
-                        facts.maximum_available_at_utc_us<=cutoff_us,
-                        'training Feature native clock exceeds fit')
-            reasons.append(reason)
+            facts={'member':bool(membership['member'][i]),'member_known':bool(membership['member_known'][i]),
+                'member_pool_complete':bool(membership['member_pool_complete'][i]),
+                'member_available_at':_clock(membership['member_available'][i]) if membership['member_available_validity'][i] else None}
+            reasons.append(eligible_target_reason(row,facts,0,instant,eligibility_common))
         if columnar:
             reasons=target_eligibility_reasons(rows,feature,offsets,cutoff,eligibility_common,model_feature_selection=selection)
             raw_values=rows.column('values');raw_availability=rows.column('availability')
-        cohort={'contract_version':'stock_compact_cohort_v1','feature_view_ref':feature_ref,'cutoff':cutoff,
+        cohort={'contract_version':'stock_compact_cohort_v2','membership_ref':feature_ref,'cutoff':cutoff,
             'sessions':days,'universe':spec['universe'],'raw_refs':[d['target_ref'] for d in raw_parts],
             'eligibility_reasons':reasons,'eligible_keys':([[spec['universe'][i%width],days[i//width]]
                 for i,reason in enumerate(reasons) if reason is None] if columnar else
                 [[r['security_id'],r['feature_session']] for r,reason in zip(rows,reasons) if reason is None])}
-        if binding is not None: cohort['model_feature_eligibility_ref']=model_eligibility_ref(binding)
         cohort_ref=digest(cohort)
         definition={'calendar':spec['calendar'],'universe':spec['universe'],'sessions':days,'cutoff':cutoff,
             'raw_refs':cohort['raw_refs'],'cohort_ref':cohort_ref,'normalization_spec':NORMALIZATION_SPEC,
@@ -911,12 +910,12 @@ def _prepare_legacy_compact_batch(data, *, feature_inputs,fold_specs,destination
             normalized_bytes=_measured(stats,[nrows,cohort]); _working(stats,normalized_bytes)
             stats['_retained_raw_bytes']+=normalized_bytes
             store.release_payloads()
-            training_offsets=[positions[r['feature_session']]*width+spec['universe'].index(r['security_id'])
-                for r in nrows if r['valid']]
+            from .stock_compact_store import model_training_selector
+            training_offsets,target_positions=model_training_selector(feature,nrows,training,fold['fit_cutoff'],model_feature_selection=model_feature_selection)
             inference_offsets=[positions[d]*width+i for d in inference for i in range(width)]
             _working(stats,len(spec['ordered_features'])*96+3072)
             def joined_rows():
-                selected=(r for r in nrows if r['valid'])
+                selected=(nrows[i] for i in target_positions)
                 for f,r in zip(iter_feature_rows(feature,training_offsets,
                         model_feature_selection=model_feature_selection),selected):
                     f.update(label=r['return'],raw_return=r['raw_return'],label_available_at=r['raw_available_at'],
@@ -1389,12 +1388,12 @@ class _IncrementalPreparation:
             _working(self.stats,charge);self.stats['_retained_raw_bytes']+=charge
             self._release_payloads(keep_active=True)
             security_positions={security:i for i,security in enumerate(self.spec['universe'])}
-            offsets=([self.positions[training[i//self.width]]*self.width+i%self.width
-                for i,valid in enumerate(nrows.arrays['validity']) if valid] if self.columnar else
-                [self.positions[r['feature_session']]*self.width+security_positions[r['security_id']] for r in nrows if r['valid']])
+            from .stock_compact_store import model_training_selector
+            offsets,target_positions=model_training_selector(self.feature,nrows,training,fold['fit_cutoff'],
+                model_feature_selection=self.stats['_model_feature_selection'])
             def joined_rows():
                 for f,r in zip(iter_feature_rows(self.feature,offsets,model_feature_selection=self.stats['_model_feature_selection']),
-                    (r for r in nrows if r['valid'])):
+                    (nrows[i] for i in target_positions)):
                     f.update(label=r['return'],raw_return=r['raw_return'],label_available_at=r['raw_available_at'],
                         normalized_available_at=r['label_available_at']);yield f
             binding={'training_rows_ref':None if self.columnar else digest_array_rows(joined_rows()),'training_row_count':len(offsets),

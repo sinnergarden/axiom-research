@@ -32,7 +32,7 @@ NORMALIZATION_SPEC = {
     "params": {"group": "session", "unknown_group": "reject", "missing": "skip",
                "ddof": 0, "epsilon": 1e-12, "constant": "missing", "clip": None,
                "excluded": "missing"},
-    "eligibility": "original_member_all_features_finite_valid_and_raw_label_mature",
+    "eligibility": "research_member_known_complete_and_raw_label_mature_v2",
     "maturity": "label_available_at_lte_cutoff_and_end_session_lte_cutoff_UTC_date",
     "grid_policy": "preserve_all_raw_label_keys",
     "core_partition": "one_feature_session_per_execution",
@@ -80,25 +80,17 @@ def _eligible_reason(raw: dict, feature: dict | _FeatureEligibility | None, widt
         return "FEATURE_MISSING"
     typed = type(feature) is _FeatureEligibility
     member = feature.member if typed else feature.get('member')
+    # Feature completeness and feature clocks belong to model admission only.
+    if not typed:
+        if not feature.get('member_known', True): return 'MEMBERSHIP_UNKNOWN'
+        if not feature.get('member_pool_complete', True): return 'MEMBERSHIP_INCOMPLETE'
+        clock=feature.get('member_available_at',feature.get('knowledge_cutoff'))
+        try:
+            if _instant(clock)>cutoff:return 'MEMBERSHIP_NOT_AVAILABLE'
+        except (ValueError,TypeError):return 'MEMBERSHIP_CLOCK_UNKNOWN'
+
     if member is not True:
-        return "NOT_MEMBER" if member is False else "MEMBERSHIP_UNKNOWN"
-    if typed:
-        complete, valid = feature.complete_finite, feature.validity_all
-        knowledge = feature.knowledge_cutoff
-    else:
-        values, validity = feature.get("values"), feature.get("validity")
-        complete = (isinstance(values,list) and isinstance(validity,list) and
-                    len(values)==width and len(validity)==width and all(_finite(v) for v in values))
-        valid = isinstance(validity,list) and all(v is True for v in validity)
-        knowledge = feature.get('knowledge_cutoff')
-    if not complete: return "FEATURE_MISSING"
-    if not valid:
-        return "FEATURE_INVALID"
-    try:
-        if _instant(knowledge) > cutoff:
-            return "FEATURE_NOT_AVAILABLE"
-    except (ValueError, TypeError):
-        return "FEATURE_CLOCK_UNKNOWN"
+        return 'NOT_MEMBER' if member is False else 'MEMBERSHIP_UNKNOWN'
     return None
 
 
@@ -113,8 +105,8 @@ def core_clock(value):
 def _normalization_sources(raw_ref, feature_ref, session, cutoff, eligible):
     """The existing section binding, shared by dict and typed projections."""
     from .stock_artifacts import digest
-    section_definition = {"contract_version":"stock_label_section_v1", "feature_session":session,
-        "eligible_keys":eligible, "raw_label_ref":raw_ref, "feature_ref":feature_ref,
+    section_definition = {"contract_version":"stock_label_section_v2", "feature_session":session,
+        "eligible_keys":eligible, "raw_label_ref":raw_ref, "membership_ref":feature_ref,
         "cutoff":_instant(cutoff).isoformat().replace('+00:00','Z'), "normalization_spec":deepcopy(NORMALIZATION_SPEC)}
     section_ref = digest(section_definition)
     return [
@@ -122,7 +114,7 @@ def _normalization_sources(raw_ref, feature_ref, session, cutoff, eligible):
          "revision_policy":"frozen_saved_label_build", "qualification":"observed",
          "availability_basis":"exact_raw_label_available_at"},
         {"id":"offline_eligibility", "data_ref":feature_ref, "view_ref":section_ref,
-         "revision_policy":"frozen_feature_membership_and_explicit_outcome_cutoff",
+         "revision_policy":"frozen_research_membership_and_explicit_outcome_cutoff_v2",
          "qualification":"observed", "availability_basis":"derived_offline_cutoff_selection"}]
 
 

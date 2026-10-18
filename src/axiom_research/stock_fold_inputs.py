@@ -64,6 +64,25 @@ def feature_available(row):
     return max((v for v in values if v is not None), key=_instant, default=None)
 
 
+def model_row_reason(row):
+    """One model-row policy for prediction construction and cold validation."""
+    if not row['member']:return 'NOT_MEMBER'
+    if not row.get('member_known',True):return 'MEMBERSHIP_UNKNOWN'
+    if not row.get('member_pool_complete',True):return 'MEMBERSHIP_INCOMPLETE'
+    require(len(row['values'])==len(row['validity'])==len(row['availability']), 'model row axes mismatch')
+    any_valid=False
+    for value,valid,clock in zip(row['values'],row['validity'],row['availability']):
+        if valid:
+            require(_finite(value) and clock is not None,'valid model cell needs finite value and clock')
+            require(_instant(clock)<=_instant(row['knowledge_cutoff']),'future valid model cell')
+            any_valid=True
+    return None if any_valid else 'FEATURE_MISSING'
+
+
+def model_row_values(row):
+    return [value if valid else float('nan') for value,valid in zip(row['values'],row['validity'])]
+
+
 _COMMON_SOURCE_KEYS = ('scope', 'snapshot', 'pit_policy', 'calendar', 'universe',
     'catalog_ref', 'feature_selection', 'ordered_features', 'feature_parents')
 _FEATURE_INPUT_TOKEN = object()

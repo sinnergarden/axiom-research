@@ -14,7 +14,7 @@ def dataset_binding(*,common,features,labels,raw_refs,keys,training_ref,excluded
         'ordered_features':common['ordered_features'],'selectors':inputs['selectors'],
         'training_keys_digest':digest(keys),'training_row_count':len(keys),'excluded':excluded,
         'target_semantics':target_semantics(common) if columnar else TARGET_SEMANTICS,
-        'normalization':NORMALIZATION_SPEC,'validation':'none_fixed_parameters_no_early_stopping'}
+        'normalization':NORMALIZATION_SPEC,'model_row_policy':'research_member_any_valid_native_nan_v2','validation':'none_fixed_parameters_no_early_stopping'}
     value['training_binding_ref' if columnar else 'training_rows_ref']=training_ref
     if columnar:value.update(target_spec=common['target_spec'],label_definition_ref=common['target_spec']['label_definition_ref'])
     return seal(value,'dataset_ref')

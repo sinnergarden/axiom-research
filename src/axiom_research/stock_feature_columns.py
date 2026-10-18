@@ -88,6 +88,8 @@ class FeatureColumnSource:
             fields.append(dict(name='vwap',dtype='float64',unit='CNY/share',stage='fact',missing='preserve'))
         if 'up_limit' in self.manifest.get('daily_fields',{}):
             fields.extend(dict(name=f,dtype='float64',unit='CNY/share',stage='fact',missing='preserve') for f in ('raw_open','raw_close'))
+        if {'is_suspended','volume_shares'}<=set(self.manifest.get('daily_fields',{})):
+            fields.append(dict(name='daily_is_suspended_v1',dtype='float64',unit='dimensionless',stage='fact',missing='preserve'))
         fields.append(dict(name='raw_factor',dtype='float64',unit='dimensionless',stage='fact',missing='preserve'))
         fields.append(dict(name='session_ordinal',dtype='float64',unit='days',stage='fact',missing='preserve'))
         return fields
@@ -101,6 +103,7 @@ class FeatureColumnSource:
         return array.column(FIELDS.index(field)) if hasattr(array,'column') else array[:,:,FIELDS.index(field)]
 
     def leaf_fields(self, field):
+        if field=='daily_is_suspended_v1':return ('is_suspended','volume_shares')
         if field=='session_ordinal': return ('close',)
         if field in ('raw_open','raw_close','raw_factor'): return (field[4:],)
         if field == 'vwap': return ('amount_cny','volume_shares','factor')
@@ -189,6 +192,25 @@ class FeatureColumnSource:
             return leaves[key]
         for field in fields:
             if field in FIELDS or field=='vwap': continue
+            if field=='daily_is_suspended_v1':
+                # Reader absence is source_missing + no usable_from. Selected
+                # explicit null events are not_provided with their event clock.
+                # Positive observed volume proves only 'not full-day suspended'.
+                event_valid=leaf('is_suspended','validity')
+                event_known=leaf('is_suspended','available_validity')
+                absent=(~event_valid)&(~event_known)&(leaf('is_suspended','reasons')==self.manifest['reason_codes'].index('source_missing'))
+                volume_known=leaf('volume_shares','available_validity')
+                traded=absent&leaf('volume_shares','validity')&volume_known&(leaf('volume_shares','values')>0)
+                valid=event_valid|traded
+                clock=np.where(traded,leaf('volume_shares','available'),leaf('is_suspended','available'))
+                known=event_known|traded
+                clock=np.where(known,(clock+999999)//1000000*1000000,cutoff)
+                require(bool((clock<=cutoff).all()),'daily suspension evidence exceeds cutoff')
+                selected_values[field]=np.where(event_valid,leaf('is_suspended','values'),0.0)
+                selected_validity[field]=valid
+                selected_reasons[field]=np.where(valid,0,leaf('is_suspended','reasons')).astype('u1')
+                selected_clocks[field]=clock
+                continue
             if field=='session_ordinal':
                 from datetime import date
                 days=selected_days

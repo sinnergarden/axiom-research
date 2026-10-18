@@ -125,6 +125,7 @@ CORE_INPUT_CONTRACTS['raw_factor']={'domain':'adjustment_factors','dtype':'float
 
 DAILY_FIELD_CONTRACTS['is_suspended']={'domain':'security_status','dtype':'bool','unit':None}
 CORE_INPUT_CONTRACTS['is_suspended']={'domain':'security_status','dtype':'float64','unit':'dimensionless'}
+CORE_INPUT_CONTRACTS['daily_is_suspended_v1']={'domain':'security_status','dtype':'float64','unit':'dimensionless'}
 
 for _field,_leaf,_unit,_derivation in (
     ('forecast_type','forecast_category_code','dimensionless','forecast_category_code'),

@@ -1,3 +1,4 @@
+from .stock_fold_inputs import model_row_reason
 """Keyed OOS evaluation admission for already verified matrix batches.
 
 The matrix owner supplies the OOS lease and saved-fold admission. This module
@@ -410,7 +411,7 @@ def _admit_matrix(signal_inputs, raw_label_input, scope, batch):
                     'matrix OOS source clock conflict')
                 clocks.extend([prediction['knowledge_cutoff'], original['knowledge_cutoff']])
                 if prediction['valid']:
-                    _require(original['member'] and all(original['validity']) and all(_finite(v) for v in original['values']) and
+                    _require(model_row_reason(original) is None and
                         _finite(prediction['score']) and prediction['invalid_reason'] is None, 'matrix valid Signal/Feature mismatch')
                 else:
                     _require(prediction['score'] is None and bool(prediction['invalid_reason']), 'matrix invalid Signal null/reason required')

@@ -202,6 +202,10 @@ class SavedColumnFeatureSource:
             result[field]={'value_projection':'boolean_0_1_binary64_v1' if meta['dtype']=='bool' else 'native_binary64_v1',
                 'source_profile':self._field_profile(profiles[meta['domain']],field), 'missing':'preserve',
                 'clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
+        if {'is_suspended','volume_shares'}<=set(result):
+            result['daily_is_suspended_v1']={'projection':'sparse_event_or_visible_positive_volume_preserve_explicit_unknown_v1',
+                'event':deepcopy(result['is_suspended']),'volume':deepcopy(result['volume_shares']),
+                'missing':'preserve_explicit_null_and_unobserved_volume','clock':'used_evidence_ceil_second'}
         result['raw_factor']={'value_projection':'native_binary64_v1','source_profile':self._field_profile(profiles['adjustment_factors'],'factor'),'meaning':'native_supplier_adjustment_multiplier; not anchor-normalized price','missing':'preserve','clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
         result['session_ordinal']={'projection':'proleptic_gregorian_session_date_ordinal_v1','unit':'days','missing':'preserve'}
         if 'up_limit' in result:
@@ -416,6 +420,8 @@ class SavedColumnFeatureSource:
                     first=leaves[0]
                     field_days.setdefault(first,set()).update(spec['read_sessions'][i] for i in ix)
                     selected[field]=dict(self._selected_buffers(first,ix,securities))
+                    if field=='daily_is_suspended_v1':
+                        selected[field]['daily_state_projection']='sparse_event_or_visible_positive_volume_preserve_explicit_unknown_v1'
                     for leaf in leaves[1:]:
                         leaf_ix=sorted(set(ix)|{positions[day]}) if leaf=='factor' else ix
                         field_days.setdefault(leaf,set()).update(spec['read_sessions'][i] for i in leaf_ix)
@@ -733,6 +739,9 @@ class _RawCrossSectionSource:
         # Keep original zero-source codes: missing/constant Core outputs are
         # valid saved facts, not invented Data observations.
         codes=raw['source_codes'];admitted=sets
+        source_counts=np.asarray([len(s) for s in sets])
+        require(bool((~raw['validity']|((source_counts[codes]>0)&(raw['available_at_utc_us']!=raw['null_available_at_utc_us']))).all()),
+                'Research saved raw valid cell requires source lineage and clock')
         reference_set=[reference_binding['id']]
         bindings[reference_binding['id']]=reference_binding
         if reference_set not in admitted: admitted.append(reference_set)

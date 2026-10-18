@@ -267,9 +267,8 @@ def _predictions(predictions,features,common,spec,model):
         require(_instant(row['knowledge_cutoff'])==_instant(row['available_at'])==infer and
             _instant(model['simulated_available_at'])<infer and _instant(row['feature_knowledge_cutoff'])<=infer,
             'prediction inference clock mismatch')
-        valid=original['member'] and all(original['validity']) and all(_finite(v) for v in original['values']) and feature_available(original) is not None
-        reason=None if valid else 'NOT_MEMBER' if not original['member'] else (
-            'FEATURE_AVAILABILITY_UNKNOWN' if feature_available(original) is None else 'FEATURE_MISSING')
+        from .stock_fold_inputs import model_row_reason
+        reason=model_row_reason(original);valid=reason is None
         require(type(row['valid']) is bool and row['valid']==valid and row['invalid_reason']==reason and
             (_finite(row['score']) if valid else row['score'] is None),'prediction validity/value mismatch')
     require(set(indexed)==expected,'complete prediction union required')

@@ -401,7 +401,7 @@ def _model_feature_binding(value, selection):
         'historical_feature_inputs_ref':definition['historical_feature_inputs_ref'],
         'selection':selected,'ordered_features':[s['id'] for s in selected],
         'schema':[deepcopy(schema[s['id']]) for s in selected],
-        'eligibility':'original_membership_selected_validity_max_known_availability_fit_cutoff_v1'},'model_feature_selection_ref')
+        'eligibility':'research_membership_any_valid_native_nan_v2'},'model_feature_selection_ref')
 
 
 def model_common(spec, binding):
@@ -613,6 +613,7 @@ def _validate_feature_cells(value, group, rows):
                     bool(((~meta_present)|(meta_clock==arrays['available_at_utc_us'])).all()),
                     'Feature buffer/metadata clock or validity mismatch')
             require(bool(np.isfinite(arrays['values']).all()),'Feature physical value must be finite')
+            require(bool((~meta_flags|meta_present).all()),'valid Feature requires a source clock in Research profile')
             require(bool(((arrays['value_validity']!=0)|(arrays['values']==0.0)).all()),
                     'Feature null physical value must be zero')
             require(bool(((arrays['available_at_validity']!=0)|(arrays['available_at_utc_us']==0)).all()),
@@ -717,10 +718,11 @@ def _admit_feature_block(value, block):
         # Reduction happens once per admitted block, never one NumPy temporary
         # per eligibility row. Physical finiteness was checked above.
         store.reserve(count*32)
-        flags=np.full(count,block['complete_columns'],dtype='?')
+        require(block['complete_columns'],'model Feature block is missing columns')
+        flags=np.zeros(count,dtype='?')
         maximum=np.full(count,np.iinfo(np.int64).min,dtype='<i8')
         for part,arrays in group:
-            flags &= np.all(arrays['value_validity'],axis=1)
+            flags |= np.any(arrays['value_validity'],axis=1)
             np.maximum(maximum,np.max(arrays['available_at_utc_us'],axis=1,
                 where=arrays['available_at_validity'].view('?'),initial=np.iinfo(np.int64).min),out=maximum)
             store.metrics['eligibility_reduction_calls']=store.metrics.get('eligibility_reduction_calls',0)+2
@@ -780,12 +782,12 @@ def _admit_model_columns(value, block, binding):
         key=tuple(sorted(selected))
         if block.get('model_eligibility_key')!=key:
             store.reserve(count*18+count*32+4096)
-            flags=np.ones(count,dtype='?'); maximum=np.full(count,np.iinfo(np.int64).min,dtype='<i8')
+            flags=np.zeros(count,dtype='?'); maximum=np.full(count,np.iinfo(np.int64).min,dtype='<i8')
             for part,arrays in cache.values():
                 positions=[j for j,c in enumerate(part['columns']) if c in selected]
                 if not positions: continue
                 store.reserve(count*18+count*len(positions)*17+4096)
-                flags &= np.all(arrays['value_validity'][:,positions],axis=1)
+                flags |= np.any(arrays['value_validity'][:,positions],axis=1)
                 np.maximum(maximum,np.max(arrays['available_at_utc_us'][:,positions],axis=1,
                     where=arrays['available_at_validity'][:,positions].view('?'),
                     initial=np.iinfo(np.int64).min),out=maximum)
@@ -1055,6 +1057,8 @@ def training_matrix(handle,offsets,cutoff,*,model_feature_selection=None):
     for i in sorted(chosen):
         if binding is None: _admit_feature_block(value,value['blocks'][i])
         else: _admit_model_columns(value,value['blocks'][i],binding)
+    member_facts=membership_columns(handle,offsets)
+    require(bool((member_facts['member']&member_facts['member_known']&member_facts['member_pool_complete']).all()),'training requires legal research membership')
     matrix=np.empty((len(offsets),len(columns)),dtype='<f8')
     try:
         for first,block,locals_ in _offset_runs(value,offsets):
@@ -1074,11 +1078,55 @@ def training_matrix(handle,offsets,cutoff,*,model_feature_selection=None):
                 positions=[column_positions[part['columns'][j]] for j in selected]
                 workspace=len(indexes)*len(positions)*8+len(indexes)*32
                 value['store'].reserve(matrix.nbytes+workspace)
-                matrix[first:first+len(indexes),positions]=(arrays['values'][indexes] if binding is None
-                    else arrays['values'][indexes[:,None],selected])
+                values=arrays['values'][indexes[:,None],selected]
+                valid=arrays['value_validity'][indexes[:,None],selected].astype(bool)
+                matrix[first:first+len(indexes),positions]=np.where(valid,values,np.nan)
                 value['store'].metrics['training_block_gathers']=value['store'].metrics.get('training_block_gathers',0)+1
-        require(bool(np.isfinite(matrix).all()),'selected training Feature values must be finite')
+        require(not bool(np.isinf(matrix).any()),'selected training Feature values cannot contain infinity')
         matrix.flags.writeable=False; value['store'].check(); return matrix
     except BaseException:
         matrix=indexes=arrays=rows=flags=maximum=block=cache=parts=None
         raise
+
+
+def membership_columns(handle, offsets):
+    """Read the existing member facts independently of selected Feature cells."""
+    import numpy as np
+    value=_view_data(handle);spec=value['definition']['spec'];width=len(spec['universe'])
+    native=value.get('native')
+    require(native is not None,'independent label cohort requires saved membership facts')
+    a=native.member_arrays;out={k:[] for k in ('member','member_known','member_pool_complete','member_available','member_available_validity')}
+    for _,block,locals_ in _offset_runs(value,offsets):
+        day=spec['feature_sessions'][block['start']//width];i=native.days[day]
+        positions=[native.securities[spec['universe'][j]] for j in locals_]
+        for name in out:out[name].extend(a[name][i,positions].tolist())
+    for name in out:out[name]=np.asarray(out[name],dtype='<i8' if name=='member_available' else '?')
+    cutoffs=np.asarray([instant_us(spec['cutoff_by_session'][spec['feature_sessions'][off//width]]) for off in offsets],dtype='<i8')
+    require(bool((~out['member_known']|out['member_available_validity']).all()),'known member needs clock')
+    require(bool((~out['member_available_validity']|(out['member_available']<=cutoffs)).all()),'future membership fact')
+    return out
+
+
+def membership_ref(handle, offsets):
+    a=membership_columns(handle,offsets);spec=_view_data(handle)['definition']['spec'];width=len(spec['universe'])
+    native=_view_data(handle)['native'];manifest=native.member_manifest
+    source_identity={'buffers':{k:v for k,v in manifest['buffers'].items() if k.startswith('member')},
+        'profile':manifest['source_profiles']['universe_membership'],'universe_binding':manifest.get('universe_binding')}
+    return digest({'contract_version':'research_label_membership_v2','scope':spec['scope'],'membership_source':source_identity,
+        'pit_policy':spec['pit_policy'],'keys':[[spec['universe'][o%width],spec['feature_sessions'][o//width]] for o in offsets],
+        'facts':{k:v.tolist() for k,v in a.items()}})
+
+
+def model_training_selector(handle, normalized, days, cutoff, *, model_feature_selection=None):
+    """Return one ordered pair: Feature offsets and corresponding target positions."""
+    import numpy as np
+    spec=_view_data(handle)['definition']['spec'];width=len(spec['universe']);positions={d:i for i,d in enumerate(spec['feature_sessions'])}
+    offsets=[positions[d]*width+i for d in days for i in range(width)]
+    member,observed,knowledge,maximum=feature_eligibility_columns(handle,offsets,model_feature_selection=model_feature_selection)
+    membership=membership_columns(handle,offsets)
+    label=np.asarray(normalized.arrays['validity'],dtype=bool) if hasattr(normalized,'arrays') else np.asarray([r['valid'] for r in normalized],dtype=bool)
+    require(len(label)==len(offsets),'target/feature axes mismatch')
+    valid=label&member&membership['member_known']&membership['member_pool_complete']&observed
+    require(bool(((knowledge[valid]<=instant_us(cutoff))&(maximum[valid]!=-(2**63))&(maximum[valid]<=instant_us(cutoff))).all()),'model row clock exceeds fit')
+    chosen=np.flatnonzero(valid).tolist()
+    return [offsets[i] for i in chosen],chosen

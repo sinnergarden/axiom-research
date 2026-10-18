@@ -310,12 +310,17 @@ class _NativeTrainingBlocks:
         self.library=library;self.members=members;self.member_store=member_store;self.wire=wire
         self.days={d:i for i,d in enumerate(wire['source_member_sessions'])}
         self.securities={s:i for i,s in enumerate(wire['source_member_securities'])}
+        from .stock_feature_library import _SourceArrays
+        from .stock_feature_inputs import source_universe_binding
+        self.member_manifest=member_store.read_json(wire['definition']['source'],'source_ref')
+        binding=source_universe_binding(self.member_manifest,reader=member_store.read_json,reuse_saved=True)
+        self.member_arrays=_SourceArrays(self.member_manifest,member_store,binding['universe_id'])
 
     def check(self):
         self.library.validate_boundary();self.member_store.check()
 
     def close(self):
-        self.library.close();self.member_store.close();self.members=None
+        self.member_arrays.clear();self.library.close();self.member_store.close();self.members=None
 
     def admit(self, value, block, columns):
         import numpy as np
@@ -338,7 +343,15 @@ class _NativeTrainingBlocks:
         require(bool(np.isfinite(arrays['values']).all()) and
                 bool((~known|(arrays['available_at_utc_us']<=instant_us(cutoff))).all()),
                 'native Feature values/availability exceed original cutoff')
-        member=self.members[self.days[day],[self.securities[s] for s in securities]]
+        member_positions=[self.securities[s] for s in securities]
+        member_day=self.days[day]
+        member=self.members[member_day,member_positions]
+        ma=self.member_arrays
+        require(bool(ma['member_known'][member_day,member_positions].all()) and
+                bool(ma['member_pool_complete'][member_day,member_positions].all()) and
+                bool(ma['member_available_validity'][member_day,member_positions].all()) and
+                bool((ma['member_available'][member_day,member_positions]<=instant_us(cutoff)).all()),
+                'model research membership must be known, complete and visible')
         positions=[value['column_positions'][n] for n in columns]
         rows=[]
         for i,s in enumerate(securities):
@@ -353,7 +366,8 @@ class _NativeTrainingBlocks:
                 'source_refs':[self.library.identity,*cells['partition_refs']]})
         compact=_CompactRows(rows,len(columns),np);rows=None
         compact.column_positions={original:selected for selected,original in enumerate(positions)}
-        flags=np.all(cells['validity'],axis=1)
+        require(bool((~cells['validity']|known).all()),'valid Feature requires a source clock in Research profile')
+        flags=np.any(cells['validity'],axis=1)
         maximum=np.max(cells['available_at_utc_us'],axis=1)
         flags.flags.writeable=False;maximum.flags.writeable=False
         from hashlib import sha256

@@ -195,7 +195,7 @@ def load_feature_catalog_ref(reference: str) -> FeatureCatalog:
     legacy = load_feature_catalog()
     if legacy.identity == reference:
         return legacy
-    for name in ("a01_price_v1.json", "qsys_stock_v1.json", "qsys_stock_v2.json", "qsys_stock_v3.json", "qsys_stock_v4.json"):
+    for name in ("a01_price_v1.json", "qsys_stock_v1.json", "qsys_stock_v2.json", "qsys_stock_v3.json", "qsys_stock_v4.json", "qsys_stock_v5.json"):
         source = files("axiom_research").joinpath("catalogs", name)
         if not source.is_file():
             continue

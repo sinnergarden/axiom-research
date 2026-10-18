@@ -39,7 +39,7 @@ def validate_input(fold, manifest, row_index, common):
     require(roles['validation'] is None and roles['training']==roles['training_labels'] and
         roles['inference']==roles['evaluation_labels'],'compact v4 selector roles mismatch')
     training,inference=validate_spec(spec,common['calendar']); width=len(common['universe'])
-    for role,days,kind in (('training',training,'normalized_valid_rows'),('inference',inference,'complete_grid')):
+    for role,days,kind in (('training',training,'normalized_valid_model_usable_rows_v2'),('inference',inference,'complete_grid')):
         selected=roles[role]
         fields(selected,{'contract_version','kind','row_index_ref','ranges','target_refs','selected_count',
             'keys_digest','selector_ref'},'exact compact selector required'); sealed(selected,'selector_ref')
@@ -61,7 +61,7 @@ def selectors_for(record, spec, row_index, training_offsets):
         return seal({'contract_version':'stock_fold_selector_v1','kind':kind,
             'row_index_ref':row_index['row_index_ref'],'ranges':grid_ranges(days,sessions,width),
             'target_refs':refs,'selected_count':count,'keys_digest':keys_ref},'selector_ref')
-    train=selector('normalized_valid_rows',training,[record['normalized']['target_ref']],
+    train=selector('normalized_valid_model_usable_rows_v2',training,[record['normalized']['target_ref']],
         len(training_offsets),record['training_binding']['training_keys_digest'])
     inference_keys=digest_array_rows([security,day] for day in inference for security in universe)
     infer=selector('complete_grid',inference,[part['target_ref'] for part in record['evaluation_parts']],
@@ -85,10 +85,10 @@ def validate_controls(fold, record, view, manifest, row_index):
     binding=record['training_binding']
     if v5:
         fields(binding,{'contract_version','ordered_features','feature_blocks','training_selector_ref',
-            'training_row_count','cohort_ref','eligibility_mask','target_refs',
+            'training_row_count','cohort_ref','target_validity_mask','target_refs',
             'training_keys_digest','dependency_ref','binding_ref'},'exact v5 training block binding required')
         sealed(binding,'binding_ref')
-        require(binding['contract_version']=='stock_training_binding_v2' and
+        require(binding['contract_version']=='stock_training_binding_v3' and
             binding['cohort_ref']==record['cohort_ref'] and
             binding['target_refs']==[record['normalized']['target_ref']] and
             binding['training_selector_ref']==inputs['selectors']['training']['selector_ref'] and
