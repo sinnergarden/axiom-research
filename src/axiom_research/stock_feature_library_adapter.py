@@ -411,7 +411,8 @@ def _load_native_training_view(descriptor,wire,store):
                 compatibility['semantic_refs']=={n:cap['definitions'][n]['semantic_ref'] for n in columns} and
                 compatibility['cutoff_by_session']=={d:spec['cutoff_by_session'][d] for d in days},
                 'native publication compatibility binding mismatch')
-        member_store=VerifiedMatrixStore(maximum_matrix_bytes=store.maximum_matrix_bytes,
+        from .stock_matrix_reader import VerifiedMatrixStore as MembershipStore
+        member_store=MembershipStore(maximum_matrix_bytes=store.maximum_matrix_bytes,
                                         maximum_source_bytes=store.limits['maximum_source_bytes'])
         original=member_store.read_json(definition['source'],'source_ref')
         require(wire['source_member_buffer']==original['buffers']['member'] and
