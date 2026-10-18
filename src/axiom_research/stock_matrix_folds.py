@@ -289,6 +289,13 @@ def _load_matrix_fold(path, *, projection,batch,ingress,_lease=None):
     fold=documents['fold.json']
     require(fold['status']=='COMPLETE' and manifest['fold_ref']==fold['fold_ref'], 'incomplete saved fold')
     if _lease is None:return _owned_fold(path,documents)
+    # The evaluation publication carries the saved booster reference without
+    # loading or hashing the booster again. Its file mark supports relocation.
+    from .stock_fold_inputs import file_fingerprint
+    booster=str(path/'booster.txt')
+    ingress.marks[booster]=file_fingerprint(booster)
+    ingress.hashes[booster]=manifest['files']['booster.txt']
+    ingress.metrics['source_bytes']+=ingress.marks[booster][2]
     # An OOS writer needs the requested evaluation labels. Reuse their saved
     # owner; do not reconstruct a model's training ancestors or read its booster.
     definition=fold['definition'];inputs=definition['input_manifest'];spec=definition['fold_spec']
