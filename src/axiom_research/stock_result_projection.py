@@ -199,20 +199,18 @@ def load_stock_prediction_bindings(path, *, research_root=None):
 
 
 def _fold_outputs(base, root):
-    """Retain narrow admitted headers; release every fold's decoded row arrays."""
+    """Consume published predictions and controls, retaining original parent refs."""
     manifest = _metadata(_local(base / "manifest.json", root))
-    from .stock_matrix_folds import OUTPUTS, _predictions
+    from .stock_matrix_folds import OUTPUTS
     expected = set(OUTPUTS) | {"fold.json", "booster.txt"}
     _require(manifest["contract_version"] == "stock_ml_fold_manifest_v2" and
              set(manifest["files"]) == expected, "unsupported fold output manifest")
     documents = {}
     marks = {}
-    for name, expected_digest in manifest["files"].items():
+    for name in ("fold.json", "model.json", "predictions.json"):
+        expected_digest = manifest["files"][name]
         target = _local(base / name, root); marks[target] = _SESSION.get().observe(target)
-        if name == "booster.txt":
-            _require(file_digest(target) == expected_digest, "booster file mismatch")
-        else:
-            documents[name] = _checked(target, expected_digest)
+        documents[name] = _checked(target, expected_digest)
     fold = documents["fold.json"]; _sealed(fold, "content_digest")
     definition = fold["definition"]
     _require(fold["contract_version"] in ("stock_ml_fold_v3", "stock_ml_fold_v4") and
@@ -222,11 +220,13 @@ def _fold_outputs(base, root):
              "fold definition mismatch")
     refs = {}
     for name, field in OUTPUTS.items():
-        value = documents[name]; _sealed(value, field); refs[field] = value[field]
-        _require(fold[field] == value[field], "fold output identity mismatch")
+        refs[field] = fold[field]
+        if name in documents:
+            value = documents[name]; _sealed(value, field)
+            _require(fold[field] == value[field], "fold output identity mismatch")
     _require(fold["fold_ref"] == manifest["fold_ref"] ==
              digest({"definition_ref": fold["definition_ref"], **refs}), "fold identity mismatch")
-    model = documents["model.json"]; features = documents["feature-slice.json"]
+    model = documents["model.json"]
     predictions = documents["predictions.json"]
     _require(model["booster_digest"] == manifest["files"]["booster.txt"] and
              model["dataset_ref"] == fold["dataset_ref"] and model["feature_ref"] == fold["feature_ref"],
@@ -249,10 +249,41 @@ def _fold_outputs(base, root):
         _require(model["feature_selection"] == selection["selection"] and
                  model["ordered_features"] == selection["ordered_features"],
                  "saved model/Feature selection mismatch")
-    common = {"universe": features["universe"], "catalog_ref": features["catalog_ref"]}
+    # Published outputs carry their original Feature/Label refs. Registration
+    # consumes scores and their declared clocks, not the producer's cell table.
+    from .stock_label_contracts import _instant, _finite
+    spec = definition["fold_spec"]
+    columnar = "target_spec" in definition
+    _require(predictions["contract_version"] == ("stock_prediction_run_v3" if columnar else "stock_prediction_run_v2") and
+             predictions["signal_stage"] == ("raw_prediction" if columnar else "prediction_raw") and
+             predictions["score_unit"] == "dimensionless" and predictions["clock_basis"] == "declared_simulation" and
+             predictions["model_ref"] == fold["model_ref"] and
+             predictions["feature_ref"] == fold["feature_ref"] and
+             predictions["fold_spec_ref"] == definition["fold_spec_ref"] and
+             predictions["score_semantics"] == model["target_semantics"],
+             "published prediction/model linkage mismatch")
     if "target_spec" in definition:
-        common["target_spec"] = definition["target_spec"]
-    _predictions(predictions, features, common, definition["fold_spec"], model)
+        _require(predictions["label_spec_ref"] == model["label_spec_ref"] and
+                 predictions["label_spec"] == model["label_spec"] and
+                 predictions["label_normalization"] == model["label_normalization"],
+                 "published prediction Label mismatch")
+    clocks = {day: _instant(clock) for day, clock in spec["inference_cutoff_by_session"].items()}
+    expected = {(security, day) for day in clocks for security in predictions["universe"]}
+    seen = set(); model_at = _instant(model["simulated_available_at"])
+    for row in predictions["rows"]:
+        key = row["security_id"], row["session"]
+        _require(key in expected and key not in seen, "published prediction key mismatch")
+        seen.add(key); infer = clocks[key[1]]
+        _require(_instant(row["knowledge_cutoff"]) == _instant(row["available_at"]) == infer and
+                 _instant(row["simulated_model_available_at"]) == model_at < infer and
+                 _instant(row["feature_knowledge_cutoff"]) <= infer and
+                 (row["feature_available_at"] is None or _instant(row["feature_available_at"]) <= infer),
+                 "published prediction clock mismatch")
+        _require(type(row["valid"]) is bool and
+                 (_finite(row["score"]) and row["member"] and row["invalid_reason"] is None
+                  if row["valid"] else row["score"] is None and bool(row["invalid_reason"])),
+                 "published prediction validity mismatch")
+    _require(seen == expected, "published prediction scope incomplete")
     _require(all(mark(p) == m for p, m in marks.items()), "fold changed during projection")
     header = {key: predictions[key] for key in
               ("contract_version", "signal_run_ref", "model_ref", "feature_ref", "fold_spec_ref")}
