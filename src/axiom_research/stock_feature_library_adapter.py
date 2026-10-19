@@ -21,12 +21,54 @@ from .stock_compact_store import OwnedStore, StockFeatureView, _TOKEN, _size
 VERSION='stock_feature_library_training_projection_v1'
 
 
+def _selected_recipe_layer(definitions, catalog, selection):
+    """Match only selected DAGs against admitted semantics, without source reads."""
+    chosen=catalog.select(selection);wire=catalog.to_dict()
+    require(wire['input_contract']=={'price_basis':'common_anchor_adjusted_v1',
+        'adjustment_anchor':'feature_session_visible_at_cutoff','amount_unit':'CNY'},
+        'unsupported training catalog input semantics')
+    nodes=wire['shared_nodes']+[node for feature in chosen for node in feature['core_nodes']]
+    by_name={node['name']:node for node in nodes};layers=[]
+    for feature in chosen:
+        name=feature['id'];needed=set()
+        def include(key):
+            if key in by_name and key not in needed:
+                needed.add(key)
+                for parent in by_name[key]['inputs']:include(parent)
+        include(name)
+        raw_nodes=[node for node in nodes if node['name'] in needed]
+        raw_output={'node':name,'column':{**by_name[name]['column'],'name':name}}
+        definition=definitions[name];semantic=definition['semantic']
+        require(definition['schema']==semantic['output']['column'], 'Feature schema semantics mismatch')
+        if semantic['nodes']==raw_nodes and semantic['output']==raw_output:
+            layers.append('raw');continue
+        norm=feature['normalization'];normalized_name=name+'_cs_zscore'
+        node={'name':normalized_name,'op':norm['op'],'version':'1','inputs':[name],
+            'params':{k:v for k,v in norm.items() if k not in ('op','reference')},
+            'column':{'name':normalized_name,'dtype':'float64','unit':'dimensionless',
+                      'stage':'cross_sectional','missing':'preserve'}}
+        frozen=semantic['inputs'].get(name,{}).get('semantics',{}).get('frozen_reference_feature')
+        if frozen is not None:
+            require(set(semantic['inputs'])=={name} and frozen['semantic']['nodes']==raw_nodes and
+                frozen['semantic']['output']==raw_output, 'saved raw recipe semantics mismatch')
+            expected_nodes=[node]
+        else:expected_nodes=[*raw_nodes,node]
+        require(semantic['nodes']==expected_nodes and semantic['output']=={
+            'node':normalized_name,'column':{**node['column'],'name':name}},
+            'selected Feature recipe semantics mismatch')
+        layers.append('normalized')
+    require(len(set(layers))==1, 'mixed Feature recipe layers')
+    return layers[0]
+
+
 def _feature_source_compatibility(view, source, selection, *, raw_view=None, raw_bindings=None, catalog=None):
-    """Record published input identities; preparation owns their provenance."""
+    """Bind selected recipe semantics; preparation owns input provenance."""
+    from .feature_catalog import load_feature_catalog_ref
     cap=view.describe();spec=source.source.manifest['spec']
     require(cap['security_ids']==spec['universe'] and
             [item['id'] for item in selection]==cap['columns'], 'Feature/source axes or selection mismatch')
-    layer='normalized' if all(cap['definitions'][n]['schema']['stage']=='cross_sectional' for n in cap['columns']) else 'raw'
+    selected_catalog=load_feature_catalog_ref(spec['catalog_ref']) if catalog is None else catalog
+    layer=_selected_recipe_layer(cap['definitions'],selected_catalog,selection)
     result={'contract_version':'stock_feature_source_compatibility_v2','layer':layer,
         'view_ref':view.identity,'semantic_refs':{n:cap['definitions'][n]['semantic_ref'] for n in cap['columns']},
         'reference_security_ids':source.reference_security_ids,'source':source.descriptor,

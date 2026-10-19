@@ -1477,8 +1477,11 @@ class _IncrementalPreparation:
     def finish(self):
         from .stock_batch import _data
         self._check()
+        # The cursor advances only after saved controls are admitted or a new
+        # fold is produced. Matrix/OOS verification belongs to its consumer;
+        # public preparation need not activate historical training windows.
         if not self.state.incomplete:
-            require(self.cursor==len(self.plans) and self.state._verified_folds=={digest(f) for f,_,_ in self.plans},
+            require(self.cursor==len(self.plans) and len(self.ready)==len(self.plans),
                     'complete cached fold consumption required')
             return self.batch.to_dict()
         require(len(self.ready)==len(self.plans) and self.cursor==len(self.plans),'complete checkpoint coverage required')
@@ -1488,8 +1491,6 @@ class _IncrementalPreparation:
                 'definition':self.definition,'definition_ref':self.definition_ref,
                 'prepared_view':self.state.batch['prepared_view'],'folds':self.ready,'status':'COMPLETE'}
             manifest['batch_ref']=digest(manifest);manifest=seal(manifest,'content_digest')
-            require(self.state._verified_folds=={digest(f) for f,_,_ in self.plans},
-                    'complete verified checkpoint coverage required')
             self.state.check()
             self.state._complete_checkpoint(manifest,publish=lambda:self._immutable_json(self.target/'batch.json',manifest))
             value=_data(self.batch);value['manifest']=manifest;value['identity']=manifest['batch_ref'];value['incomplete']=False
