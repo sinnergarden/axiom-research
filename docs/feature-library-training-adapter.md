@@ -1,54 +1,79 @@
 # Feature library training adapter
 
-`stock_feature_library_adapter.build_feature_library_training_view` projects a
-fixed Engine FeatureView into bounded daily arrays and the original Research
-training row facts. It uses the explicit
-`stock_feature_library_training_projection_v1` contract, retaining the library
-view ref, original partition refs, fixed source descriptor, sample membership,
-original cutoff, cell clocks and reasons. This export performs no Feature math.
+The public workflow and evidence are maintained in
+[Axiom Docs: Feature lifecycle](https://github.com/sinnergarden/axiom-docs/blob/main/docs/design/feature-lifecycle.md).
 
-The public `axiom_research.load_feature_library_training_view` verifies its actual files, compares the
-exported cells with the original library projection, checks membership against
-the pinned source buffer, and returns the existing StockFeatureView owner handle.
-Both build and cold load verify the registered DAG/input semantics and every
-column/day dependency receipt, including the reference cohort for CS. An explicit
-compatibility receipt binds these checks to the requested source, snapshot/PIT
-and cutoffs. Unchanged local inputs can reuse outputs from older source frames;
-the adapter preserves their original refs and does not relabel their provenance.
-Pass this handle to `prepare_stock_ml_batch_inputs` or
-`build_configured_stock_sequential_experiment`; labels, maturity, structural
-training proofs, fitting and signal freezing continue through their original
-owners. The adapter does not alter experiment discovery or CLI registration.
+`build_feature_library_training_view` publishes a native binding consumed by the
+existing `StockFeatureView` and batch owner. Selected FeatureView columns are
+projected in memory; no permanent training matrix is copied. Publication checks
+source compatibility once. Cold loading verifies the binding, Feature files and
+source membership, without Data or full source ancestry admission.
 
-For cold restoration, load this projection through the adapter first, then pass
-the handle explicitly to `load_stock_ml_batch_inputs(..., feature_inputs=handle)`.
-Within an existing preparation session, pass `source=admitted_source` to the
-adapter loader to reuse that source owner's admission. A cold loader admits the
-pinned source through its original owner before checking local compatibility.
-Its new contract is not a legacy Feature producer artifact. The old Feature
-loaders and already saved normalized matrices retain their existing identities.
+`export_feature_library_training_projection` explicitly writes the old daily
+interoperability format. Existing projection v1 files retain their original full
+comparison loader. Both paths preserve clocks, validity and membership. The v3
+model producer still requires normalized columns; raw is not implicitly normalized.
 
-The synthetic source test verifies packed-to-training-owner row equivalence.
-Current executed scope and historical T01 measurements are recorded in the
-[user manual](https://github.com/sinnergarden/axiom-docs/blob/main/docs/user-manual.md)
-and its version ledger. They are separate from this adapter's synthetic checks.
-The adapter preserves raw and normalized layers, while the current v3 model
-producer accepts only dimensionless cross-sectional normalized columns. Passing
-a raw layer now fails before fitting rather than saving a false normalization
-declaration. This tightens admission of a previously misdeclared path; it does
-not normalize values, migrate historical files or validate earlier raw models.
+The version ledger records the candidate's one E2E outcome. Historical synthetic
+tests and T01 timings do not validate this consumer or full-history capacity.
 
-Engine's generic source interface supports new raw facts: register the new fact
-semantics and derived DAG, fingerprint its selected data revisions, then request
-the existing output range. A synthetic field backfill verifies only the new
-dependent output is computed and every old content ref remains unchanged despite
-the source manifest/catalog expansion. Reading source bytes and computing
-Features are counted separately.
 
-The current Research vendor source is still the fixed open/high/low/close/amount/
-factor profile. Arbitrary additional vendor fields are not admitted by its v1
-format. The smallest extension is a Data-owned typed field sidecar with its own
-clock, missing/unit/precision contract and local revision evidence, composed by a
-Research fact adapter alongside the unchanged six-field source. Its per-field/day
-receipts and source bindings feed the existing Engine interface; the old physical
-buffers and keys remain intact. No full-history job is started for this design.
+## Model missing values and independent labels (2026-10-18)
+
+The saved-library training profile keeps finite physical payloads and validity masks.
+Only model X/P projections replace invalid cells with NaN; observed zero remains zero.
+A model row needs known, complete, PIT-visible research membership and at least one
+valid selected feature. Every valid feature still needs finite value, lineage and a
+visible clock. All-missing rows are excluded; damaged axes and future clocks fail
+admission. Prediction uses the same rule without future labels.
+
+Label cross-sectional normalization uses research membership, valid raw returns and
+the configured maturity rule only. Feature subset or missing cells cannot change y.
+Training uses one ordered intersection of valid normalized labels and model-usable
+rows; X, y, keys, saved selector and cold loading share it. The binding v3 records
+`target_validity_mask` separately from the training selector. New cohort and dataset
+identities invalidate affected labels/folds/models without invalidating raw returns
+or unrelated Feature partitions. Historical model migration is not provided.
+
+QSYS v5 changes only TRD006 (3.0.0). Its virtual daily status preserves explicit
+event unknowns. An absent event with a PIT-visible positive observed share volume
+is evidence of non-full-day suspension. Known full-day suspension yields raw zero
+through Core `where`, even without close. Unknown remains missing. Only TRD006
+uses outer `constant=zero`; a normalized zero is distinct from the raw score zero.
+Use existing `ensure_features` for that column, compose it with the other saved raw
+columns, then use `normalize_saved` and the native training-view publication.
+No other raw column needs recomputation. Old v4 remains installed for saved identities.
+
+Unexplained financial missingness retains its original masks/reasons. This model
+policy does not certify those gaps as normal and does not forward-fill financials.
+
+
+## Shared owner consumption
+
+`CompactState.operation()` borrows the native Feature library and membership
+stores through their existing operation scopes. Native checks still run when
+entering an external operation; nested helpers use immutable admitted buffers.
+The native adapter retains typed per-column buffers and reason codes. Only
+requested row projections materialize Python rows. Overlapping model selections
+reuse columns still retained in the Feature window; trimming releases them.
+Training dependency digests reuse column digests. A bounded binary packing pass
+preserves the historical grouped source proof so saved prepared batches remain
+eligible for exact validation, without a disk panel or wide Python rows.
+
+`reuse_raw_from_batch` also finds an exactly matching normalized target in the
+borrowed batch. Cohort, raw references, cutoff and normalization definition must
+match; each model still produces its own selector. No Feature validity enters
+the label cohort. Raw dependency derivation is cached on the existing source
+owner and boundary-validated before reuse.
+
+`load_stock_feature_view` binds independent membership from the saved source
+descriptor. Older saved Features without that descriptor accept an explicit
+`membership_source` descriptor from their original source. The example options
+pass this argument through. Boolean Feature membership alone cannot establish
+known/complete membership; missing evidence remains an error. Native format is
+not required. `prepared_batch` continues through the configured public entry.
+
+Feature-library progress emits only the current `core_work` item; final returned
+statistics retain the full history. Timings from a fresh preparation root and
+saved-batch consumption must be reported separately, including actual model
+`cache_hit`, `train_calls`, fit and predict times.

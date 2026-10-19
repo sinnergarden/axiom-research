@@ -24,8 +24,9 @@ def prediction_rows(features, spec, model, scores):
             continue
         key = source['security_id'], day
         score = scores.get(key); valid = _finite(score)
-        reason = None if valid else 'NOT_MEMBER' if not source['member'] else (
-            'FEATURE_AVAILABILITY_UNKNOWN' if feature_available(source) is None else 'FEATURE_MISSING')
+        from .stock_fold_inputs import model_row_reason
+        reason=model_row_reason(source)
+        require(valid==(reason is None),'prediction scores differ from model row selector')
         parent = features['parents_by_session'][day]
         rows.append({'security_id': key[0], 'session': day,
             'knowledge_cutoff': spec['inference_cutoff_by_session'][day],

@@ -10,7 +10,7 @@ from .stock_result_projection import (StockSavedProjection, load_stock_sequentia
     load_stock_ml_batch_manifest, load_stock_prediction_bindings, load_stock_fold_projection,
     load_stock_prediction_projection, load_stock_result_configuration)
 from .result_registration import (begin_stock_result_registration, publish_stock_result,
-                                  attach_stock_account_from_basis)
+                                  attach_stock_account, attach_stock_account_from_basis)
 from .stock_artifacts import (StockMLExperiment, load_stock_ml_experiment,
                               load_stock_model)
 from .stock_stage_report import export_stock_stage_report, load_stock_stage_report
@@ -29,6 +29,9 @@ __version__ = "0.2.7"
 from importlib import import_module as _import_module
 
 _RUNTIME_EXPORTS = {
+    "extend_financial_feature_source": ".financial_feature_columns",
+    "extend_benchmark_feature_source": ".benchmark_feature_columns",
+    "prepare_qsys_inputs": ".qsys_preparation",
     "load_stock_signal_evaluation_summary": ".stock_signal_evaluation_summary",
     "ViewRef": ".view_ref",
     "FeatureBuild": ".joint_build", "build_joint_features": ".joint_build",
@@ -47,9 +50,17 @@ _RUNTIME_EXPORTS = {
     "load_feature_catalog": ".feature_catalog", "build_feature_plan": ".feature_catalog",
     "load_feature_catalog_ref": ".feature_catalog",
     "load_a01_feature_catalog": ".a01_catalog",
+    "load_qsys_feature_catalog": ".qsys_catalog",
+    "load_qsys_feature_registry": ".qsys_catalog",
+    "select_qsys_features": ".qsys_catalog",
+    "qsys_daily_fields": ".qsys_catalog",
+    "qsys_financial_fields": ".qsys_catalog",
+    "qsys_input_requirements": ".qsys_catalog",
     "SavedColumnFeatureSource": ".stock_feature_library",
     "CatalogFeatureLibrary": ".stock_feature_library",
     "load_feature_library_training_view": ".stock_feature_library_adapter",
+    "build_feature_library_training_view": ".stock_feature_library_adapter",
+    "export_feature_library_training_projection": ".stock_feature_library_adapter",
     "compile_stock_periodic_folds": ".stock_periodic_config",
     "stock_evaluation_sessions": ".stock_periodic_config",
     "build_forward_labels": ".labels", "mature_training_rows": ".labels",

@@ -5,10 +5,12 @@ universe uses the admitted daily membership and vendor selection policy. This
 adapter uses original Data adjustment and Core DAG/CS arithmetic.
 """
 from copy import deepcopy
-from contextlib import nullcontext
+from collections.abc import Mapping
+from contextlib import ExitStack, nullcontext
 from hashlib import sha256
 import json
 import sys
+import tempfile
 import zlib
 
 from axiom_engine.core import FeaturePlan, required_history
@@ -34,42 +36,58 @@ def normalized_feature_dependency_ref(source, day, raw_semantic_ref, raw_depende
         'cutoff':physical.manifest['spec']['cutoff_by_session'][day],'anchor':day})
 
 
-def admitted_raw_dependency_refs(view, source, definitions, days, securities):
-    """Validate each original raw block, then return topology-independent refs."""
-    expected=source.dependency_refs(definitions,days,securities)
-    scoped={tuple(securities):expected}
-    for day in days:
-        receipts=view.column_receipts(day,list(definitions))
-        for name,definition in definitions.items():
-            for block in receipts[name]['blocks']:
-                axis=tuple(block['security_ids'])
-                if axis not in scoped:
-                    scoped[axis]=source.dependency_refs(definitions,days,list(axis))
-                actual=scoped[axis][day][name]
-                require(block['semantic_ref']==definition['semantic_ref'] and block['dependency_ref']==actual,
-                        'Feature/source local dependency or reference mismatch')
-    return expected
+class _SourceArrays(Mapping):
+    """Borrow a physical buffer only when its field is actually requested."""
+    _readonly_buffers=True
+
+    def __init__(self, manifest, store, universe_id):
+        self.legacy=None
+        if 'member_known' not in manifest['buffers']:
+            from .stock_saved_membership import LegacyMembershipMasks
+            self.legacy=LegacyMembershipMasks(manifest,self,store,universe_id)
+        self.descriptors=manifest['buffers']; self.store=store; self.cache={}
+
+    def __iter__(self): return iter((*self.descriptors,*(self.legacy.names if self.legacy else ())))
+    def __len__(self): return len(self.descriptors)+(len(self.legacy.names) if self.legacy else 0)
+    def __getitem__(self, name):
+        if self.legacy and name in self.legacy.names:return self.legacy.buffer(name)
+        if name not in self.cache:
+            desc=self.descriptors[name]
+            if desc.get('layout') in ('date_segments_v1','security_segments_v1'):
+                from .feature_input_buffers import SegmentedFeatureBuffer
+                self.cache[name]=SegmentedFeatureBuffer(desc,self.store)
+                return self.cache[name]
+            value=self.store.buffer(desc)
+            self.cache[name]=value.view('bool') if desc['dtype']=='bool_u8' else value
+        elif 'path' in self.descriptors[name]: self.store.check_path(self.descriptors[name]['path'])
+        return self.cache[name]
+    def clear(self):
+        self.cache.clear()
+        if self.legacy:self.legacy.masks=None;self.legacy.cached=None
 
 
 class SavedColumnFeatureSource:
     """Admit an immutable source through the original owner, then borrow mmap."""
     def __init__(self, descriptor, *, reference_security_ids=None, maximum_source_bytes=8*1024**3,
-                 maximum_working_bytes=512*1024**2):
+                 maximum_working_bytes=512*1024**2, maximum_parent_bytes=64*1024**2):
         self._leaf_cache_bytes=0
+        self._leaf_spool=None
         self.store=VerifiedMatrixStore(maximum_source_bytes=maximum_source_bytes,
-            maximum_matrix_bytes=maximum_working_bytes,
+            maximum_matrix_bytes=maximum_working_bytes, maximum_parent_bytes=maximum_parent_bytes,
             _caller_retained_bytes=lambda:self._leaf_cache_bytes)
+        # This owner retains private admitted metadata without mutating its graphs.
+        # Reuse the existing incremental ledger rather than walking all ancestors per receipt.
         self._leaf_refs={}; self._dependencies={}; self._buffer_refs={}; self._reference_refs={}
         self._leaf_subsets={}; self._leaf_axes={}; self._axis_positions={}
         self.metrics={'physical_field_day_hashes':0,'physical_hash_bytes':0}
-        manifest,_=verify_feature_column_source(descriptor,store=self.store,
-            _dependency_receipts=self._capture_leaf_refs)
-        universe_name=manifest['qlib_view']['universe_name']
-        require(type(universe_name) is str and bool(universe_name), 'explicit saved source universe required')
-        self.descriptor=deepcopy(descriptor)
-        arrays={name:self.store.buffer(desc) for name,desc in manifest['buffers'].items()}
-        for name, value in arrays.items():
-            if manifest['buffers'][name]['dtype']=='bool_u8': arrays[name]=value.view('bool')
+        self._plans={}; self._definitions={}; self._needed_cache={}; self._axis_sets={}
+        self._leaf_dependencies={}; self._window_buffers={};self._axis_refs={}
+        self._execution_plans={};self._prepared_plans={}
+        manifest=self.store.read_json(descriptor,'source_ref')
+        binding=manifest.get('universe_binding')
+        self.universe_id=(binding['universe_id'] if binding is not None else manifest['qlib_view']['universe_query']['universe_id'])
+        self.descriptor=descriptor
+        arrays=_SourceArrays(manifest,self.store,self.universe_id)
         self.source=FeatureColumnSource(manifest,arrays)
         physical=manifest['spec']['universe']
         self.reference_security_ids=list(physical if reference_security_ids is None else reference_security_ids)
@@ -81,6 +99,7 @@ class SavedColumnFeatureSource:
         if axis not in self._leaf_axes:
             self._charge_leaf_cache(256+sys.getsizeof(axis)+sum(sys.getsizeof(s) for s in axis))
             self._leaf_axes[axis]=axis
+            self._axis_refs[id(axis)]=digest(list(axis))
         return self._leaf_axes[axis]
 
     def _charge_leaf_cache(self, amount):
@@ -97,6 +116,19 @@ class SavedColumnFeatureSource:
         self._charge_leaf_cache(amount);mapping[key]=value
 
     def _capture_leaf_refs(self, child):
+        if child['contract_version']=='reader_column_block_v1':
+            manifest=self.source.manifest
+            for field,metadata in child['field_meta'].items():
+                symbols=tuple(manifest.get('financial_materializations',{}).get(field,{}).get(
+                    'coverage_security_ids',manifest['spec']['universe']))
+                symbols=self._leaf_axis(symbols)
+                for day in child['sessions']:
+                    key=(field,day)
+                    if key not in self._leaf_refs:
+                        self._retain_leaf(self._leaf_refs,key,(symbols,metadata['source_binding'],
+                            metadata['dtype'],metadata['unit'],None,0))
+            return
+        if self._leaf_spool is None:self._leaf_spool=tempfile.TemporaryFile(mode="w+b")
         base=self.store._native_caller_bytes(child)-self._leaf_cache_bytes
         original_bytes=max(self.store.fingerprints[path][2] for path,descriptor in self.store.descriptors.items()
                            if descriptor.get("evidence_ref")==child["evidence_ref"])
@@ -119,14 +151,16 @@ class SavedColumnFeatureSource:
                 # encode, hash copies and zlib workspace before allocation.
                 raw=json.dumps(rows,separators=(',',':')).encode()
                 raw_bytes=len(raw);packed=zlib.compress(raw);raw=None
+                offset=self._leaf_spool.tell();self._leaf_spool.write(packed)
+                stored=(offset,len(packed));packed=None
                 self._retain_leaf(self._leaf_refs,(field,day),(symbols,digest({'dtype':metadata['dtype'],
-                    'unit':metadata['unit'],'selected_revisions':rows}),metadata['dtype'],metadata['unit'],packed,raw_bytes))
+                    'unit':metadata['unit'],'selected_revisions':rows}),metadata['dtype'],metadata['unit'],stored,raw_bytes))
                 require(base+self._leaf_cache_bytes+workspace<=self.store.maximum_matrix_bytes,
                         'Feature leaf evidence cache and source exceed maximum_working_bytes')
 
     def capabilities(self):
         return {'contract_version':'feature_source_capabilities_v1','source_ref':self.source.identity,
-            'universe_profile':self.source.manifest['qlib_view']['universe_name'],
+            'universe_profile':self.universe_id,
             'pit_policies':[self.source.manifest['spec']['pit_policy']],
             'physical_security_ids':list(self.source.manifest['spec']['universe']),
             'reference_security_ids':list(self.reference_security_ids),
@@ -141,6 +175,29 @@ class SavedColumnFeatureSource:
                 'clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
             if field!='amount_cny': result[field].update(adjustment='Data.adjust_prices_output_day_anchor_v1',
                 factor_profile=self._field_profile(profiles['adjustment_factors'],'factor'))
+        for field,meta in self.source.manifest.get('daily_fields',{}).items():
+            result[field]={'value_projection':'boolean_0_1_binary64_v1' if meta['dtype']=='bool' else 'native_binary64_v1',
+                'source_profile':self._field_profile(profiles[meta['domain']],field), 'missing':'preserve',
+                'clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
+        if {'is_suspended','volume_shares'}<=set(result):
+            result['daily_is_suspended_v1']={'projection':'sparse_event_or_visible_positive_volume_preserve_explicit_unknown_v1',
+                'event':deepcopy(result['is_suspended']),'volume':deepcopy(result['volume_shares']),
+                'missing':'preserve_explicit_null_and_unobserved_volume','clock':'used_evidence_ceil_second'}
+        result['raw_factor']={'value_projection':'native_binary64_v1','source_profile':self._field_profile(profiles['adjustment_factors'],'factor'),'meaning':'native_supplier_adjustment_multiplier; not anchor-normalized price','missing':'preserve','clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
+        result['session_ordinal']={'projection':'proleptic_gregorian_session_date_ordinal_v1','unit':'days','missing':'preserve'}
+        if 'up_limit' in result:
+            for field in ('raw_open','raw_close'):
+                result[field]={'value_projection':'native_binary64_v1','source_profile':self._field_profile(profiles['market_daily'],field[4:]),'missing':'preserve','adjustment':'none','clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
+        for field in self.source.manifest.get('financial_materializations',{}):
+            result[field]['value_projection']='Data_financial_derivation_binary64_v1'
+        if 'volume_shares' in result:
+            result['vwap']={'formula':'original_amount_cny / volume_shares',
+                'value_projection':'native_binary64_v1','missing':'preserve',
+                'amount_profile':self._field_profile(profiles['market_daily'],'amount_cny'),
+                'volume_profile':result['volume_shares']['source_profile'],
+                'adjustment':'Data.adjust_prices_output_day_anchor_v1',
+                'factor_profile':self._field_profile(profiles['adjustment_factors'],'factor'),
+                'clock':'leaf_max_ceil_second_cutoff_floor_second_v1'}
         return result
 
     @staticmethod
@@ -150,6 +207,14 @@ class SavedColumnFeatureSource:
         # Canonical security axes and selected revision rows bind identity maps;
         # adding an unrelated security must not change every field's semantics.
         selected.pop('identity_map',None)
+        if selected.get('id')=='research.financial_materialization.v1':
+            projection=selected['projections'][field]
+            field_inputs=selected.pop('financial_inputs_by_field',None)
+            if field_inputs is not None:
+                selected['financial_inputs']=field_inputs[field]
+            selected['projections']={field:projection}
+            selected['financial_inputs']=SavedColumnFeatureSource._field_profile(
+                selected['financial_inputs'],projection['source_field'])
         raw_field=selected.get('field_map',{}).get(field)
         if 'field_map' in selected:
             selected['field_map']={k:v for k,v in selected['field_map'].items() if k in (field,'security_id','session')}
@@ -160,34 +225,65 @@ class SavedColumnFeatureSource:
         return {'source_profile':selected, 'contract_id':contract['contract_id'],
                 'logical_key':contract['logical_key'], 'field':contract['fields'][field]}
 
-    def plan(self, catalog, selection, *, normalized=False):
-        original=feature_column_plan(self.source,catalog,selection=selection,normalized=normalized).to_dict()
-        original['reference_members']={day:{s:g for s,g in members.items() if s in self._reference_set}
-                                       for day,members in original['reference_members'].items()}
-        original['reference_ref']=digest({'original_reference_ref':original['reference_ref'],
-                                         'reference_selection':self.reference_security_ids})
-        return FeaturePlan.from_dict(original)
+    def plan(self, catalog, selection, *, normalized=False, input_schema=None):
+        key=(catalog.identity,digest(selection),normalized,digest(input_schema))
+        if key not in self._plans:
+            with self.store.operation():
+                original=feature_column_plan(self.source,catalog,selection=selection,normalized=normalized,input_schema=input_schema).to_dict()
+                original['reference_members']={day:{s:g for s,g in members.items() if s in self._reference_set}
+                                               for day,members in original['reference_members'].items()}
+                original['reference_ref']=digest({'original_reference_ref':original['reference_ref'],
+                                                 'reference_selection':self.reference_security_ids})
+                self._plans[key]=FeaturePlan.from_dict(original)
+        return self._plans[key]
+
+    def definitions(self, catalog, selection, *, normalized=False):
+        key=(catalog.identity,digest(selection),normalized)
+        if key not in self._definitions:
+            self._definitions[key]=feature_definitions(self.plan(catalog,selection,normalized=normalized),
+                                                      input_semantics=self.input_semantics())
+        return self._definitions[key]
 
     def _selected_leaf_refs(self, fields, days, securities):
         wanted={(field,day) for field in fields for day in days}
-        require(wanted<=set(self._leaf_refs), 'used source leaf evidence absent')
+        missing={key for key in wanted if key not in self._leaf_refs}
+        if missing:
+            verify_feature_column_source(self.descriptor,store=self.store,
+                _dependency_receipts=self._capture_leaf_refs,
+                _evidence_days={d for _,d in missing},
+                _evidence_fields={f for f,_ in missing},_verify_buffers=False)
+        require(all(key in self._leaf_refs for key in wanted), 'used source leaf evidence absent')
         axis=tuple(securities); axis=self._leaf_axis(axis)
         result={}
         for field in sorted(fields):
             result[field]={}
             for day in sorted(days):
                 symbols,full,dtype,unit,packed,raw_bytes=self._leaf_refs[field,day]
-                require(set(securities)<=set(symbols), 'source leaf security axes mismatch')
-                if axis==symbols: result[field][day]=full
+                if id(symbols) not in self._axis_sets:self._axis_sets[id(symbols)]=frozenset(symbols)
+                if id(axis) not in self._axis_sets:self._axis_sets[id(axis)]=frozenset(axis)
+                require(self._axis_sets[id(axis)]<=self._axis_sets[id(symbols)], 'source leaf security axes mismatch')
+                if packed is None:
+                    key=(field,day,id(axis))
+                    if key not in self._leaf_dependencies:self._leaf_dependencies[key]=digest({'contract_version':'block_input_dependency_v2',
+                        'source_binding':full,'field':field,'dtype':dtype,'unit':unit,
+                        'security_axis_ref':self._axis_refs[id(axis)],'session':day,
+                        'cutoff':self.source.manifest['spec']['cutoff_by_session'][day]})
+                    result[field][day]=self._leaf_dependencies[key]
+                elif axis==symbols: result[field][day]=full
                 else:
-                    key=(field,day,axis)
+                    key=(field,day,id(axis))
                     if key not in self._leaf_subsets:
                         # Bound inflate output and its decoded flat provenance
                         # graph before allocation; saved rows come from admitted JSON.
                         base=self.store._native_caller_bytes()
                         require(base+1024**2+64*raw_bytes<=self.store.maximum_matrix_bytes,
                                 'Feature leaf decode workspace exceeds maximum_working_bytes')
-                        decoder=zlib.decompressobj(); raw=decoder.decompress(packed,raw_bytes+1)
+                        offset,length=packed
+                        require(base+1024**2+64*raw_bytes+length<=self.store.maximum_matrix_bytes,'Feature leaf spool decode budget exceeded')
+                        self._leaf_spool.seek(offset);compressed=self._leaf_spool.read(length)
+                        require(len(compressed)==length,'Feature leaf spool truncated')
+                        decoder=zlib.decompressobj(); raw=decoder.decompress(compressed,raw_bytes+1)
+                        compressed=None
                         require(len(raw)==raw_bytes and decoder.eof and not decoder.unused_data,
                                 'Feature leaf compressed length mismatch')
                         selected=set(securities);rows=json.loads(raw)
@@ -200,22 +296,25 @@ class SavedColumnFeatureSource:
 
     def _selected_buffers(self, field, indices, securities):
         """One bounded physical field/day fingerprint; rolling windows combine refs."""
-        j=('open','high','low','close','amount_cny','factor').index(field)
-        rows=[]
         axis=tuple(securities); axis=self._leaf_axis(axis)
-        if axis not in self._axis_positions:
-            self._axis_positions[axis]=[self.source.security_positions[s] for s in securities]
-        positions=self._axis_positions[axis]
+        window=(field,tuple(indices),id(axis))
+        if window in self._window_buffers:return self._window_buffers[window]
+        rows=[]
+        if id(axis) not in self._axis_positions:
+            self._axis_positions[id(axis)]=[self.source.security_positions[s] for s in securities]
+        positions=self._axis_positions[id(axis)]
         for i in indices:
-            key=field,i,axis
+            key=field,i,id(axis)
             if key not in self._buffer_refs:
-                buffers={k:_array_ref(self.source.arrays[k][i,positions,j]) for k in
+                buffers={k:_array_ref(self.source.field_array(field,k)[i,positions]) for k in
                     ('values','original_values','validity','available','available_validity','reasons')}
                 self.metrics['physical_field_day_hashes']+=1
-                self.metrics['physical_hash_bytes']+=sum(self.source.arrays[k][i,positions,j].nbytes for k in buffers)
-                self._buffer_refs[key]=digest(buffers)
+                self.metrics['physical_hash_bytes']+=sum(self.source.field_array(field,k)[i,positions].nbytes for k in buffers)
+                self._retain_leaf(self._buffer_refs,key,digest(buffers))
             rows.append([self.source.manifest['spec']['read_sessions'][i],self._buffer_refs[key]])
-        return {'contract_version':'ordered_field_day_buffers_v1','field':field,'days':rows}
+        value={'contract_version':'ordered_field_day_buffers_v1','field':field,'days':rows}
+        self._window_buffers[window]=value
+        return value
 
     def _reference_days(self, indices):
         import numpy as np
@@ -225,39 +324,85 @@ class SavedColumnFeatureSource:
                 member=source.arrays['member'][i].copy()
                 member &= np.asarray([s in self._reference_set for s in source.manifest['spec']['universe']],dtype=bool)
                 self._reference_refs[i]=digest({'member':_array_ref(member),
+                    **{k:_array_ref(source.arrays[k][i]) for k in ('member_known','member_pool_complete','member_reasons') if k in source.arrays},
                     'available':_array_ref(source.arrays['member_available'][i]),
                     'available_validity':_array_ref(source.arrays['member_available_validity'][i]),
-                    'leaf':self._selected_leaf_refs({'is_member'},{days[i]},source.manifest['spec']['universe'])})
+                    'leaf':self._selected_leaf_refs({'is_member'}|({'industry_code'} if 'industry_code' in source.physical_fields() else set()),{days[i]},source.manifest['spec']['universe'])})
             rows.append([days[i],self._reference_refs[i]])
         return {'selection':self.reference_security_ids,'days':rows}
 
+    def _dependency_rows(self, definition, position):
+        key=definition['semantic_ref'];semantic=definition['semantic']
+        depth=definition['history_sessions']-1
+        if position<depth or key not in self._needed_cache:
+            plan={'input_schema':[v['schema'] for v in semantic['inputs'].values()],
+                  'nodes':semantic['nodes'],'outputs':[semantic['output']],
+                  'history_policy':semantic['history_policy']}
+        if position<depth:return _needed(plan,[position])
+        if key not in self._needed_cache:
+            needed=_needed(plan,[depth])
+            names=set(definition['inputs'])|{n['name'] for n in semantic['nodes'] if n['op'] in CS}
+            template={name:tuple(sorted(i-depth for i in needed[name])) for name in names}
+            self._charge_leaf_cache(512+sys.getsizeof(template)+sum(sys.getsizeof(k)+sys.getsizeof(v)+sum(sys.getsizeof(i) for i in v) for k,v in template.items()))
+            self._needed_cache[key]=template
+        return {name:{position+i for i in offsets} for name,offsets in self._needed_cache[key].items()}
+
     def dependency_refs(self, definitions, days, securities):
+        self._window_buffers.clear()
+        try:return self._dependency_refs(definitions,days,securities)
+        finally:self._window_buffers.clear()
+
+    def _dependency_refs(self, definitions, days, securities):
         import numpy as np
         self.store.check(); source=self.source; spec=source.manifest['spec']; positions=source.positions
         require(bool(securities) and securities==sorted(set(securities)) and
                 set(securities)<=set(spec['universe']) and set(days)<=set(spec['feature_sessions']),
                 'requested axes outside admitted physical source')
         axis=tuple(securities); axis=self._leaf_axis(axis)
+        # Admit requested block receipts once, including reference dependencies.
+        requested_days=set(); requested_fields=set()
+        for day in days:
+            for definition in definitions.values():
+                if (definition['semantic_ref'],day,id(axis)) in self._dependencies:continue
+                needed=self._dependency_rows(definition,positions[day])
+                for field in definition['inputs']:
+                    requested_fields.update(source.leaf_fields(field))
+                    requested_days.update(spec['read_sessions'][i] for i in needed[field])
+                if definition['reference_dependent']:
+                    requested_fields.add('is_member')
+                    if 'industry_code' in source.physical_fields():requested_fields.add('industry_code')
+        requested_days.update(days)
+        if any((field,day) not in self._leaf_refs for field in requested_fields for day in requested_days):
+            with self.store.operation():
+                verify_feature_column_source(self.descriptor,store=self.store,
+                    _dependency_receipts=self._capture_leaf_refs,_evidence_days=requested_days,
+                    _evidence_fields=requested_fields,_verify_buffers=False)
         result={}
         for day in days:
+            self._window_buffers.clear()
             result[day]={}
             for name, definition in definitions.items():
                 require(not definition['reference_dependent'] or securities==spec['universe'],
                         'CS dependencies require complete physical cohort')
-                key=(definition['semantic_ref'],day,axis)
+                key=(definition['semantic_ref'],day,id(axis))
                 if key in self._dependencies:
                     result[day][name]=self._dependencies[key]; continue
-                semantic=definition['semantic']; needed=_needed({'input_schema':[v['schema'] for v in semantic['inputs'].values()],
-                    'nodes':semantic['nodes'],'outputs':[semantic['output']]},[positions[day]])
+                source.require_coverage(definition['inputs'],securities)
+                semantic=definition['semantic']; needed=self._dependency_rows(definition,positions[day])
                 selected={}; field_days={}
                 for field in definition['inputs']:
                     ix=sorted(needed[field])
-                    field_days.setdefault(field,set()).update(spec['read_sessions'][i] for i in ix)
-                    selected[field]=deepcopy(self._selected_buffers(field,ix,securities))
-                    if field!='amount_cny':
-                        factor_ix=sorted(set(ix)|{positions[day]})
-                        field_days.setdefault('factor',set()).update(spec['read_sessions'][i] for i in factor_ix)
-                        selected[field]['factor']=self._selected_buffers('factor',factor_ix,securities)
+                    leaves=self.source.leaf_fields(field)
+                    # Preserve old receipt structure byte-for-byte for old fields.
+                    first=leaves[0]
+                    field_days.setdefault(first,set()).update(spec['read_sessions'][i] for i in ix)
+                    selected[field]=dict(self._selected_buffers(first,ix,securities))
+                    if field=='daily_is_suspended_v1':
+                        selected[field]['daily_state_projection']='sparse_event_or_visible_positive_volume_preserve_explicit_unknown_v1'
+                    for leaf in leaves[1:]:
+                        leaf_ix=sorted(set(ix)|{positions[day]}) if leaf=='factor' else ix
+                        field_days.setdefault(leaf,set()).update(spec['read_sessions'][i] for i in leaf_ix)
+                        selected[field][leaf]=self._selected_buffers(leaf,leaf_ix,securities)
                 receipt={'selected_buffers':selected,'leaf_revisions':{
                     field:self._selected_leaf_refs({field},needed_days,securities)[field]
                     for field,needed_days in field_days.items()},
@@ -267,15 +412,25 @@ class SavedColumnFeatureSource:
                     ref_ix=sorted(set().union(*(needed[n['name']] for n in semantic['nodes'] if n['op'] in CS)))
                     receipt['reference']=self._reference_days(ref_ix)
                 result[day][name]=digest(receipt)
-                self._dependencies[key]=result[day][name]
+                self._retain_leaf(self._dependencies,key,result[day][name])
         self.store.check()
         return result
 
     def prepare(self, plan, day, securities, dependencies):
         import numpy as np
-        p=plan.to_dict(); history=max(required_history(plan).values())+1
+        key=plan.identity
+        if key not in self._prepared_plans:
+            p=plan.to_dict()
+            from axiom_engine.core.plan import _required_history
+            history=max(_required_history(p).values())+1
+            needed=_needed(p,[history-1])
+            header={k:p[k] for k in ('calendar_ref','reference_ref','input_schema','sources')}
+            rows={c['name']:sorted(needed[c['name']]) for c in p['input_schema']}
+            self._prepared_plans[key]=(header,history,rows)
+        p,history,rows=self._prepared_plans[key]
         inputs,_=self.source.core_inputs(day,calendar_ref=p['calendar_ref'],reference_ref=p['reference_ref'],
-            schema=p['input_schema'],history_sessions=history,securities=securities)
+            schema=p['input_schema'],history_sessions=history,securities=securities,
+            field_rows=rows)
         names=[c['name'] for c in p['input_schema']]
         for field in ('values','validity','reason_codes','available_at_utc_us','source_codes'):
             inputs[field]={name:inputs[field][name] for name in names}
@@ -299,19 +454,25 @@ class SavedColumnFeatureSource:
         self.store.check(); return inputs
 
     def execution_plan(self, plan, day, securities, dependencies):
+        key=plan.identity
+        if key in self._execution_plans:return self._execution_plans[key]
         p=plan.to_dict(); names={c['name'] for c in p['input_schema']}
-        fields=('open','high','low','close','amount_cny','factor','is_member')
-        require(names<=set(fields[:5]), 'saved vendor source profile has fixed price/amount fact fields')
-        selected=names|{'is_member'}|({'factor'} if names-{'amount_cny'} else set())
+        fields=self.source.physical_fields()
+        require(names<={c['name'] for c in self.source.input_schema()}, 'source fact fields unavailable')
+        selected={'is_member'}|set().union(*(self.source.leaf_fields(name) for name in names))
         p['sources']=sorted((binding for field,binding in zip(fields,self.source.source_bindings())
                              if field in selected),key=lambda b:b['id'])
-        return FeaturePlan.from_dict(p)
+        self._execution_plans[key]=FeaturePlan.from_dict(p)
+        return self._execution_plans[key]
 
     def close(self):
         self.source.arrays.clear(); self.store.close()
+        if self._leaf_spool is not None:self._leaf_spool.close()
         self._leaf_cache_bytes=0
         for cache in (self._leaf_refs,self._leaf_axes,self._leaf_subsets,self._dependencies,
-                      self._buffer_refs,self._reference_refs,self._axis_positions): cache.clear()
+                      self._buffer_refs,self._reference_refs,self._axis_positions,self._plans,self._definitions,
+                      self._needed_cache,self._axis_sets,self._leaf_dependencies,self._window_buffers,self._axis_refs,
+                      self._execution_plans,self._prepared_plans): cache.clear()
     def __enter__(self): return self
     def __exit__(self,*args): self.close()
 
@@ -322,7 +483,7 @@ class CatalogFeatureLibrary:
         self.library, self.source, self.catalog=library,source,catalog
 
     def ensure(self, *, selection, output_sessions, sample_universe=None, normalized=False, progress=None):
-        with (self.library.execution_session() if self.library._session is None else nullcontext(self.library)):
+        with self.source.store.operation(), (self.library.execution_session() if self.library._session is None else nullcontext(self.library)):
             return self._ensure(selection=selection,output_sessions=output_sessions,
                 sample_universe=sample_universe,normalized=normalized,progress=progress)
 
@@ -348,15 +509,78 @@ class CatalogFeatureLibrary:
             full['sources']=self.source.source.source_bindings()
             semantics={n:{'derived_feature':raw_definitions[n]['semantic']} for n in names}
             cs_plan=FeaturePlan.from_dict(full)
+            adapter.library=self.library;adapter.reference_ref=full['reference_ref']
             cs_request=FeatureRequest(cs_plan,tuple(output_sessions),physical,semantics,
                 None if sample_universe is None else tuple(sample_universe))
             normalized_view,stats=self.library.ensure_features(cs_request,adapter,progress=progress)
         return normalized_view,{'raw':raw_stats,'cross_sectional':stats}
 
+    def normalize_saved(self, raw_view, *, raw_bindings, selection, progress=None):
+        """Normalize saved raw cells using this facade's daily membership source.
+
+        raw_bindings is a sequence of (parent FeatureView, admitted
+        SavedColumnFeatureSource) pairs, explicitly naming each raw owner.
+        Parents may span columns/libraries, with the same requested dates.
+        This path never calls raw
+        ensure/prepare. It retains actual source IDs and requires equal PIT,
+        output cutoffs and calendars on the consumed dates; snapshot identities
+        may differ and remain distinct. It makes no cross-snapshot parity claim.
+        Reference-dependent raw retains its original full-cohort dependency
+        and is an opaque saved fact for the outer normalization, not a recipe
+        reinterpreted under the new members. All handles remain caller-owned.
+        Only normalized arrays are published.
+        """
+        days=raw_view.describe()['sessions'];target=self.source.source.manifest['spec']
+        raw_bindings=list(raw_bindings)
+        for _,owner in raw_bindings:
+            original=owner.source.manifest['spec']
+            require(original['pit_policy']==target['pit_policy'] and all(
+                original['cutoff_by_session'][day]==target['cutoff_by_session'][day] for day in days),
+                'raw/reference PIT or cutoff mismatch')
+        request=_saved_normalization_request(raw_view,self.source,self.catalog,selection)
+        adapter=_RawCrossSectionSource(raw_view,self.source,raw_bindings=raw_bindings,
+                                       catalog=self.catalog,selection=selection,library=self.library,
+                                       reference_ref=request.plan.to_dict()['reference_ref'])
+        with self.source.store.operation():
+            result,stats=self.library.ensure_features(request,adapter,progress=progress)
+        return result,{'raw':{'core_calls':0,'computed_output_cells':0},'cross_sectional':stats}
+
+
+def _saved_normalization_request(raw_view, source, catalog, selection):
+    require(catalog.to_dict()['input_contract']=={
+        'price_basis':'common_anchor_adjusted_v1','adjustment_anchor':'feature_session_visible_at_cutoff',
+        'amount_unit':'CNY'},'unsupported catalog input interpretation')
+    cap=raw_view.describe();names=[f['id'] for f in catalog.select(selection)]
+    require(names==cap['columns'] and cap['security_ids']==source.source.manifest['spec']['universe'],
+            'saved raw must cover the complete explicit membership source axis')
+    # The membership owner need not provide raw price/volume fields. Compile
+    # the existing catalog normalization using the admitted raw input schemas.
+    schemas={}
+    for definition in cap['definitions'].values():
+        for name,entry in definition['semantic']['inputs'].items():
+            require(name not in schemas or schemas[name]==entry['schema'],'conflicting raw schemas')
+            schemas[name]=entry['schema']
+    full=source.plan(catalog,selection,normalized=True,input_schema=list(schemas.values())).to_dict()
+    full['input_schema']=[{**cap['definitions'][n]['schema'],'stage':'fact'} for n in names]
+    full['nodes']=[n for n in full['nodes'] if n['name'] in {name+'_cs_zscore' for name in names}]
+    semantics={n:({'frozen_reference_feature':{
+        'semantic':cap['definitions'][n]['semantic'],'view_ref':raw_view.identity}}
+        if cap['definitions'][n]['reference_dependent'] else
+        {'derived_feature':cap['definitions'][n]['semantic']}) for n in names}
+    # A frozen inner reference operation is a saved fact, never expanded into
+    # the outer member cohort's DAG. Its view pins original partition receipts.
+    return FeatureRequest(FeaturePlan.from_dict(full),tuple(cap['sessions']),tuple(cap['security_ids']),
+                          semantics,tuple(cap['sample_universe']))
+
 
 class _RawCrossSectionSource:
-    def __init__(self, raw_view, source):
+    def __init__(self, raw_view, source, *, raw_bindings=None, catalog=None, selection=None,
+                 library=None, reference_ref=None):
         self.raw_view,self.source=raw_view,source
+        self.raw_bindings=None if raw_bindings is None else list(raw_bindings)
+        self.catalog,self.selection=catalog,selection
+        self.library,self.reference_ref=library,reference_ref
+        self._plans={};self._headers={};self._prepared_headers={}
 
     def source_bindings(self, day, columns):
         reference=self.source.source.source_bindings()[-1]
@@ -369,22 +593,58 @@ class _RawCrossSectionSource:
         return sorted(bindings.values(),key=lambda b:b['id'])
 
     def execution_plan(self, plan, day, securities, dependencies):
-        p=plan.to_dict(); names={c['name'] for c in p['input_schema']}
+        original=plan.identity
+        if original not in self._headers:self._headers[original]=plan.to_dict()
+        p=self._headers[original];names={c['name'] for c in p['input_schema']}
         require(names==set(dependencies), 'CS gap fact closure differs from output dependencies')
-        p['sources']=self.source_bindings(day,names)
-        return FeaturePlan.from_dict(p)
+        bindings=self.source_bindings(day,names);key=(original,digest(bindings))
+        if key not in self._plans:
+            self._plans[key]=FeaturePlan.from_dict({**p,'sources':bindings})
+            self._prepared_headers[self._plans[key].identity]={k:(bindings if k=='sources' else p[k]) for k in ('calendar_ref','reference_ref','input_schema','sources')}
+        return self._plans[key]
 
     def dependency_refs(self, definitions, days, securities):
-        raw_definitions={name:self.raw_view.describe()['definitions'][name] for name in definitions}
-        physical=self.source.source.manifest['spec']['universe']
-        require(securities==physical,'CS dependencies require complete physical cohort')
-        raw=admitted_raw_dependency_refs(self.raw_view,self.source,raw_definitions,days,physical)
-        return {day:{name:normalized_feature_dependency_ref(self.source,day,
-            raw_definitions[name]['semantic_ref'],raw[day][name]) for name in definitions} for day in days}
+        require(securities==self.source.source.manifest['spec']['universe'],
+                'CS dependencies require complete physical cohort')
+        # Bind published inputs once. The column semantic and date remain in
+        # the coverage key; no ancestor receipts are reconstructed here.
+        reference=digest({'contract_version':'published_feature_normalization_inputs_v1',
+            'raw_view':self.raw_view.descriptor,'member_source':self.source.descriptor,
+            'reference_security_ids':self.source.reference_security_ids})
+        result={day:dict.fromkeys(definitions,reference) for day in days}
+        if self.library is not None:
+            # Old COMPLETE publications already name the exact raw view and
+            # membership source in their Core header. Consume those references
+            # directly, retaining their genuine dependency IDs across upgrades.
+            from axiom_engine.feature_library.store import VerifiedMatrixStore as PublishedStore
+            from axiom_engine.feature_library.coverage import partition_descriptor
+            parts=self.library._index(days)['partitions'];axis_ref=digest(securities)
+            by_day={}
+            for part in parts:
+                if part['security_axis_ref']==axis_ref:
+                    by_day.setdefault(part['sessions'][0],[]).append(part)
+            for day,candidates in by_day.items():
+                with PublishedStore(**self.library.limits) as store:
+                    for summary in candidates:
+                        names=[name for name in summary['columns'] if name in definitions and
+                            summary['semantic_refs'][name]==definitions[name]['semantic_ref']]
+                        if not names:continue
+                        part=store.read_json(partition_descriptor(summary),'partition_ref')
+                        header=part['core_header']
+                        if 'path' in header:header=store.read_json(header,'header_ref')['core_header']
+                        inputs=header['input_refs']
+                        if (inputs.get('raw_view_ref')==self.raw_view.identity and
+                            inputs.get('source_ref')==self.source.descriptor['source_ref'] and
+                            header['reference_ref']==self.reference_ref):
+                            for name in names:result[day][name]=summary['dependency_refs'][name]
+        return result
 
     def prepare(self, plan, day, securities, dependencies):
         import numpy as np
-        p=plan.to_dict(); names=[c['name'] for c in p['input_schema']]
+        key=plan.identity
+        if key not in self._prepared_headers:
+            wire=plan.to_dict();self._prepared_headers[key]={k:wire[k] for k in ('calendar_ref','reference_ref','input_schema','sources')}
+        p=self._prepared_headers[key];names=[c['name'] for c in p['input_schema']]
         require(set(names)==set(dependencies), 'CS raw projection differs from gap fact closure')
         raw=self.raw_view.project([(s,day) for s in securities],names)
         original=self.source.source
@@ -401,28 +661,30 @@ class _RawCrossSectionSource:
             reference_ref=p['reference_ref'],security_ids=list(securities),
             cutoffs_utc_us=np.asarray([cutoff],dtype='<i8'),
             reference_member=original.arrays['member'][position:position+1],
-            reference_industry=np.full((1,len(securities)),None,dtype=object),
+            **{target:original.arrays[key][position:position+1] for key,target in
+               (('member_known','reference_member_known'),('member_pool_complete','reference_pool_complete')) if key in original.arrays},
+            reference_industry=original.industries([position],[original.security_positions[s] for s in securities]),
             reference_available_at_utc_us=member_clock,
             input_refs={'source_ref':original.identity})
         # Core requires actual original source IDs, including the reference source.
         bindings={b['id']:b for b in raw['source_bindings']}
         sets=deepcopy(raw['source_sets'])
-        require(all(sets[int(c)] for c in np.unique(raw['source_codes'])), 'raw constant-only source not supported in CS profile')
-        # Drop unused empty zero set and remap actual codes to Core's nonempty sets.
-        codes=raw['source_codes']; nonempty=[i for i,s in enumerate(sets) if s]
-        remap=np.zeros(len(sets),dtype='int32'); admitted=[sets[i] for i in nonempty]
-        for new,old in enumerate(nonempty): remap[old]=new
+        # Keep original zero-source codes: missing/constant Core outputs are
+        # valid saved facts, not invented Data observations.
+        codes=raw['source_codes'];admitted=sets
+        source_counts=np.asarray([len(s) for s in sets])
+        require(bool((~raw['validity']|((source_counts[codes]>0)&(raw['available_at_utc_us']!=raw['null_available_at_utc_us']))).all()),
+                'Research saved raw valid cell requires source lineage and clock')
         reference_set=[reference_binding['id']]
         bindings[reference_binding['id']]=reference_binding
         if reference_set not in admitted: admitted.append(reference_set)
         reference_code=admitted.index(reference_set)
-        require(np.all(raw['available_at_utc_us'] != raw['null_available_at_utc_us']), 'clockless raw source not supported in CS profile')
         base.update(schema=p['input_schema'],source_bindings=p['sources'],sessions=[day],
             values={name:raw['values'][:,j][None,:] for j,name in enumerate(names)},
             validity={name:raw['validity'][:,j][None,:] for j,name in enumerate(names)},
             reason_codes={name:raw['reason_codes'][:,j][None,:] for j,name in enumerate(names)},
             available_at_utc_us={name:raw['available_at_utc_us'][:,j][None,:] for j,name in enumerate(names)},
-            source_codes={name:remap[codes[:,j]][None,:] for j,name in enumerate(names)},
+            source_codes={name:codes[:,j][None,:] for j,name in enumerate(names)},
             source_sets=admitted,reason_dictionary=raw['reason_dictionary'])
         expected={b['id']:b for b in p['sources']}
         require(expected==bindings,

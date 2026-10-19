@@ -30,6 +30,7 @@ def saved_source(root, *, day_count=6, generation=0, value_shift=0, snapshot='sy
     arrays={'values':values,'original_values':values.copy(),'validity':np.ones(shape,dtype=bool),
         'available':np.broadcast_to(available[:,:,None],shape).copy(),'available_validity':np.ones(shape,dtype=bool),
         'reasons':np.zeros(shape,dtype='u1'),'member':np.ones(shape[:2],dtype=bool),
+        'member_known':np.ones(shape[:2],dtype=bool),'member_pool_complete':np.ones(shape[:2],dtype=bool),
         'member_available':available.copy(),'member_available_validity':np.ones(shape[:2],dtype=bool)}
     if members_by_session is not None:
         for day,members in members_by_session.items():
@@ -60,14 +61,25 @@ def saved_source(root, *, day_count=6, generation=0, value_shift=0, snapshot='sy
             'source_profile':{'id':'synthetic_'+domain}}
     catalog=load_a01_feature_catalog(); selection=[{'id':'ALP001','semantic_version':'1.0.0'}]
     spec={'read_sessions':days,'feature_sessions':days[2:],'universe':securities,'calendar':days,
-        'cutoff_by_session':{day:day+'T13:00:00Z' for day in days},'snapshot':snapshot,
+        'cutoff_by_session':{day:day+'T20:30:00+08:00' for day in days},'snapshot':snapshot,
         'pit_policy':'best_effort_vendor_v1','catalog_ref':catalog.identity,'feature_selection':selection}
+    request={'universe_id':universe_name,'snapshot':snapshot,'pit_policy':spec['pit_policy']}
+    result={'read_sessions':days,'read_symbols':securities,'snapshot_id':snapshot,'pit_policy':spec['pit_policy']}
+    proof={'fixture':'explicit synthetic scope'}
+    scope=seal({'contract_version':'stock_scope_bundle_v1','request':request,'request_ref':digest(request),
+        'result':result,'result_ref':digest(result),'source_proof':proof,'source_proof_ref':digest(proof)},'scope_bundle_ref')
+    spec.update(contract_version='stock_feature_inputs_spec_v1',ordered_features=['ALP001'],
+        scope=write_part(root,scope,'scope_bundle_ref'))
     impl={'fixture':digest(['explicit synthetic source'])}
     manifest=seal({'contract_version':'research_feature_column_source_v1','spec':spec,'qlib_view':{'universe_name':universe_name},
         'buffers':buffers,'chunks':[{'sessions':days,'evidence':evidence}],'reason_codes':list(REASONS),
         'source_profiles':profiles,'selection_invariance':'declared_vendor_release_visible_at_each_historical_row_cutoff',
         'implementation_sources':impl,'implementation_ref':digest(impl),
         'environment':{'synthetic':True,'generation':generation}},'source_ref')
+    from axiom_research.stock_feature_inputs import source_universe_binding
+    manifest.pop('source_ref')
+    manifest['universe_binding']=source_universe_binding(manifest)
+    manifest=seal(manifest,'source_ref')
     path=Path(root)/'source.json'; write_json(path,manifest)
     return {'path':str(path),'file_digest':file_digest(path),'source_ref':manifest['source_ref']}
 
@@ -94,14 +106,14 @@ class StockFeatureLibraryTests(unittest.TestCase):
                     day=view.describe()['sessions'][0]
                     view.project([('A',day)])
                     path=Path(view._partition(day,'ALP001')['buffers']['values']['path'])
-                    write=adapter.write_buffer; changed=False
+                    write=adapter.row_index; changed=False
                     def mutate_during_write(*args,**kwargs):
                         nonlocal changed
                         result=write(*args,**kwargs)
                         if not changed:
                             changed=True; path.write_bytes(path.read_bytes())
                         return result
-                    with patch.object(adapter,'write_buffer',side_effect=mutate_during_write), \
+                    with patch.object(adapter,'row_index',side_effect=mutate_during_write), \
                          self.assertRaisesRegex(ValueError,'saved matrix source changed'):
                         adapter.build_feature_library_training_view(view,source,selection=selection,
                             destination=root/'training',maximum_working_bytes=8*1024**2)
@@ -155,7 +167,7 @@ class StockFeatureLibraryTests(unittest.TestCase):
                 forged['definition']['source']=wrong
                 forged['definition']['spec']['snapshot']='different_snapshot'
                 forged=write_part(root/'forged',seal(forged,'training_adapter_ref'),'training_adapter_ref')
-                with self.assertRaisesRegex(ValueError,'local dependency or reference mismatch'):
+                with self.assertRaisesRegex(ValueError,'native publication compatibility binding mismatch'):
                     load_feature_library_training_view(forged,limits={'maximum_matrix_bytes':8*1024**2})
 
     def test_ten_source_generations_only_bind_actual_single_day_cs_gap(self):

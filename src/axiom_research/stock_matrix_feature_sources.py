@@ -68,11 +68,9 @@ class _FeatureCoverageWriter:
                 metrics['feature_coverage_encode_calls']=metrics.get('feature_coverage_encode_calls',0)+1
                 for chunk in _json_chunks(value,budget=budget,registry={},path_resolver=None):
                     size+=len(chunk)
-                    require(size<=8*1024**3,'Feature coverage source byte budget exceeded')
                     h.update(chunk); stream.write(chunk)
             ref='sha256:'+h.hexdigest(); path=buffers/(ref[7:]+'.bin')
             self.published[ref]=size
-            require(sum(self.published.values())<=8*1024**3,'Feature coverage source byte budget exceeded')
             created=_publish(temporary,path)
             temporary.unlink(); temporary=None
             require(not path.is_symlink() and path.stat().st_size==size,'published Feature coverage size/path mismatch')

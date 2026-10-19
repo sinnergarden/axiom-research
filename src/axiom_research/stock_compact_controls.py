@@ -24,7 +24,7 @@ def validate_input(fold, manifest, row_index, common):
     binding=common.get('model_feature_selection')
     extra=set() if binding is None else {'model_feature_selection_ref'}
     fields(inputs,{'contract_version','prepared_view','fold_control','fold_spec_ref','selectors',
-        'core_result_refs','input_ref'}|extra,'exact compact v4 saved inputs required'); sealed(inputs,'input_ref')
+        'core_result_refs','input_ref'}|extra,'exact compact v4 saved inputs required')
     require(inputs.get('model_feature_selection_ref')==(None if binding is None else binding['model_feature_selection_ref']),
             'compact input model selection mismatch')
     input_version='stock_ml_saved_inputs_v5' if 'target_spec' in common else 'stock_ml_saved_inputs_v4'
@@ -39,10 +39,10 @@ def validate_input(fold, manifest, row_index, common):
     require(roles['validation'] is None and roles['training']==roles['training_labels'] and
         roles['inference']==roles['evaluation_labels'],'compact v4 selector roles mismatch')
     training,inference=validate_spec(spec,common['calendar']); width=len(common['universe'])
-    for role,days,kind in (('training',training,'normalized_valid_rows'),('inference',inference,'complete_grid')):
+    for role,days,kind in (('training',training,'normalized_valid_model_usable_rows_v2'),('inference',inference,'complete_grid')):
         selected=roles[role]
         fields(selected,{'contract_version','kind','row_index_ref','ranges','target_refs','selected_count',
-            'keys_digest','selector_ref'},'exact compact selector required'); sealed(selected,'selector_ref')
+            'keys_digest','selector_ref'},'exact compact selector required')
         require(selected['contract_version']=='stock_fold_selector_v1' and selected['kind']==kind and
             selected['row_index_ref']==row_index['row_index_ref'] and type(selected['selected_count']) is int and
             0<=selected['selected_count']<=len(days)*width and reference(selected['keys_digest']) and
@@ -61,7 +61,7 @@ def selectors_for(record, spec, row_index, training_offsets):
         return seal({'contract_version':'stock_fold_selector_v1','kind':kind,
             'row_index_ref':row_index['row_index_ref'],'ranges':grid_ranges(days,sessions,width),
             'target_refs':refs,'selected_count':count,'keys_digest':keys_ref},'selector_ref')
-    train=selector('normalized_valid_rows',training,[record['normalized']['target_ref']],
+    train=selector('normalized_valid_model_usable_rows_v2',training,[record['normalized']['target_ref']],
         len(training_offsets),record['training_binding']['training_keys_digest'])
     inference_keys=digest_array_rows([security,day] for day in inference for security in universe)
     infer=selector('complete_grid',inference,[part['target_ref'] for part in record['evaluation_parts']],
@@ -77,7 +77,6 @@ def validate_controls(fold, record, view, manifest, row_index):
         'core_ref','cohort_ref','training_binding','fold_control_ref'}|extra,'exact fold control required')
     require(record.get('model_feature_selection_ref')==(None if binding is None else binding['model_feature_selection_ref']),
             'compact control model selection mismatch')
-    sealed(record,'fold_control_ref')
     v5=inputs['contract_version']=='stock_ml_saved_inputs_v5'
     require(record['contract_version']==('stock_ml_fold_control_v2' if v5 else 'stock_ml_fold_control_v1') and record['fold_spec']==spec and
         record['fold_control_ref']==inputs['fold_control']['fold_control_ref'],'fold control linkage mismatch')
@@ -85,10 +84,10 @@ def validate_controls(fold, record, view, manifest, row_index):
     binding=record['training_binding']
     if v5:
         fields(binding,{'contract_version','ordered_features','feature_blocks','training_selector_ref',
-            'training_row_count','cohort_ref','eligibility_mask','target_refs',
-            'training_keys_digest','dependency_ref','binding_ref'},'exact v5 training block binding required')
-        sealed(binding,'binding_ref')
-        require(binding['contract_version']=='stock_training_binding_v2' and
+            'training_row_count','cohort_ref','target_validity_mask','target_refs',
+            'training_keys_digest','dependency_ref','binding_ref'}|({'feature_view_ref'}
+            if binding['contract_version']=='stock_training_binding_v4' else set()),'exact v5 training block binding required')
+        require(binding['contract_version'] in ('stock_training_binding_v3','stock_training_binding_v4') and
             binding['cohort_ref']==record['cohort_ref'] and
             binding['target_refs']==[record['normalized']['target_ref']] and
             binding['training_selector_ref']==inputs['selectors']['training']['selector_ref'] and

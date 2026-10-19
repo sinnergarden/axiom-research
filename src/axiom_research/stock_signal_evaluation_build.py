@@ -99,14 +99,15 @@ class _BuildOOSWriter:
         self.pid=os.getpid(); self.closed=False; self.finished=False; self.charge=0; self.borrowed_owner=False
         self.signal_inputs={name:[]}; self.metadata={name:[]}; self.refs={name:[]}; self.closures={name:[]}
         self.records={}; self.marks={}; self.raw=None; self.lineages={}; self.shards={}; self.previous=None
+        self.fold_index={f['input_manifest']['input_ref']:f for f in self.manifest['folds']}
         self.metrics={'folds':0,'build_projection_borrows':0,'saved_oos_admissions':0,'shards':0,
                       'maximum_fold_rows':0,'retained_control_bytes':0}
         try:
-            self._manifest_charge=_size(self.manifest,maximum=self.state.store.maximum_matrix_bytes,
+            # _ready_manifest returns the batch-owned graph, not a new copy.
+            self._manifest_charge=0
+            initial=_size(self.scope,maximum=self.state.store.maximum_matrix_bytes,
                 retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes)
-            initial=self._manifest_charge+_size(self.scope,maximum=self.state.store.maximum_matrix_bytes,
-                retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes)
-            self._retain(initial+65536)
+            self._retain(initial)
             self.state._build_oos_borrowers=getattr(self.state,'_build_oos_borrowers',0)+1
             self.borrowed_owner=True
         except BaseException:
@@ -118,7 +119,6 @@ class _BuildOOSWriter:
         require(self.pid==os.getpid(),'build OOS writer belongs to another process')
         require(not self.closed and not self.finished,'build OOS writer is closed')
         self.batch._check_sources()
-        _check_marks(self.marks)
 
     def _retain(self,amount):
         self.state.store.reserve(amount)
@@ -129,7 +129,7 @@ class _BuildOOSWriter:
     def _require_inputs(self,inputs,spec):
         self._check()
         self._refresh_manifest()
-        require(any(f['input_manifest']==inputs and f['fold_spec']==spec for f in self.manifest['folds']),
+        require(self.fold_index.get(inputs['input_ref'])=={'input_manifest':inputs,'fold_spec':spec},
                 'build input outside frozen owner')
         days=sorted(spec['inference_cutoff_by_session'])
         require(self.previous is None or self.previous<days[0],'build OOS folds must be ordered and disjoint')
@@ -141,14 +141,11 @@ class _BuildOOSWriter:
         try:
             from .stock_batch import _data
             value=_data(self.batch)
-            if value.get('incomplete',False) and len(value['manifest']['folds'])==len(self.manifest['folds']):return
+            if value.get('incomplete',False) and len(value['manifest']['folds'])==len(self.fold_index):return
             current=self.batch._ready_manifest()
-            charge=_size(current,maximum=self.state.store.maximum_matrix_bytes,
-                retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes)
-            self._retain(charge)
+            # Refresh the borrowed reference; its owner already charges it.
             self.manifest=current;current=None
-            self.state._fixed_shared_bytes-=self._manifest_charge;self.charge-=self._manifest_charge
-            self._manifest_charge=charge;self.state._sync_shared()
+            for f in self.manifest['folds'][len(self.fold_index):]:self.fold_index[f['input_manifest']['input_ref']]=f
             self._manifest_pending=value.get('incomplete',False)
         finally:current=value=None
 
@@ -164,11 +161,9 @@ class _BuildOOSWriter:
             days=sorted(spec['inference_cutoff_by_session'])
             selected=[d for d in days if d in self.scope['sessions']]
             local={**self.scope,'sessions':selected}
-            # Current lease plus one detached OOS child coexist. No training matrix
-            # is included in this admission or the emitted date shards.
-            self.state.store.reserve(lease._charge*2+len(days)*len(lease.common['universe'])*16384+65536)
+            # Borrow the admitted fold; charge the actual retained delta below.
             admitted,records,marks,_=_admit_compact({self.name:[descriptor]},None,local,self.batch,
-                _borrowed_lease=lease,_manifest=self.manifest)
+                _borrowed_lease=lease,_manifest=self.manifest,_fold_index=self.fold_index)
             raw=admitted['raw']
             if self.raw is None:
                 self.raw={k:v for k,v in raw.items() if k not in ('sources','label_inputs','label_shard_refs','label_ref')}
@@ -179,13 +174,13 @@ class _BuildOOSWriter:
             new_sources={r:s for r,s in raw['sources'].items() if r not in self.raw['sources']}
             new_lineages={digest(v):v for v in raw['label_inputs'] if digest(v) not in self.lineages}
             delta=[admitted['metadata'],admitted['refs'],admitted['closures'],descriptor,
-                   new_records,{p:marks[Path(p)] for p in new_records},new_sources,new_lineages,
+                   new_records,{p:marks[Path(p)] for p in new_records if Path(p) in marks},new_sources,new_lineages,
                    raw['label_shard_refs']]
             self._retain(_size(delta,maximum=self.state.store.maximum_matrix_bytes,
-                retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes)+65536)
+                retained=self.state.store.shared_bytes+self.state.store.resident_bytes+self.state.store.lease_bytes))
             for p,r in records.items():
                 require(p not in self.records or self.records[p]==r,'conflicting build OOS source pin')
-                require(Path(p) not in self.marks or self.marks[Path(p)]==marks[Path(p)],'build OOS source changed')
+                require(Path(p) not in self.marks or Path(p) not in marks or self.marks[Path(p)]==marks[Path(p)],'build OOS source changed')
             for r,s in raw['sources'].items():
                 require(r not in self.raw['sources'] or self.raw['sources'][r]==s,'conflicting build OOS Raw source')
             for day in selected:
@@ -203,7 +198,8 @@ class _BuildOOSWriter:
             self.metrics['build_projection_borrows' if not lease._owns_projection else 'saved_oos_admissions']+=1
             # Only control metadata is retained. Current grids/masks/rows disappear
             # before the borrowed lease and the enclosing build projection close.
-            lease._check_sources(); _check_marks(self.marks)
+            lease._check_sources(); _check_marks(marks)
+            self.state._verified_folds.add(digest(spec))
         finally:
             self.metrics['consume_seconds']=self.metrics.get('consume_seconds',0.0)+time.perf_counter()-started
             # Tracebacks may outlive writer.close() and its charge credit.
@@ -222,7 +218,8 @@ class _BuildOOSWriter:
             require(not self.state.incomplete,'complete checkpoint batch required before OOS publication')
             require(set(self.shards)==set(self.scope['sessions']),'complete build OOS date scope required')
             self._complete_owner_sources()
-            self.state.store.reserve(self.charge*4+len(self.scope['universe'])*16384+65536)
+            # Existing controls are already owned and charged; publication does
+            # not allocate four additional copies of the retained history.
             self.raw['sources']={r:self.raw['sources'][r] for r in sorted(self.raw['sources'])}
             self.raw['label_inputs']=[self.lineages[r] for r in sorted(self.lineages)]
             self.raw['label_ref']=_label_projection_ref(self.raw)
@@ -239,7 +236,7 @@ class _BuildOOSWriter:
         if self.closed:return
         require(self.pid==os.getpid(),'build OOS writer belongs to another process')
         self.closed=True
-        for name in ('manifest','scope','signal_inputs','metadata','refs','closures','records','marks',
+        for name in ('manifest','fold_index','scope','signal_inputs','metadata','refs','closures','records','marks',
                      'raw','lineages','shards'): setattr(self,name,None)
         self.state._fixed_shared_bytes-=self.charge; self.charge=0
         if self.borrowed_owner:

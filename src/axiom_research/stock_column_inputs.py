@@ -45,6 +45,19 @@ class ColumnMathReuse:
             return cache[key]
         finally:old=value=None
 
+    def retain_sessions(self,days):
+        wanted=set(days);released=0
+        for cache in (self.raw,self.normalized):
+            for key in list(cache):
+                day=key[1] if isinstance(key,tuple) else key
+                if day not in wanted:released+=cache.pop(key)['_charge']
+        self.charge-=released
+        state=self.metrics.get('_owner_state')
+        if state is not None:
+            state._fixed_shared_bytes-=released
+            self.metrics['_owner_shared_baseline']-=released
+        self.metrics['_column_math_bytes']=self.charge
+
     def close(self):
         self.raw.clear();self.normalized.clear();self.charge=0
         self.metrics['_column_math_bytes']=0

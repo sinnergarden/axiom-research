@@ -1,3 +1,4 @@
+from .stock_fold_inputs import model_row_reason
 """Stdlib source admission and exact key selection for saved Signal evaluation."""
 from copy import deepcopy
 from pathlib import Path
@@ -227,7 +228,7 @@ def _saved_signal(descriptor, scope, *, batch=None):
             'Signal original membership mismatch')
         if row['valid']:
             _require(row['member'] and _finite(row['score']) and row.get('invalid_reason') is None and
-                all(original['validity']) and all(_finite(v) for v in original['values']),
+                model_row_reason(original) is None,
                 'Signal valid value/Feature mismatch')
         else:
             _require(row['score'] is None and bool(row.get('invalid_reason')), 'Signal invalid rows must preserve null/reason')

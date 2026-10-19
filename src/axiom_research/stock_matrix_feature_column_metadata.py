@@ -67,6 +67,7 @@ def _physical(desc, store):
     require(not physical.is_symlink(),'fixed column source file required')
     if store is not None:
         store._register(desc)
+        require(store._hash_once(desc['path'])==desc['file_digest'], 'column source file digest mismatch')
     else:
         mark=file_fingerprint(desc['path'])
         require(file_digest(desc['path'])==desc['file_digest'] and
@@ -96,11 +97,15 @@ def _saved_json(desc, ref_key, store):
     return value
 
 
-def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts=None):
+def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts=None,
+                                 _evidence_days=None, _evidence_fields=None,
+                                 _verify_buffers=True):
     """Verify JSON and every physical leaf without loading any source arrays.
 
-    A supplied matrix Store owns hash reuse and change detection. Provenance
-    documents are checked once per Store and released; no caller flag is trusted.
+    A supplied matrix Store owns hash reuse and change detection. The ordinary
+    Feature owner narrows evidence to requested leaves; omitted selectors keep
+    the explicit deep-audit behavior. Deferred buffers are checked by the same
+    Store on first use, never accepted through a persisted trusted flag.
     """
     _fields(descriptor,{'path','file_digest','source_ref'},'exact column source descriptor required')
     _physical(descriptor,store)
@@ -110,6 +115,11 @@ def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts
             manifest['contract_version']=='research_feature_column_source_v1', 'column source identity/version mismatch')
     require(manifest['implementation_ref']==digest(manifest['implementation_sources']),
             'column source implementation binding mismatch')
+    from .stock_feature_columns import REASONS
+    reasons=manifest['reason_codes']
+    require(type(reasons) is list and 0<len(reasons)<=256 and len(reasons)==len(set(reasons)) and
+            reasons[:len(REASONS)]==list(REASONS[:len(reasons)]) and
+            all(isinstance(r,str) and bool(r) for r in reasons[1:]),'input reason dictionary mismatch')
     spec=manifest['spec']; days=ordered(spec['read_sessions'],'column source dates')
     securities=ordered(spec['universe'],'column source securities')
     for day in days: _session(day)
@@ -120,49 +130,149 @@ def verify_feature_column_source(descriptor, *, store=None, _dependency_receipts
     require(set(spec['cutoff_by_session'])>=set(days) and
             all(_instant(spec['cutoff_by_session'][a])<=_instant(spec['cutoff_by_session'][b])
                 for a,b in zip(days,days[1:])), 'column source cutoff order mismatch')
-    require(type(manifest['buffers']) is dict and set(manifest['buffers'])==set(SOURCE_BUFFERS),
+    financial=manifest.get('financial_materializations',{})
+    if financial or any(m.get('domain')=='materialized_financial_events'
+                        for m in manifest.get('daily_fields',{}).values()):
+        from .financial_feature_columns import validate_financial_materializations
+        validate_financial_materializations(manifest)
+    extra=manifest.get('daily_fields',{})
+    require(type(extra) is dict and all(type(f) is str and f.isidentifier() and
+        set(m)=={'domain','dtype','unit'} and m['dtype'] in ('float64','int64','bool') for f,m in extra.items()),
+        'typed daily fields required')
+    buffer_types=dict(SOURCE_BUFFERS)
+    for name,dtype in {'member_known':'bool_u8','member_pool_complete':'bool_u8','member_reasons':'uint8'}.items():
+        if name in manifest['buffers']: buffer_types[name]=dtype
+    for field in extra:
+        require(field not in ('open','high','low','close','amount_cny','factor','is_member','vwap'),
+                'daily field shadows existing source')
+        buffer_types.update({field+'::'+k:v for k,v in SOURCE_BUFFERS.items() if not k.startswith('member')})
+    require(type(manifest['buffers']) is dict and set(manifest['buffers'])==set(buffer_types),
             'column source buffers mismatch')
     reachable={manifest['source_ref'],descriptor['file_digest']}
     for name,desc in manifest['buffers'].items():
-        _fields(desc,{'path','file_digest','dtype','shape','buffer_digest'},'exact source buffer required')
-        shape=[len(days),len(securities)]+([] if name.startswith('member') else [6])
-        require(desc['dtype']==SOURCE_BUFFERS[name] and desc['shape']==shape and
-                desc['buffer_digest']==desc['file_digest'],'column source buffer shape/type/ref mismatch')
-        _physical(desc,store)
-        size=DTYPES[desc['dtype']][1]
-        for dimension in shape: size*=dimension
-        physical=Path(desc['path']) if store is None else store._resolve(desc['path'])
-        require(physical.stat().st_size==size,'column source buffer length mismatch')
-        reachable.add(desc['buffer_digest'])
+        shape=[len(days),len(securities)]+([] if name.startswith('member') or '::' in name else [6])
+        require(desc['dtype']==buffer_types[name] and desc['shape']==shape,'column source buffer shape/type mismatch')
+        def pieces(value):
+            if value.get('layout')=='date_segments_v1':
+                from .feature_input_buffers import segmented_buffer
+                require(value==segmented_buffer(value['segments']),'date segment identity/axes mismatch')
+                for child in value['segments']:yield from pieces(child)
+            elif value.get('layout')=='security_segments_v1':
+                require(value['buffer_digest']==digest({k:v for k,v in value.items() if k!='buffer_digest'}),'security segment identity mismatch')
+                selected=[]
+                for part in value['segments']:
+                    cols=part['columns'];child=part['buffer'];selected.extend(cols)
+                    require(cols==sorted(set(cols)) and child['dtype']==value['dtype'] and
+                        child['shape']==[value['shape'][0],len(cols),*value['shape'][2:]],'security segment axes mismatch')
+                    yield from pieces(child)
+                require(sorted(selected)==list(range(value['shape'][1])),'security segment coverage mismatch')
+            else:yield value
+        parts=pieces(desc)
+        for part in parts:
+            _fields(part,{'path','file_digest','dtype','shape','buffer_digest'},'exact source buffer required')
+            require(part['buffer_digest']==part['file_digest'],'column source buffer ref mismatch')
+            if _verify_buffers:_physical(part,store)
+            size=DTYPES[part['dtype']][1]
+            for dimension in part['shape']:size*=dimension
+            physical=Path(part['path']) if store is None else store._resolve(part['path'])
+            require(not physical.is_symlink() and physical.stat().st_size==size,'column source buffer length mismatch')
+            reachable.add(part['buffer_digest'])
     require(type(manifest['chunks']) is list and bool(manifest['chunks']),'column source provenance chunks required')
     covered=[]
-    for chunk in manifest['chunks']:
+    all_chunks=[(chunk,3,None) for chunk in manifest['chunks']]
+    extension_fields=[]
+    for extension in manifest.get('daily_extensions',[]):
+        require(set(extension)=={'fields','chunks'} and bool(extension['fields']), 'daily extension closure required')
+        extension_fields.extend(extension['fields'])
+        require([d for c in extension['chunks'] for d in c['sessions']]==days, 'daily extension calendar coverage mismatch')
+        all_chunks.extend((c,None,extension['fields']) for c in extension['chunks'])
+    require(len(extension_fields)==len(set(extension_fields)) and set(extension_fields)==set(extra),
+            'daily extension field coverage mismatch')
+    for chunk,expected_domains,expected_fields in all_chunks:
         _fields(chunk,{'sessions','evidence'},'exact column source chunk required')
-        chunk_days=ordered(chunk['sessions'],'source chunk dates'); covered.extend(chunk_days)
-        require(type(chunk['evidence']) is list and len(chunk['evidence'])==3,'three source domains required')
+        chunk_days=ordered(chunk['sessions'],'source chunk dates')
+        if expected_domains is not None: covered.extend(chunk_days)
+        require(type(chunk['evidence']) is list and bool(chunk['evidence']) and
+            (expected_domains is None or len(chunk['evidence'])==expected_domains),'source domains required')
+        if _evidence_days is not None and not set(chunk_days).intersection(_evidence_days):
+            continue
+        chunk_fields=set(expected_fields) if expected_fields is not None else {
+            'open','high','low','close','amount_cny','factor','is_member'}
+        if _evidence_fields is not None and not chunk_fields.intersection(_evidence_fields):
+            continue
+        seen_fields=[]
         for desc in chunk['evidence']:
             _fields(desc,{'path','file_digest','evidence_ref'},'exact source provenance descriptor required')
             _physical(desc,store)
-            token=('feature_column_evidence_checked_v1',desc['path'],desc['file_digest'],desc['evidence_ref'])
+            token=('feature_column_evidence_checked_v1',desc['path'],desc['file_digest'],desc['evidence_ref'],
+                   None if expected_fields is None else tuple(expected_fields))
             known=None if store is None else store.content.get(token)
             if known is None:
                 child=_saved_json(desc,'evidence_ref',store)
                 _verify_ref(child,'evidence_ref')
-                _fields(child,{'contract_version','context','field_meta','fields','sessions','evidence_ref'},
-                        'exact column source provenance required')
-                require(child['contract_version']=='reader_column_evidence_v1' and child['sessions']==chunk_days and
-                        child['evidence_ref']==desc['evidence_ref'], 'column source provenance closure mismatch')
+                light=child['contract_version']=='reader_column_block_v1'
+                compact=child['contract_version']=='reader_column_evidence_v2'
+                _fields(child,{'contract_version','context','field_meta','fields','sessions','evidence_ref'} |
+                    ({'shared_rows'} if compact else {'security_axis_ref'} if light else set()),
+                    'exact column source provenance required')
+                require(child['contract_version'] in ('reader_column_evidence_v1','reader_column_evidence_v2','reader_column_block_v1') and
+                        child['sessions']==chunk_days and child['evidence_ref']==desc['evidence_ref'],
+                        'column source provenance closure mismatch')
+                if light:
+                    require(child['security_axis_ref']==digest(securities) and
+                            set(child['fields'])==set(child['field_meta']),'input block axes/fields mismatch')
+                    require(child['context'].get('snapshot_id') not in (None,'','current','latest'),
+                            'pinned input block source required')
+                    for field,metadata in child['field_meta'].items():
+                        _fields(metadata,{'dtype','unit','source_binding'},'input block metadata required')
+                        require(_ref(metadata['source_binding']),'input block source version required')
+                shared_objects={}
+                if compact:
+                    from .feature_input_evidence import shared_evidence_descriptors, materialize_evidence_rows
+                    for item in shared_evidence_descriptors(child):
+                        proof=item['buffer']
+                        _fields(proof,{'path','file_digest','dtype','shape','buffer_digest'},'exact shared evidence buffer required')
+                        require(proof['dtype']=='uint8' and len(proof['shape'])==1 and proof['buffer_digest']==proof['file_digest'], 'shared evidence buffer mismatch')
+                        if proof['path'] in shared_objects: continue
+                        shared_objects[proof['path']]=proof
+                        _physical(proof,store)
+                        require(Path(proof['path']).stat().st_size==proof['shape'][0], 'shared evidence buffer size mismatch')
+                        reachable.update((proof['file_digest'],item['value_ref']))
+                    child=materialize_evidence_rows(child)
+                if expected_fields is not None:
+                    require(set(child['fields'])==set(child['field_meta']) and
+                            set(child['fields'])<=set(expected_fields), 'daily evidence fields mismatch')
+                    for field,meta in child['field_meta'].items():
+                        declaration=extra[field]
+                        require(child['context']['domain']==declaration['domain'] and
+                                meta['dtype']==declaration['dtype'] and meta['unit']==declaration['unit'],
+                                'daily evidence domain/type/unit mismatch')
+                        if not light:
+                            keys=[(r['security_id'],r['session']) for r in meta['by_key']]
+                            covered_securities=financial[field]['coverage_security_ids'] if field in financial else securities
+                            require(len(keys)==len(set(keys)) and set(keys)=={(s,d) for d in chunk_days for s in covered_securities},
+                                    'daily evidence key coverage mismatch')
+                    seen_fields.extend(child['fields'])
+                if financial and not light:
+                    validate_financial_materializations(manifest,child=child)
                 if _dependency_receipts is not None:
                     _dependency_receipts(child)
                 if store is not None:
                     store.drop_json(desc,'evidence_ref')
                     # The existing Store charges this small receipt; it still
                     # fingerprints every referenced file on each admission.
-                    store._retain_entry(store.content,token,tuple(chunk_days))
+                    store._retain_entry(store.content,token,(tuple(chunk_days),tuple(child['fields']),tuple(shared_objects.values())))
                 del child
             else:
-                require(known==tuple(chunk_days),'cached source provenance date mismatch')
+                require(known[0]==tuple(chunk_days),'cached source provenance date mismatch')
+                for proof in known[2]:
+                    _physical(proof,store)
+                    reachable.add(proof['file_digest'])
+                if expected_fields is not None: seen_fields.extend(known[1])
             reachable.update((desc['evidence_ref'],desc['file_digest']))
+        if expected_fields is not None:
+            require(len(seen_fields)==len(set(seen_fields)) and set(seen_fields)==set(expected_fields),
+                    'daily evidence field closure mismatch')
     require(covered==days,'column source provenance calendar coverage mismatch')
     return manifest,reachable
 

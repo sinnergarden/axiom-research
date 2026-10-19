@@ -100,7 +100,7 @@ class ConfiguredFeatureUniverseTests(unittest.TestCase):
             domains=deepcopy(manifest['source_profiles'])
             for profile in domains.values():
                 profile['source_profile']['availability']={'timezone':'UTC','session_release_time':'12:00:00'}
-            data=Mock(); data.store.load_snapshot.return_value={'domains':domains}
+            data=Mock(); data.describe_snapshot.return_value={'domains':domains}
             destination=root/'must-not-be-created'
             with self.assertRaisesRegex(ValueError,'membership source needs stable dated-event identities'):
                 build_feature_column_source(data,spec=manifest['spec'],destination=destination)

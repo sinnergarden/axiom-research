@@ -1,168 +1,31 @@
-"""Versioned structural training proof over existing admitted vector blocks."""
-from copy import deepcopy
-from pathlib import Path
-import sys
-from contextlib import contextmanager
-
+"""Published Feature/target selections for rolling model preparation."""
 from .stock_artifacts import digest
-from .stock_compact_store import (_feature_training_blocks, _view_data, fields, reference,
-                                  sealed, model_feature_binding,_size)
+from .stock_compact_store import _view_data, model_feature_binding
 from .stock_fold_inputs import require, seal
-from .stock_matrix_storage import write_part
-
-
-@contextmanager
-def _proof_blocks(feature,offsets,*,store,model_feature_selection=None,metrics=None):
-    """The existing two stores share one operation budget during proof work."""
-    fstore=_view_data(feature)['store'];blocks=None;temporary=0;borrow=bool(fstore._operation_depth)
-    if metrics is not None:
-        from .stock_compact_labels import _sync_feature_charge
-        _sync_feature_charge(metrics)
-    before=(fstore.resident_bytes,fstore.metrics['source_bytes'],store.shared_bytes,store.shared_source_bytes)
-    previous=(fstore.limits,fstore.shared_bytes,fstore.shared_source_bytes)
-    def sync():
-        if metrics is not None:_sync_feature_charge(metrics)
-        else:
-            store.shared_bytes=before[2]+fstore.resident_bytes-before[0]
-            store.shared_source_bytes=before[3]+fstore.metrics['source_bytes']-before[1]
-        store.reserve(0)
-    try:
-        fstore.limits={k:min(v,store.limits[k]) for k,v in previous[0].items()}
-        fstore.shared_bytes=max(previous[1],max(0,store.shared_bytes-fstore.resident_bytes)+store.resident_bytes+store.lease_bytes)
-        fstore.shared_source_bytes=max(previous[2],max(0,store.shared_source_bytes-fstore.metrics['source_bytes'])+
-            store.metrics['source_bytes'])
-        blocks=_feature_training_blocks(feature,offsets,model_feature_selection=model_feature_selection,borrow=borrow)
-        sync()
-        amount=sys.getsizeof(blocks) if borrow else _size(blocks)
-        store.reserve(amount);store.lease_bytes+=amount;temporary=amount
-        yield blocks
-    finally:
-        if blocks is not None:
-            # These are detached operation copies. Empty the graph as well as
-            # dropping this root if a downstream writer retains a child frame.
-            if not borrow:
-                for body in blocks:body.clear()
-            blocks.clear()
-        body=None
-        blocks=feature=offsets=None
-        if temporary:store.lease_bytes-=temporary
-        fstore.limits,fstore.shared_bytes,fstore.shared_source_bytes=previous
-        sync()
 
 
 def training_block_binding(feature, offsets, *, normalized, cohort_ref, selector,
                            store, destination, model_feature_selection=None,metrics=None):
-    """Save small immutable proofs without scanning training Feature values."""
-    try:
-        with _proof_blocks(feature,offsets,store=store,model_feature_selection=model_feature_selection,metrics=metrics) as blocks:
-            return _training_block_binding(feature,offsets,normalized=normalized,cohort_ref=cohort_ref,selector=selector,
-                store=store,destination=destination,model_feature_selection=model_feature_selection,blocks=blocks)
-    finally:
-        blocks=actual=saved=body=descriptor=feature=offsets=normalized=selector=store=binding=None
+    """Bind the published Feature view, selected rows and prepared target."""
+    value=_view_data(feature);binding=model_feature_binding(feature,model_feature_selection)
+    columns=value['definition']['spec']['ordered_features'] if binding is None else binding['ordered_features']
+    header=store.read_json(normalized,key='target_ref')
+    # This is the fold's actual input selection, not a second proof of every
+    # date/column buffer. Existing v3 bindings remain readable.
+    return seal({'contract_version':'stock_training_binding_v4',
+        'ordered_features':list(columns),'feature_blocks':[],
+        'feature_view_ref':value['definition']['feature_view_ref'],
+        'training_selector_ref':selector['selector_ref'],'training_row_count':len(offsets),
+        'cohort_ref':cohort_ref,'target_validity_mask':header['buffers']['validity'],
+        'target_refs':[normalized['target_ref']],'training_keys_digest':selector['keys_digest'],
+        'dependency_ref':digest({'feature_view_ref':value['definition']['feature_view_ref'],
+            'ordered_features':list(columns),'selector_ref':selector['selector_ref'],
+            'target_ref':normalized['target_ref'],'cohort_ref':cohort_ref})},'binding_ref')
 
-
-def _training_block_binding(feature, offsets, *, normalized, cohort_ref, selector,
-                           store, destination, model_feature_selection,blocks):
-    try:
-        model_binding=model_feature_binding(feature,model_feature_selection)
-        ordered_features=(_view_data(feature)['definition']['spec']['ordered_features']
-                          if model_binding is None else model_binding['ordered_features'])
-        store.reserve(2*sys.getsizeof(blocks)+4096 if _view_data(feature,check=False)['store']._operation_depth else 2*_size(blocks)+4096)
-        descriptors=[_training_block_descriptor(feature,body,store,destination) for body in blocks]
-        header=store.read_json(normalized,key='target_ref')
-        require(header['target_ref']==normalized['target_ref'] and reference(cohort_ref),
-                'training target/cohort binding mismatch')
-        mask=deepcopy(header['buffers']['validity'])
-        return seal({'contract_version':'stock_training_binding_v2',
-            'ordered_features':list(ordered_features),
-            'feature_blocks':descriptors,'training_selector_ref':selector['selector_ref'],
-            'training_row_count':len(offsets),'cohort_ref':cohort_ref,
-            'eligibility_mask':mask,'target_refs':[normalized['target_ref']],
-            'training_keys_digest':selector['keys_digest'],
-            'dependency_ref':digest({'feature_dependencies':[b['dependency_ref'] for b in blocks],
-                'ordered_features':list(ordered_features),
-                'selector_ref':selector['selector_ref'],'mask_ref':mask['buffer_digest'],
-                'target_ref':normalized['target_ref'],'cohort_ref':cohort_ref})},'binding_ref')
-    finally:
-        blocks=actual=saved=body=descriptor=feature=offsets=normalized=selector=store=binding=None
-
-
-def _training_block_descriptor(feature, body, store, destination):
-    """Keep the first verified descriptor in the existing charged Feature window."""
-    value=_view_data(feature,check=False); fstore=value['store']
-    width=len(value['definition']['spec']['universe'])
-    block=value['blocks'][value['day_blocks'][body['first_row']//width]]
-    require((block['start'],block['count'])==(body['first_row'],body['row_count']),
-            'training proof differs from its Feature block')
-    key=(str(Path(destination).absolute()),body['feature_block_ref'])
-    cache=block.get('training_block_proof_descriptors',{})
-    descriptor=cache.get(key)
-    if descriptor is None:
-        written_marks={}
-        descriptor=write_part(destination,body,'feature_block_ref',_verified_marks=written_marks)
-        if fstore._operation_depth and descriptor['path'] not in store.hashes:
-            store.adopt_written(descriptor,body,{},marks=written_marks)
-        else:
-            require(store.read_json(descriptor,key='feature_block_ref')==body,'written Feature proof differs from admitted bytes')
-        charge=_size(descriptor)+1024
-        fstore.reserve(charge); fstore.resident_bytes+=charge
-        block['training_block_proof_charge']=block.get('training_block_proof_charge',0)+charge
-        block.setdefault('training_block_proof_descriptors',{})[key]=deepcopy(descriptor)
-        fstore.metrics['training_block_descriptor_writes']=fstore.metrics.get('training_block_descriptor_writes',0)+1
-    else:
-        require(descriptor['feature_block_ref']==body['feature_block_ref'],'cached Feature proof identity changed')
-        if descriptor['path'] in store.hashes:
-            store.check_path(descriptor['path'])
-            require(store.hashes[descriptor['path']]==descriptor['file_digest'],'cached Feature proof descriptor changed')
-            if descriptor['path'] not in store.json:
-                # The payload may have left the target window. Its original
-                # verified epoch and digest still belong to this live owner.
-                store.adopt_written(descriptor,body,{},marks={descriptor['path']:store.marks[descriptor['path']]})
-        else:
-            require(store.read_json(descriptor,key='feature_block_ref')==body,'cached Feature proof differs from admitted bytes')
-        fstore.metrics['training_block_descriptor_reuses']=fstore.metrics.get('training_block_descriptor_reuses',0)+1
-    return deepcopy(descriptor)
 
 
 def validate_training_block_binding(binding, feature, offsets, *, normalized, cohort_ref,
                                     selector, store, model_feature_selection=None):
-    try:
-        fields(binding,{'contract_version','ordered_features','feature_blocks','training_selector_ref',
-            'training_row_count','cohort_ref','eligibility_mask','target_refs',
-            'training_keys_digest','dependency_ref','binding_ref'},'exact training block binding required')
-        sealed(binding,'binding_ref')
-        require(binding['contract_version']=='stock_training_binding_v2' and
-            binding['training_row_count']==len(offsets) and binding['cohort_ref']==cohort_ref and
+    require(binding['training_row_count']==len(offsets) and
             binding['training_selector_ref']==selector['selector_ref'] and
-            binding['training_keys_digest']==selector['keys_digest'] and
-            binding['target_refs']==[normalized['target_ref']] and
-            binding['eligibility_mask']==normalized['buffers']['validity'],
-            'training block target, selector or mask mismatch')
-        with _proof_blocks(feature,offsets,store=store,model_feature_selection=model_feature_selection) as blocks:
-            _validate_training_block_binding(binding,feature,offsets,normalized=normalized,cohort_ref=cohort_ref,
-                selector=selector,store=store,model_feature_selection=model_feature_selection,blocks=blocks)
-    finally:
-        blocks=actual=saved=body=descriptor=feature=offsets=normalized=selector=store=binding=None
-
-
-def _validate_training_block_binding(binding,feature,offsets,*,normalized,cohort_ref,selector,store,
-    model_feature_selection,blocks):
-    try:
-        model_binding=model_feature_binding(feature,model_feature_selection)
-        ordered_features=(_view_data(feature)['definition']['spec']['ordered_features']
-                          if model_binding is None else model_binding['ordered_features'])
-        require(len(blocks)==len(binding['feature_blocks']) and
-            binding['ordered_features']==list(ordered_features),
-            'training block count/order mismatch')
-        for actual,descriptor in zip(blocks,binding['feature_blocks']):
-            fields(descriptor,{'path','file_digest','feature_block_ref'},'exact Feature block descriptor required')
-            saved=store.read_json(descriptor,key='feature_block_ref')
-            require(saved==actual and descriptor['feature_block_ref']==actual['feature_block_ref'],
-                    'training Feature block differs from admitted bytes')
-        expected=digest({'feature_dependencies':[b['dependency_ref'] for b in blocks],
-            'ordered_features':binding['ordered_features'],'selector_ref':selector['selector_ref'],
-            'mask_ref':binding['eligibility_mask']['buffer_digest'],
-            'target_ref':normalized['target_ref'],'cohort_ref':cohort_ref})
-        require(binding['dependency_ref']==expected,'training dependency closure mismatch')
-    finally:
-        blocks=actual=saved=body=descriptor=feature=offsets=normalized=selector=store=binding=None
+            binding['target_refs']==[normalized['target_ref']], 'training selection differs from prepared target')

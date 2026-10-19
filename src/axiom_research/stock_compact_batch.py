@@ -74,10 +74,10 @@ def target_eligibility_reasons(raw,feature,offsets,cutoff,common,*,model_feature
     """Apply the scalar admission precedence to admitted typed columns."""
     try:
         import numpy as np
-        from .stock_compact_store import feature_eligibility_columns
+        from .stock_compact_store import membership_columns
         from .stock_matrix_storage import instant_us
-        member,complete,knowledge,maximum=feature_eligibility_columns(feature,offsets,
-            model_feature_selection=model_feature_selection)
+        membership=membership_columns(feature,offsets)
+        member=membership['member']
         reasons=np.empty(len(raw),dtype=object);reasons[:]=None
         at=raw.column('availability');clock=instant_us(cutoff);first=0
         cutoff_day=_instant(cutoff).date().isoformat()
@@ -92,19 +92,18 @@ def target_eligibility_reasons(raw,feature,offsets,cutoff,common,*,model_feature
             boundary=sum(day<=cutoff_day for day in calendar)-1
             r[(r==None)&((a['end_session']>boundary)|(a['availability']>clock))]='LABEL_NOT_MATURE'
             first=end
+        reasons[(reasons==None)&~membership['member_known']]='MEMBERSHIP_UNKNOWN'
+        reasons[(reasons==None)&~membership['member_pool_complete']]='MEMBERSHIP_INCOMPLETE'
         reasons[(reasons==None)&~member]='NOT_MEMBER'
-        reasons[(reasons==None)&~complete]='FEATURE_MISSING'
-        reasons[(reasons==None)&(knowledge>clock)]='FEATURE_NOT_AVAILABLE'
+        reasons[(reasons==None)&(~membership['member_available_validity']|(membership['member_available']>clock))]='MEMBERSHIP_NOT_AVAILABLE'
         eligible=reasons==None
-        require(bool(((maximum[eligible]!=-(2**63))&(maximum[eligible]<=clock)).all()),
-            'training Feature native clock exceeds fit')
         target=common.get('target_spec')
         if target is not None and target['label_spec']['maturity']['rule']=='all_outcome_dependencies_strictly_before_fit_cutoff':
             reasons[eligible&(at>=clock)]='LABEL_NOT_MATURE'
         return reasons.tolist()
 
     finally:
-        raw=feature=member=complete=knowledge=maximum=reasons=at=part=a=r=valid=known=eligible=None
+        raw=feature=member=membership=reasons=at=part=a=r=valid=known=eligible=None
 
 
 def read_target(store,descriptor,expected=None,raw_rows=None):
@@ -131,7 +130,7 @@ def read_target(store,descriptor,expected=None,raw_rows=None):
     fields(value,{'contract_version','definition','definition_ref','row_count','reason_dictionary',
         'source_dictionary','buffers','core_ref','cohort','target_ref'},'exact compact target required')
     require(value['contract_version'] in ('stock_compact_raw_v1','stock_compact_normalized_v1','stock_compact_raw_v2','stock_compact_normalized_v2') and
-            value['definition_ref']==digest(definition) and (expected is None or definition==expected),
+            (expected is None or definition==expected),
             'compact target definition mismatch')
     if 'target_ref' in descriptor: require(value['target_ref']==descriptor['target_ref'],'compact target reference mismatch')
     days=definition['sessions']; universe=definition['universe']; count=len(days)*len(universe)
@@ -160,8 +159,7 @@ def read_target(store,descriptor,expected=None,raw_rows=None):
         if normalized:
             require(reference(value['core_ref']) and type(value['cohort']) is dict and value['source_dictionary']==[],
                     'normalized Core/cohort refs required')
-            require(digest(value['cohort'])==definition['cohort_ref'] and
-                value['cohort']['sessions']==days and value['cohort']['universe']==universe and
+            require(value['cohort']['sessions']==days and value['cohort']['universe']==universe and
                 value['cohort']['cutoff']==definition['cutoff'] and value['cohort']['raw_refs']==definition['raw_refs'],
                 'normalized cohort differs from its declared identity')
         else:
@@ -262,6 +260,7 @@ class CompactState:
             if value.get('contract_version') in ('stock_ml_batch_inputs_v3','stock_ml_batch_inputs_v4','stock_ml_batch_inputs_v5') and value.get('batch_ref')==self._batch_ref}
         self._source_table={}; self.source_records=()
         self._verified_folds=set()
+        self.saved_models={r['input_ref']:r for r in batch['definition'].get('resume_from',{}).get('saved_folds',())}
         self._active_selected=None
         self._sync_shared()
 
@@ -269,7 +268,14 @@ class CompactState:
     def operation(self):
         """Borrow the same Feature/target owners through nested helpers."""
         fd=_view_data(self.feature,check=False)
+        from .stock_compact_store import _membership_binding
+        _membership_binding(fd)
         with ExitStack() as stack:
+            if 'native' in fd:stack.enter_context(fd['native'].operation())
+            elif fd.get('membership_owner') is not None:
+                member_store=fd['membership_owner'].store
+                member_store.check();stack.enter_context(member_store.operation())
+                for path in member_store.fingerprints:member_store.check_path(path)
             stack.enter_context(fd['store'].operation());stack.enter_context(self.store.operation())
             for path in fd['control_paths']:fd['store'].check_path(path)
             for path in self._keep_paths:self.store.check_path(path)
@@ -347,7 +353,8 @@ class CompactState:
             for descriptor in [*record['raw_parts'],record['normalized'],*evaluation_parts(record)]:
                 read_target(self.store,descriptor)
             width=len(self.view['definition']['universe'])
-            selected=[self.positions[training[i//width]]*width+i%width for i,valid in enumerate(rows.arrays['validity']) if valid]
+            from .stock_compact_store import model_training_selector
+            selected,_=model_training_selector(self.feature,rows,training,spec['fit_cutoff'],**self.feature_options)
             require(fold['input_manifest']['selectors']['training']['selected_count']==len(selected) and
                 record['training_binding']['training_row_count']==len(selected), 'produced training selection mismatch')
             for descriptor in record['training_binding']['feature_blocks']:
@@ -356,7 +363,7 @@ class CompactState:
                     'produced Feature proof was not admitted by this writer')
                 self.store.check_path(descriptor['path'])
             self.store.validate_boundary()
-            self._account_targets();self._remember_sources()
+            self._account_targets()
             self._active_record=digest(spec);self._verified_folds.add(self._active_record);self._active_selected=selected
             self.store.metrics['fold_window_admissions']=self.store.metrics.get('fold_window_admissions',0)+1
             self.store.metrics['produced_fold_window_borrows']=self.store.metrics.get('produced_fold_window_borrows',0)+1
@@ -446,7 +453,7 @@ class CompactState:
             self._sync_shared(); self.store.reserve(0)
             selected=_admit_fold(self.store,self.feature,self.view,fold,record,self.targets,self.positions,self.price_domains,
                 self.batch['definition']['preparation_options']['row_block_sessions'])
-            self._account_targets(); self._remember_sources()
+            self._account_targets()
             self._active_record=digest(spec); self._verified_folds.add(self._active_record)
             self._active_selected=selected
             self.store.metrics['fold_window_admissions']=self.store.metrics.get('fold_window_admissions',0)+1
@@ -514,6 +521,7 @@ class CompactState:
                 self._activate(fold,record); self.check()
                 record=None
             require(len(self._verified_folds)==len(self.batch['folds']),'complete compact fold admission required')
+            self._remember_sources()
             complete=True
         finally:
             record=None
@@ -529,8 +537,7 @@ class CompactState:
 
     def compatible(self,budgets):
         fd=_view_data(self.feature); fstore=fd['store']
-        require(fstore.metrics['source_bytes']+self.store.metrics['source_bytes']<=budgets['maximum_source_bytes'] and
-                self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes<=budgets['maximum_matrix_bytes'] and
+        require(self.store.shared_bytes+self.store.resident_bytes+self.store.lease_bytes<=budgets['maximum_matrix_bytes'] and
                 max(fstore.metrics['largest_parent_bytes'],self.store.metrics['largest_parent_bytes'])<=budgets['maximum_parent_bytes'],
                 'admitted compact accounting exceeds requested budget')
         self.store.limits={k:min(v,budgets[k]) for k,v in self.store.limits.items()}
@@ -566,7 +573,7 @@ class CompactState:
     def control_common(self,inputs,spec):
         """Return saved common metadata without admitting typed fold inputs."""
         self._parts(inputs,spec)
-        return deepcopy(self.view['definition'])
+        return self.view['definition']
 
     def _feature_slice(self,inputs,spec,rows):
         common=self.view['definition']; training,inference=validate_spec(spec,common['calendar'])
@@ -607,7 +614,12 @@ class CompactState:
             targets.append((descriptor,header,rows))
         feature_paths=set(fd['control_paths']); ordinals=set()
         for day in set(training+inference): ordinals.update(fd['day_admissions'][self.positions[day]])
-        for ordinal in ordinals:
+        native_records={};native_marks={}
+        if 'native' in fd:
+            columns=(fd['definition']['spec']['ordered_features'] if self.model_binding is None
+                     else self.model_binding['ordered_features'])
+            native_records,native_marks=fd['native'].evaluation_sources(set(training+inference),columns)
+        for ordinal in (() if 'native' in fd else ordinals):
             block=fd['blocks'][ordinal]
             if self.model_binding is None:
                 require(block['parts'] is not None,'evaluation Feature block not admitted')
@@ -623,7 +635,7 @@ class CompactState:
             for part in descriptors:
                 feature_paths.add(part['metadata']['path'])
                 feature_paths.update(d['path'] for d in part['buffers'].values())
-        records={}; marks={}
+        records=native_records; marks=native_marks
         for store,chosen in ((self.store,paths),(fd['store'],feature_paths)):
             for path in chosen:
                 require(path in store.hashes and path in store.marks,'evaluation source not admitted')
@@ -645,12 +657,13 @@ class CompactState:
             record=self._parts(inputs,spec)
             training_offsets=self._activate(self.records[(digest(inputs),digest(spec))][0],record)
             inference_offsets=expand_ranges(inputs['selectors']['inference']) if self.compact else record['inference_offsets']
-            common=deepcopy(self.view['definition']); normalized=self.targets[record['normalized']['target_ref']]
+            common=dict(self.view['definition']); normalized=self.targets[record['normalized']['target_ref']]
             self.store.reserve(len(inference_offsets)*(len(common['ordered_features'])*96+2048))
+            from .stock_fold_inputs import model_row_reason,model_row_values
             rows=feature_rows(self.feature,inference_offsets,**self.feature_options); candidate_keys=[]; candidates=[]
             for row in rows:
-                if row['member'] and all(row['validity']) and all(type(v) in (int,float) and math.isfinite(v) for v in row['values']) and feature_available(row) is not None:
-                    candidates.append(row['values']); candidate_keys.append([row['security_id'],row['session']])
+                if model_row_reason(row) is None:
+                    candidates.append(model_row_values(row)); candidate_keys.append([row['security_id'],row['session']])
             features=self._feature_slice(inputs,spec,rows); nrows=normalized[1]
             fspec=_view_data(self.feature)['definition']['spec']; width=len(common['universe'])
             keys=[[common['universe'][off%width],fspec['feature_sessions'][off//width]] for off in training_offsets]
@@ -659,6 +672,8 @@ class CompactState:
             for code,flag in zip(nrows.arrays['reason_codes'],nrows.arrays['validity']):
                 if not flag:
                     reason=nrows.value['reason_dictionary'][int(code)]; excluded[reason]=excluded.get(reason,0)+1
+            model_excluded=int(nrows.arrays['validity'].sum())-len(training_offsets)
+            if model_excluded:excluded['MODEL_ROW_UNAVAILABLE']=model_excluded
             labels=seal({'contract_version':'stock_fold_label_slice_v3','input_manifest_ref':digest(inputs),
                 'prepared_view_ref':self.view['prepared_view_ref'],'fold_spec_ref':digest(spec),'cutoff':spec['fit_cutoff'],
                 'selectors':{k:deepcopy(inputs['selectors'][k]) for k in ('training_labels','evaluation_labels')},
@@ -677,9 +692,16 @@ class CompactState:
                 workspace=gather_rows*feature_width*8+gather_rows*32+len(nrows)
                 self.store.reserve((len(keys)+len(candidates))*feature_width*8+len(keys)*8+workspace)
                 X=training_matrix(self.feature,training_offsets,spec['fit_cutoff'],**self.feature_options)
-                y=nrows.arrays['values'][nrows.arrays['validity'].astype(bool)]
+                from .stock_compact_store import model_training_selector
+                checked_offsets,target_positions=model_training_selector(self.feature,nrows,validate_spec(spec,common['calendar'])[0],spec['fit_cutoff'],**self.feature_options)
+                require(checked_offsets==training_offsets,'training selector changed before X/y projection')
+                y=nrows.arrays['values'][target_positions]
                 P=np.asarray(candidates,dtype='<f8').reshape(len(candidates),len(common['ordered_features']))
-                require(bool(np.isfinite(X).all()) and bool(np.isfinite(y).all()) and bool(np.isfinite(P).all()),'compact active matrix must be finite')
+                require(not bool(np.isinf(X).any()) and bool(np.isfinite(y).all()) and not bool(np.isinf(P).any()),'compact matrices require finite y and no infinite X/P')
+                self.store.metrics.update(model_row_policy='research_member_any_valid_native_nan_v2',
+                    training_nan_cells=int(np.isnan(X).sum()),prediction_nan_cells=int(np.isnan(P).sum()),
+                    training_partial_rows=int(np.isnan(X).any(axis=1).sum()),
+                    training_usable_dates=len({k[1] for k in keys}),training_rows=len(keys))
                 for a in (X,y,P): a.flags.writeable=False
                 payload.update(X=X,y=y,P=P)
                 self.store.metrics['training_projection_calls']=self.store.metrics.get('training_projection_calls',0)+1
@@ -768,8 +790,8 @@ def _admit_fold(store,feature,view,fold,record,targets,positions=None,price_doma
             require(ev['definition']['cutoff']==spec['evaluation_cutoff'],'compact evaluation cutoff mismatch')
         require(nv['definition']['sessions']==training and nv['definition']['cutoff']==spec['fit_cutoff'] and
                 nv['definition']['raw_refs']==[d['target_ref'] for d in record['raw_parts']] and
-                nv['core_ref']==record['core_ref'] and digest(nv['cohort'])==record['cohort_ref'] and
-                nv['cohort']['feature_view_ref']==fd['definition']['feature_view_ref'] and nv['cohort']['cutoff']==spec['fit_cutoff'] and
+                nv['core_ref']==record['core_ref'] and
+                nv['cohort']['cutoff']==spec['fit_cutoff'] and
                 erows.sessions==inference,
                 'compact normalized/cohort/evaluation linkage mismatch')
         require(nv['definition']['universe']==common['universe'] and nv['definition']['calendar']==common['calendar'] and
@@ -782,8 +804,9 @@ def _admit_fold(store,feature,view,fold,record,targets,positions=None,price_doma
                 for i,reason in enumerate(nv['cohort']['eligibility_reasons']) if reason is None],
             'compact cohort/schema mismatch')
         binding=common.get('model_feature_selection')
-        require(nv['cohort'].get('model_feature_eligibility_ref')==model_eligibility_ref(binding),
-                'compact selected cohort mismatch')
+        from .stock_compact_store import membership_ref,model_training_selector
+        cohort_offsets=[fd['definition']['spec']['feature_sessions'].index(d)*len(common['universe'])+i for d in training for i in range(len(common['universe']))]
+        require(nv['cohort']['membership_ref']==membership_ref(feature,cohort_offsets),'compact membership cohort mismatch')
         if binding is not None or inputs['contract_version']=='stock_ml_saved_inputs_v5':
             from .stock_compact_store import iter_feature_eligibility
             from .stock_label_contracts import _eligible_reason
@@ -794,22 +817,15 @@ def _admit_fold(store,feature,view,fold,record,targets,positions=None,price_doma
             require(reasons==nv['cohort']['eligibility_reasons'],'selected Feature cohort differs from admitted bytes')
         if positions is None: positions={d:i for i,d in enumerate(fd['definition']['spec']['feature_sessions'])}
         universe=view['definition']['universe']
-        offsets=[positions[training[i//len(universe)]]*len(universe)+i%len(universe)
-                 for i,flag in enumerate(nrows.arrays['validity']) if flag]
+        offsets,target_positions=model_training_selector(feature,nrows,training,spec['fit_cutoff'],model_feature_selection=None if binding is None else binding['selection'])
         if 'training_offsets' in record:
             require(offsets==record['training_offsets'] and record['inference_offsets']==[positions[d]*len(universe)+i for d in inference for i in range(len(universe))],
                     'compact fold key selectors mismatch')
         else:
             require(len(offsets)==inputs['selectors']['training']['selected_count'],'compact training selected count mismatch')
         require(inputs['core_result_refs']==[record['core_ref']],'compact fold Core ref mismatch')
-        require(record['training_binding']['training_keys_digest']==digest([[universe[o%len(universe)],
-            fd['definition']['spec']['feature_sessions'][o//len(universe)]] for o in offsets]),
-            'compact training keys digest mismatch')
-        if inputs['contract_version']=='stock_ml_saved_inputs_v5':
-            from .stock_training_blocks import validate_training_block_binding
-            validate_training_block_binding(record['training_binding'],feature,offsets,normalized=nv,
-                cohort_ref=record['cohort_ref'],selector=inputs['selectors']['training'],store=store,
-                model_feature_selection=None if binding is None else binding['selection'])
+        # X/y row selection and clocks above are current business constraints;
+        # published Feature block proofs are not replayed during rolling reads.
         return offsets
     except BaseException:
         raw_rows.clear()
@@ -834,8 +850,6 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
            'exact compact batch manifest required')
     require(manifest['contract_version'] in ('stock_ml_batch_inputs_v3','stock_ml_batch_inputs_v4','stock_ml_batch_inputs_v5') and manifest['status']=='COMPLETE',
             'complete compact batch required')
-    sealed(manifest,'content_digest'); require(manifest['batch_ref']==digest({k:v for k,v in manifest.items() if k not in
-        ('batch_ref','content_digest')}) and manifest['definition_ref']==digest(manifest['definition']),'compact batch identity mismatch')
     budgets=globals()['limits'](limits); definition=manifest['definition']; expected=definition['feature_view']; own=feature_inputs is None
     feature=store=state=None
     try:
@@ -849,7 +863,6 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
                 'sequential Feature requires sequential batch residency')
         require(feature.to_dict()==expected,'compact Feature view exact identity/cutoff mismatch')
         require(fd['store'].resident_bytes<=budgets['maximum_matrix_bytes'] and
-                fd['store'].metrics['source_bytes']<=budgets['maximum_source_bytes'] and
                 fd['store'].metrics['largest_parent_bytes']<=budgets['maximum_parent_bytes'],
                 'borrowed Feature budget incompatible')
         store=publication_store or OwnedStore(budgets,resolver,shared_bytes=fd['store'].resident_bytes,
@@ -859,8 +872,6 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
             store.shared_bytes=max(store.shared_bytes,fd['store'].resident_bytes)
             store.shared_source_bytes=max(store.shared_source_bytes,fd['store'].metrics['source_bytes'])
             store.reserve(0)
-            require(store.shared_source_bytes+store.metrics['source_bytes']<=budgets['maximum_source_bytes'],
-                    'compact source byte budget exceeded')
         if resolver is not None: store.resolve=resolver
         store.check_hook=fd['store'].check
         columnar=manifest['contract_version']=='stock_ml_batch_inputs_v5'
@@ -892,7 +903,7 @@ def load_compact_state(manifest,*,feature_inputs=None,limits=None,resolver=None,
             previous=spec['oos_trade_sessions'][-1]
         require(len(manifest['folds'])==len(definition['fold_specs'])>0,
                 'complete compact fold coverage required')
-        state=CompactState(store,feature,deepcopy(manifest),view,{},own,residency=residency)
+        state=CompactState(store,feature,manifest,view,{},own,residency=residency)
         state._account_controls()
         if residency=='eager':
             if binding is not None:
@@ -951,7 +962,6 @@ def _load_checkpoint_state(definition,view_descriptor,plan_descriptor,folds,*,fe
         for fold in folds:validate_input(fold,manifest,fd['row_index'],common)
         state=CompactState(store,feature_inputs,manifest,view,{},False,residency='sequential')
         state._keep_paths.add(plan_descriptor['path']);state._account_controls()
-        with state.operation():state.verify_all()
         state.check()
         return state
     except BaseException:

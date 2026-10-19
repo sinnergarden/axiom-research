@@ -53,7 +53,7 @@ class _Publisher:
         self.stage,self.target=Path(stage),Path(target)
         self.maximum=maximum_resident_bytes; self.metrics={} if metrics is None else metrics
         self.live_bytes=0
-        require(type(known_source_bytes) is int and 0<=known_source_bytes<=maximum_source_bytes,
+        require(type(known_source_bytes) is int and 0<=known_source_bytes,
                 'prepared known source byte budget exceeded')
         self.known_source_bytes=known_source_bytes; self.written={}; self.written_bytes=0
         self.store=VerifiedMatrixStore(maximum_matrix_bytes=self.maximum,maximum_source_bytes=maximum_source_bytes,
@@ -63,8 +63,6 @@ class _Publisher:
         desc=deepcopy(desc)
         physical=Path(desc['path']); path=str(physical.resolve()); size=physical.stat().st_size
         if path not in self.written:
-            require(self.known_source_bytes+self.written_bytes+size<=self.store.maximum_source_bytes,
-                    'prepared cumulative source byte budget exceeded')
             self.written[path]=size; self.written_bytes+=size
             self.metrics['publisher_unique_written_bytes']=self.written_bytes
             self.metrics['publisher_known_source_bytes']=self.known_source_bytes

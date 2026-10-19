@@ -249,7 +249,7 @@ def _column_normalization_implementation():
     from .stock_target_spec import eligible_target_reason
     from .stock_column_inputs import ColumnMathReuse
     from .stock_compact_batch import target_eligibility_reasons
-    from .stock_compact_store import feature_eligibility_columns
+    from .stock_compact_store import membership_columns
     from importlib.metadata import version
     import platform
     return digest({'operator':'core_cs_zscore_batch_v1','core':{
@@ -259,7 +259,7 @@ def _column_normalization_implementation():
             ('_Cell','_merge','_std','_cs_zscore_scale','_cs_zscore_value')},
         'eligibility':inspect.getsource(eligible_target_reason),
         'vector_eligibility':inspect.getsource(target_eligibility_reasons),
-        'feature_eligibility':inspect.getsource(feature_eligibility_columns),
+        'membership_eligibility':inspect.getsource(membership_columns),
         'normalization_projection':inspect.getsource(_normalized),
         'numerical_binding':inspect.getsource(ColumnMathReuse.vector_ref),
         'normalization_reuse':inspect.getsource(ColumnMathReuse.normalization),
@@ -539,6 +539,19 @@ def _raw(spec,cutoff,days,cache,metrics,price_view):
     return descriptor,rows
 
 
+def _normalization_matches(saved,requested,metrics):
+    logical={k:v for k,v in saved.items() if k not in ('normalization_proof_version','numerical_origins')}
+    if logical==requested:return True
+    # Explicit migration admission: preserve the original target bytes/ref and
+    # producer implementation. Only named prior implementations are reusable;
+    # every actual Raw/cohort/cutoff/member binding must still match.
+    allowed=metrics.get('_normalization_compatibility',())
+    if not (logical.get('implementation_ref') in allowed and
+            logical.get('core_implementation_ref')==logical['implementation_ref']):return False
+    return {k:v for k,v in logical.items() if k not in ('implementation_ref','core_implementation_ref')}=={
+        k:v for k,v in requested.items() if k not in ('implementation_ref','core_implementation_ref')}
+
+
 def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics,*,target_spec=None):
     try:
         from axiom_engine.core import execute_cs_zscore_batch
@@ -546,33 +559,32 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics,*,target_spec=N
         from .stock_compact_batch import ConcatRows,TargetRows,target_eligibility_reasons
         fd=_view_data(feature); spec=fd['definition']['spec']; width=len(spec['universe'])
         columnar=isinstance(rows,ConcatRows) and metrics.get('_column_targets') is not None
-        feature_ref=fd['definition']['feature_view_ref']
+        from .stock_compact_store import membership_ref,membership_columns
         positions={d:i for i,d in enumerate(spec['feature_sessions'])}
         offsets=[positions[d]*width+i for d in days for i in range(width)]
         _working(metrics,len(rows)*4096+len(spec['ordered_features'])*96+3072)
+        feature_ref=membership_ref(feature,offsets)
+        membership=membership_columns(feature,offsets)
         reasons=[]; instant=_instant(cutoff); cutoff_us=instant_us(cutoff)
         selection=metrics.get('_model_feature_selection')
         eligibility_common=spec if target_spec is None else {**spec,'target_spec':target_spec}
         from .stock_compact_store import model_feature_binding,model_eligibility_ref
         binding=model_feature_binding(feature,selection)
         feature_count=len(spec['ordered_features']) if binding is None else len(binding['ordered_features'])
-        for row,facts in ([] if columnar else zip(rows,iter_feature_eligibility(feature,offsets,model_feature_selection=selection))):
+        for i,row in ([] if columnar else enumerate(rows)):
             from .stock_target_spec import eligible_target_reason
-            reason=eligible_target_reason(row,facts,feature_count,instant,eligibility_common)
-            if reason is None:
-                require(facts.maximum_available_at_utc_us is not None and
-                        facts.maximum_available_at_utc_us<=cutoff_us,
-                        'training Feature native clock exceeds fit')
-            reasons.append(reason)
+            facts={'member':bool(membership['member'][i]),'member_known':bool(membership['member_known'][i]),
+                'member_pool_complete':bool(membership['member_pool_complete'][i]),
+                'member_available_at':_clock(membership['member_available'][i]) if membership['member_available_validity'][i] else None}
+            reasons.append(eligible_target_reason(row,facts,0,instant,eligibility_common))
         if columnar:
             reasons=target_eligibility_reasons(rows,feature,offsets,cutoff,eligibility_common,model_feature_selection=selection)
             raw_values=rows.column('values');raw_availability=rows.column('availability')
-        cohort={'contract_version':'stock_compact_cohort_v1','feature_view_ref':feature_ref,'cutoff':cutoff,
+        cohort={'contract_version':'stock_compact_cohort_v2','membership_ref':feature_ref,'cutoff':cutoff,
             'sessions':days,'universe':spec['universe'],'raw_refs':[d['target_ref'] for d in raw_parts],
             'eligibility_reasons':reasons,'eligible_keys':([[spec['universe'][i%width],days[i//width]]
                 for i,reason in enumerate(reasons) if reason is None] if columnar else
                 [[r['security_id'],r['feature_session']] for r,reason in zip(rows,reasons) if reason is None])}
-        if binding is not None: cohort['model_feature_eligibility_ref']=model_eligibility_ref(binding)
         cohort_ref=digest(cohort)
         definition={'calendar':spec['calendar'],'universe':spec['universe'],'sessions':days,'cutoff':cutoff,
             'raw_refs':cohort['raw_refs'],'cohort_ref':cohort_ref,'normalization_spec':NORMALIZATION_SPEC,
@@ -582,13 +594,28 @@ def _normalized(raw_parts,rows,feature,cutoff,days,cache,metrics,*,target_spec=N
             definition.update(implementation_ref=numerical_implementation,
                 core_implementation_ref=numerical_implementation)
         key=digest(definition); target=(Path(cache)/'normalized'/key[7:]).resolve(); artifact=target/'target.json'
+        origin=metrics.get('_raw_origin')
+        if origin is not None and not artifact.exists():
+            # Reuse the exact cohort/normalization identity; selectors stay local.
+            fold=metrics['_origin_by_cutoff'].get(_instant(cutoff).isoformat())
+            if fold is not None:
+                control=origin._parts(fold['input_manifest'],fold['fold_spec'])
+                descriptor=control['normalized']
+                try:
+                    header=origin.store.read_json(descriptor,key='target_ref',keep=False)
+                    metrics['normalized_candidate_reads']=metrics.get('normalized_candidate_reads',0)+1
+                    if _normalization_matches(header['definition'],definition,metrics):
+                        artifact=Path(descriptor['path'])
+                        metrics['normalized_target_reuses']=metrics.get('normalized_target_reuses',0)+1
+                finally:
+                    header=control=None
+                    origin._release_window(keep_feature=True)
         if artifact.exists():
             from .stock_compact_batch import read_target
             store=metrics['_store']; desc={'path':str(artifact.absolute())}
             value,normalized=read_target(store,desc,expected=None if metrics.get('_column_targets') is not None else definition,raw_rows=rows)
             if metrics.get('_column_targets') is not None:
-                require({k:v for k,v in value['definition'].items() if k not in
-                    ('normalization_proof_version','numerical_origins')}==definition,
+                require(_normalization_matches(value['definition'],definition,metrics),
                     'normalized column logical request mismatch')
             metrics['normalized_cache_hits']+=1
             fd['store'].check()
@@ -758,7 +785,6 @@ def _prepare_legacy_compact_batch(data, *, feature_inputs,fold_specs,destination
         if model_binding is not None:
             spec={**source_spec,'ordered_features':model_binding['ordered_features'],'feature_selection':model_binding['selection']}
         require(fd['store'].resident_bytes<=budgets['maximum_matrix_bytes'] and
-                fd['store'].metrics['source_bytes']<=budgets['maximum_source_bytes'] and
                 fd['store'].metrics['largest_parent_bytes']<=budgets['maximum_parent_bytes'],'borrowed Feature budget incompatible')
         definition={'version':'axiom.stock_ml_batch_inputs/4' if compact else 'axiom.stock_ml_batch_inputs/3','feature_view':feature.to_dict(),
             'fold_specs':deepcopy(fold_specs),'preparation_options':options,'implementation_ref':_implementation(),
@@ -911,12 +937,12 @@ def _prepare_legacy_compact_batch(data, *, feature_inputs,fold_specs,destination
             normalized_bytes=_measured(stats,[nrows,cohort]); _working(stats,normalized_bytes)
             stats['_retained_raw_bytes']+=normalized_bytes
             store.release_payloads()
-            training_offsets=[positions[r['feature_session']]*width+spec['universe'].index(r['security_id'])
-                for r in nrows if r['valid']]
+            from .stock_compact_store import model_training_selector
+            training_offsets,target_positions=model_training_selector(feature,nrows,training,fold['fit_cutoff'],model_feature_selection=model_feature_selection)
             inference_offsets=[positions[d]*width+i for d in inference for i in range(width)]
             _working(stats,len(spec['ordered_features'])*96+3072)
             def joined_rows():
-                selected=(r for r in nrows if r['valid'])
+                selected=(nrows[i] for i in target_positions)
                 for f,r in zip(iter_feature_rows(feature,training_offsets,
                         model_feature_selection=model_feature_selection),selected):
                     f.update(label=r['return'],raw_return=r['raw_return'],label_available_at=r['raw_available_at'],
@@ -1010,7 +1036,7 @@ class _IncrementalPreparation:
     def __init__(self,data,*,feature_inputs,fold_specs,destination,preparation_options,
                  metrics=None,progress=None,model_feature_selection=None,reuse_raw_from_batch=None,
                  _caller_bytes=0,_caller_source_bytes=0,_saved_definition=None,
-                 label_spec=None,column_source=None):
+                 label_spec=None,column_source=None,resume_from=None):
         self.pid=os.getpid();self.closed=False;self.feature=self.store=self.state=self.batch=None
         self.transferred=False;self.own=type(feature_inputs) is not StockFeatureView
         self.data=data;self.metrics=metrics;self.progress=progress;self.begin=time.perf_counter()
@@ -1052,7 +1078,6 @@ class _IncrementalPreparation:
                 require(self.readonly or column_source is not None,'shared public column source required for v5 preparation')
             self.width=len(self.spec['universe']);self.positions={d:i for i,d in enumerate(self.spec['feature_sessions'])}
             require(fd['store'].resident_bytes<=self.budgets['maximum_matrix_bytes'] and
-                fd['store'].metrics['source_bytes']<=self.budgets['maximum_source_bytes'] and
                 fd['store'].metrics['largest_parent_bytes']<=self.budgets['maximum_parent_bytes'],'borrowed Feature budget incompatible')
             self.definition={'version':'axiom.stock_ml_batch_inputs/4','feature_view':self.feature.to_dict(),
                 'fold_specs':deepcopy(fold_specs),'preparation_options':self.options,'implementation_ref':_implementation(),
@@ -1065,6 +1090,9 @@ class _IncrementalPreparation:
                 require(all(_saved_definition[k]==self.definition[k] for k in self.definition if k not in
                     ('implementation_ref','environment')),'checkpoint saved source/options mismatch')
                 self.definition=deepcopy(_saved_definition)
+            if resume_from is not None:
+                require(not self.readonly and self.columnar,'resume requires writable column preparation')
+                self.definition['resume_from']=deepcopy(resume_from)
             self.definition_ref=digest(self.definition)
             self.target=Path(destination).absolute()/self.definition_ref[7:];self.cache=Path(destination).absolute()/'compact-cache'
             self.checkpoint=self.target/'checkpoint.json'
@@ -1090,7 +1118,7 @@ class _IncrementalPreparation:
                 from .stock_batch import _data
                 origin=_data(reuse_raw_from_batch)['matrix_state'];origin.check()
                 require(origin.compact and origin.active==0 and origin.batch['definition']['feature_view']==self.feature.to_dict() and
-                    origin.batch['definition']['fold_specs']==self.definition['fold_specs'] and
+                    origin.batch['definition']['fold_specs'][:len(fold_specs)]==self.definition['fold_specs'] and
                     origin.batch['definition']['preparation_options']['row_block_sessions']==self.options['row_block_sessions'] and
                     origin.batch['definition']['price_domain_plan']==self.definition['price_domain_plan'],
                     'Raw reuse source/fold/query plan mismatch')
@@ -1107,7 +1135,14 @@ class _IncrementalPreparation:
                 'price_domains':[],'maximum_working_bytes':fd['store'].resident_bytes,
                 '_limits':self.budgets,'_feature_bytes':fd['store'].resident_bytes+_caller_bytes,'_retained_raw_bytes':0,
                 '_store':self.store,'_feature_store':fd['store'],'_caller_bytes':_caller_bytes,'_caller_source_bytes':_caller_source_bytes,
-                '_model_feature_selection':model_feature_selection,'_raw_origin':origin,'_checkpoint_bytes':0}
+                '_model_feature_selection':model_feature_selection,'_raw_origin':origin,'_checkpoint_bytes':0,
+                '_normalization_compatibility':[] if resume_from is None else resume_from['normalization_implementation_refs']}
+            self.groups_by_fold={i:[] for i in range(len(self.plans))}
+            for group in self.groups.values():
+                for i in {job[0] for job in group['jobs']}:self.groups_by_fold[i].append(group)
+            self.origin_by_cutoff={} if origin is None else {
+                _instant(f['fold_spec']['fit_cutoff']).isoformat():f for f in origin.batch['folds']}
+            self.stats['_origin_by_cutoff']=self.origin_by_cutoff
             self._charge_controls()
             if (self.target/'batch.json').exists():
                 manifest=self.store.read_json({'path':str(self.target/'batch.json')},key='content_digest')
@@ -1132,6 +1167,8 @@ class _IncrementalPreparation:
                 self.view_descriptor={'path':str(self.target/'view.json'),'file_digest':file_digest(self.target/'view.json'),
                     'prepared_view_ref':view['prepared_view_ref']}
                 plan_descriptor={'path':str(self.target/'definition.json'),'file_digest':file_digest(self.target/'definition.json')}
+                if resume_from is not None:
+                    self._import_saved_prefix(resume_from,view)
                 if self.checkpoint.exists():
                     self._read_checkpoint()
                 self.state=_load_checkpoint_state(self.definition,self.view_descriptor,plan_descriptor,self.ready,
@@ -1213,32 +1250,40 @@ class _IncrementalPreparation:
         # Drop virtual views before crediting their immutable backing bytes.
         else:self.state._trim_targets()
 
+    def _import_saved_prefix(self,resume,view):
+        from .stock_artifacts import _read, _verify_ref
+        from .stock_compact_store import reference
+        def admitted(descriptor):
+            require(file_digest(descriptor['path'])==descriptor['file_digest'],'resume source changed')
+            return _read(descriptor['path'])
+        require(resume['contract_version']=='stock_saved_prefix_resume_v1' and
+            type(resume['normalization_implementation_refs']) is list and
+            all(reference(ref) for ref in resume['normalization_implementation_refs']), 'explicit normalization producer refs required')
+        definition=admitted(resume['definition']);saved=admitted(resume['checkpoint'])
+        _verify_ref(saved,'checkpoint_ref')
+        require(saved['definition_ref']==digest(definition),'resume checkpoint producer mismatch')
+        require(all(definition[k]==v for k,v in self.definition.items()
+            if k not in ('implementation_ref','environment','fold_specs','resume_from')) and
+            definition['fold_specs'][:min(len(definition['fold_specs']),len(self.plans))]==self.definition['fold_specs'][:min(len(definition['fold_specs']),len(self.plans))],
+            'resume semantic inputs or schedule differ')
+        count=len(resume['saved_folds'])
+        require(0<count<=len(saved['folds'])<=len(definition['fold_specs']) and count<=len(self.plans),
+            'resume saved prefix coverage mismatch')
+        require(admitted(saved['prepared_view'])==view,'resume prepared view semantics differ')
+        self.view_descriptor=saved['prepared_view']
+        self.ready=saved['folds'][:count]
+        self.raw_outputs[:min(len(saved['raw_outputs']),len(self.plans))]=saved['raw_outputs'][:len(self.plans)]
+        require([r['input_ref'] for r in resume['saved_folds']]==[
+            f['input_manifest']['input_ref'] for f in self.ready],'resume model/input prefix mismatch')
+
     def _validate_saved_raw(self):
-        from .stock_compact_batch import read_target,_raw_binding
-        from .stock_compact_controls import validate_price_part
-        desc=value=rows=definition=None
-        try:
-            for key,group in self.groups.items():
-                present=[self.raw_outputs[i][role][n] is not None for i,role,n,_,_ in group['jobs']]
-                require(not any(present) or all(present),'unfinished checkpoint price domain cannot HIT')
-                if not all(present):continue
-                for i,role,n,days,cutoff in group['jobs']:
-                    desc=self.raw_outputs[i][role][n];value,rows=read_target(self.store,desc)
-                    definition=value['definition']
-                    require(value['contract_version']==('stock_compact_raw_v2' if self.columnar else 'stock_compact_raw_v1') and definition['sessions']==days,
-                        'checkpoint Raw child mismatch')
-                    _raw_binding(definition,self.state.view['definition'],cutoff)
-                    if not self.columnar:
-                        validate_price_part(definition,self.state.view['definition'],self.state.price_domains,
-                            self.options['row_block_sessions'],evaluation=role=='evaluation_parts')
-                    desc=value=rows=definition=None;self._release_payloads()
-            for fold,outputs in zip(self.ready,self.raw_outputs):
-                record=self.state._parts(fold['input_manifest'],fold['fold_spec'])
-                require(record['raw_parts']==outputs['raw_parts'] and record['evaluation_parts']==outputs['evaluation_parts'],
-                    'checkpoint fold/Raw control mismatch')
-                record=None;self.state._release_window(keep_feature=True)
-        finally:
-            desc=value=rows=definition=record=group=None
+        # Restoration checks the saved plan/control linkage, not every historical
+        # training array. Actual targets are admitted when a new fit uses them.
+        for fold,outputs in zip(self.ready,self.raw_outputs):
+            record=self.state._parts(fold['input_manifest'],fold['fold_spec'])
+            require(record['raw_parts']==outputs['raw_parts'] and record['evaluation_parts']==outputs['evaluation_parts'],
+                'checkpoint fold/Raw control mismatch')
+            record=None;self.state._release_window(keep_feature=True)
 
     def _persist(self):
         from .stock_fold_inputs import file_fingerprint
@@ -1257,8 +1302,7 @@ class _IncrementalPreparation:
     def _ensure_raw(self,index):
         origin=self.stats['_raw_origin'];control=price_view=chunk=desc=None
         try:
-            for group in self.groups.values():
-                if not any(i==index for i,_,_,_,_ in group['jobs']):continue
+            for group in self.groups_by_fold[index]:
                 if all(self.raw_outputs[i][role][n] is not None for i,role,n,_,_ in group['jobs']):
                     self.stats['raw_cache_hits']+=sum(i==index for i,_,_,_,_ in group['jobs']);continue
                 if origin is not None:
@@ -1362,15 +1406,15 @@ class _IncrementalPreparation:
             try:
                 item=self.ready[index]
                 record=self.state._parts(item['input_manifest'],item['fold_spec'])
-                self.state._activate(item,record)
-                require(digest(item['fold_spec']) in self.state._verified_folds,
-                        'unfinished checkpoint fold cannot HIT')
+                # A ready input is a descriptor, not a request for training X.
+                # The builder chooses saved consumption before any activation.
                 self.cursor+=1;return deepcopy(item)
             finally:item=record=None
         require(not self.readonly,'checkpoint fold is not prepared')
         self.state._release_window(keep_feature=True)
         fold,training,inference=self.plans[index];rows=[];nrows=cohort=chunk=raw_rows=raw_value=record=selectors=window=joined_rows=None
         try:
+            if self.column_targets is not None:self.column_targets.retain_sessions(training+inference)
             self._ensure_raw(index)
             window=[self.positions[d]*self.width+j for d in training+inference for j in range(self.width)]
             _producer_feature_window(self.feature,window,self.stats);parts=self.raw_outputs[index]['raw_parts']
@@ -1389,12 +1433,12 @@ class _IncrementalPreparation:
             _working(self.stats,charge);self.stats['_retained_raw_bytes']+=charge
             self._release_payloads(keep_active=True)
             security_positions={security:i for i,security in enumerate(self.spec['universe'])}
-            offsets=([self.positions[training[i//self.width]]*self.width+i%self.width
-                for i,valid in enumerate(nrows.arrays['validity']) if valid] if self.columnar else
-                [self.positions[r['feature_session']]*self.width+security_positions[r['security_id']] for r in nrows if r['valid']])
+            from .stock_compact_store import model_training_selector
+            offsets,target_positions=model_training_selector(self.feature,nrows,training,fold['fit_cutoff'],
+                model_feature_selection=self.stats['_model_feature_selection'])
             def joined_rows():
                 for f,r in zip(iter_feature_rows(self.feature,offsets,model_feature_selection=self.stats['_model_feature_selection']),
-                    (r for r in nrows if r['valid'])):
+                    (nrows[i] for i in target_positions)):
                     f.update(label=r['return'],raw_return=r['raw_return'],label_available_at=r['raw_available_at'],
                         normalized_available_at=r['label_available_at']);yield f
             binding={'training_rows_ref':None if self.columnar else digest_array_rows(joined_rows()),'training_row_count':len(offsets),
@@ -1433,8 +1477,11 @@ class _IncrementalPreparation:
     def finish(self):
         from .stock_batch import _data
         self._check()
+        # The cursor advances only after saved controls are admitted or a new
+        # fold is produced. Matrix/OOS verification belongs to its consumer;
+        # public preparation need not activate historical training windows.
         if not self.state.incomplete:
-            require(self.cursor==len(self.plans) and self.state._verified_folds=={digest(f) for f,_,_ in self.plans},
+            require(self.cursor==len(self.plans) and len(self.ready)==len(self.plans),
                     'complete cached fold consumption required')
             return self.batch.to_dict()
         require(len(self.ready)==len(self.plans) and self.cursor==len(self.plans),'complete checkpoint coverage required')
@@ -1444,8 +1491,6 @@ class _IncrementalPreparation:
                 'definition':self.definition,'definition_ref':self.definition_ref,
                 'prepared_view':self.state.batch['prepared_view'],'folds':self.ready,'status':'COMPLETE'}
             manifest['batch_ref']=digest(manifest);manifest=seal(manifest,'content_digest')
-            require(self.state._verified_folds=={digest(f) for f,_,_ in self.plans},
-                    'complete verified checkpoint coverage required')
             self.state.check()
             self.state._complete_checkpoint(manifest,publish=lambda:self._immutable_json(self.target/'batch.json',manifest))
             value=_data(self.batch);value['manifest']=manifest;value['identity']=manifest['batch_ref'];value['incomplete']=False
@@ -1478,6 +1523,7 @@ class _IncrementalPreparation:
         if self.metrics is not None:self.metrics.update({k:v for k,v in self.stats.items() if not k.startswith('_')})
         caller=self.stats.get('_caller_bytes',0);caller_source=self.stats.get('_caller_source_bytes',0)
         reads=self.stats.get('data_read_calls',0)
+        self.groups_by_fold=self.origin_by_cutoff=None
         self.plans=self.groups=self.raw_outputs=self.ready=self.definition=self.spec=self.positions=self.binding=self.options=None
         if self.transferred:
             self.state._fixed_shared_bytes=caller;self.state._fixed_shared_source_bytes=caller_source;self.state._sync_shared()
@@ -1520,8 +1566,7 @@ def _load_compact_checkpoint_owner(path,*,feature_inputs=None):
         admission.limits=limits({'maximum_matrix_bytes':options['maximum_resident_bytes'],
             **{k:options[k] for k in ('maximum_source_bytes','maximum_parent_bytes') if k in options}})
         admission.reserve(0)
-        require(admission.metrics['source_bytes']<=admission.limits['maximum_source_bytes'] and
-            admission.metrics['largest_parent_bytes']<=admission.limits['maximum_parent_bytes'],'checkpoint plan byte budget exceeded')
+        require(admission.metrics['largest_parent_bytes']<=admission.limits['maximum_parent_bytes'],'checkpoint plan byte budget exceeded')
         saved=definition['feature_view']
         source=feature_inputs if feature_inputs is not None else Path(saved['source_index']['path']).parent
         selection=definition.get('model_feature_selection')

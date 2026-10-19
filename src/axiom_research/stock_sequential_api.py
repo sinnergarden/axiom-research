@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 @contextmanager
 def open_stock_ml_batch_preparation(data,*,feature_inputs,fold_specs,destination,preparation_options,
-    label_spec=None,column_source=None,model_feature_selection=None,reuse_raw_from_batch=None,metrics=None,progress=None):
+    label_spec=None,column_source=None,model_feature_selection=None,reuse_raw_from_batch=None,metrics=None,progress=None,resume_from=None):
     """Prepare one fold, build using owner.batch, then advance within one owner.
 
     owner.next_fold() returns one admitted saved input or None. owner.finish()
@@ -16,7 +16,7 @@ def open_stock_ml_batch_preparation(data,*,feature_inputs,fold_specs,destination
     with _prepare_compact_incrementally(data,feature_inputs=feature_inputs,fold_specs=fold_specs,
         destination=destination,preparation_options=preparation_options,label_spec=label_spec,
         column_source=column_source,model_feature_selection=model_feature_selection,
-        reuse_raw_from_batch=reuse_raw_from_batch,metrics=metrics,progress=progress) as owner:
+        reuse_raw_from_batch=reuse_raw_from_batch,metrics=metrics,progress=progress,resume_from=resume_from) as owner:
         yield owner
 
 
