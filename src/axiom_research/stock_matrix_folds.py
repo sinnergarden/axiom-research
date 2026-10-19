@@ -134,6 +134,20 @@ def _build_matrix_fold(inputs, *, spec,destination,metrics=None,batch=None,train
             requested=model_feature_binding(state.feature,model_feature_selection)
             require(requested==common.get('model_feature_selection'),
                     'model selection differs from prepared cohort; prepare with reused Raw first')
+        prior=state.saved_models.get(inputs['input_ref'])
+        if prior is not None:
+            target=Path(prior['path']).resolve()
+            require(file_digest(target/'manifest.json')==prior['manifest_digest'],'saved resume manifest changed')
+            saved=(load_matrix_fold(target,batch=batch) if writer is None else
+                   _consume_saved_fold(target,batch=batch,writer=writer))
+            old=saved.to_dict()['definition']
+            require(saved.identity==prior['fold_ref'] and old['input_manifest']==inputs and old['fold_spec']==spec and
+                old['parameters']==parameters and old['num_boost_round']==rounds and
+                (training_binding is None or all(old.get(k)==v for k,v in training_binding.items())),
+                'explicit saved model semantic binding mismatch')
+            if metrics is not None:metrics.update(zeros,cache_hit=True,total_seconds=time.perf_counter()-begin,
+                original_implementation_ref=old['implementation_ref'])
+            return _repath_owned_fold(saved,target,reused=True)
         definition=_fold_definition(inputs,spec,common,parameters,rounds,training_binding)
         target=(Path(destination)/digest(definition)[7:]).resolve()
         if target.exists():
@@ -284,25 +298,17 @@ def _load_matrix_fold(path, *, projection,batch,ingress,_lease=None):
     from .stock_fold_artifacts import _owned_fold
     path=Path(path).resolve()
     manifest=ingress.read_json({'path':str(path/'manifest.json')})
-    documents={name:ingress.read_json({'path':str(path/name),'file_digest':manifest['files'][name]})
-               for name in ('fold.json',*OUTPUTS)}
+    names=('fold.json','model.json','predictions.json') if _lease is not None else ('fold.json',*OUTPUTS)
+    documents={name:ingress.read_json({'path':str(path/name),'file_digest':manifest['files'][name]}) for name in names}
+    # References to unconsumed outputs remain provenance, not resident documents.
+    for name,ref in manifest['files'].items():ingress.hashes.setdefault(str(path/name),ref)
     fold=documents['fold.json']
     require(fold['status']=='COMPLETE' and manifest['fold_ref']==fold['fold_ref'], 'incomplete saved fold')
     if _lease is None:return _owned_fold(path,documents)
-    # The evaluation publication carries the saved booster reference without
-    # loading or hashing the booster again. Its file mark supports relocation.
-    from .stock_fold_inputs import file_fingerprint
-    booster=str(path/'booster.txt')
-    ingress.marks[booster]=file_fingerprint(booster)
-    ingress.hashes[booster]=manifest['files']['booster.txt']
-    ingress.metrics['source_bytes']+=ingress.marks[booster][2]
-    # An OOS writer needs the requested evaluation labels. Reuse their saved
-    # owner; do not reconstruct a model's training ancestors or read its booster.
     definition=fold['definition'];inputs=definition['input_manifest'];spec=definition['fold_spec']
     _lease._prepare(ingress)
     own=projection is None
     try:
-        if projection is None:projection=batch._project_evaluation(inputs,spec)
         _lease._admit(manifest,documents,projection,inputs,spec)
         own=False
         return _lease

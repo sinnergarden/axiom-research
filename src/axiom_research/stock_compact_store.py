@@ -117,10 +117,11 @@ class OwnedStore:
         self.marks[path]=mark
         # Preserve the declared publication digest. Unreferenced root documents
         # need an identity only when they become a new output dependency.
-        reference=descriptor.get('file_digest') or self.hashes.get(path)
-        if reference is None:
-            reference='sha256:'+sha256(payload).hexdigest()
-            self.metrics['file_hash_calls']+=1;self.metrics['hash_bytes']+=len(payload)
+        expected=descriptor.get('file_digest') or self.hashes.get(path)
+        reference='sha256:'+sha256(payload).hexdigest()
+        require(expected is None or expected==reference,'consumed compact file digest mismatch')
+        require(file_fingerprint(physical)==mark,'compact file changed during consumption')
+        self.metrics['file_hash_calls']+=1;self.metrics['hash_bytes']+=len(payload)
         self.hashes[path]=reference
         self.metrics['file_read_calls']+=1;self.metrics['read_bytes']+=len(payload)
         self.metrics['largest_parent_bytes']=max(self.metrics['largest_parent_bytes'],len(payload) if parent else 0)

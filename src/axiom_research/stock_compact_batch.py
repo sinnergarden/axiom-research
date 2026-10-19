@@ -260,6 +260,7 @@ class CompactState:
             if value.get('contract_version') in ('stock_ml_batch_inputs_v3','stock_ml_batch_inputs_v4','stock_ml_batch_inputs_v5') and value.get('batch_ref')==self._batch_ref}
         self._source_table={}; self.source_records=()
         self._verified_folds=set()
+        self.saved_models={r['input_ref']:r for r in batch['definition'].get('resume_from',{}).get('saved_folds',())}
         self._active_selected=None
         self._sync_shared()
 
@@ -362,7 +363,7 @@ class CompactState:
                     'produced Feature proof was not admitted by this writer')
                 self.store.check_path(descriptor['path'])
             self.store.validate_boundary()
-            self._account_targets();self._remember_sources()
+            self._account_targets()
             self._active_record=digest(spec);self._verified_folds.add(self._active_record);self._active_selected=selected
             self.store.metrics['fold_window_admissions']=self.store.metrics.get('fold_window_admissions',0)+1
             self.store.metrics['produced_fold_window_borrows']=self.store.metrics.get('produced_fold_window_borrows',0)+1
@@ -452,7 +453,7 @@ class CompactState:
             self._sync_shared(); self.store.reserve(0)
             selected=_admit_fold(self.store,self.feature,self.view,fold,record,self.targets,self.positions,self.price_domains,
                 self.batch['definition']['preparation_options']['row_block_sessions'])
-            self._account_targets(); self._remember_sources()
+            self._account_targets()
             self._active_record=digest(spec); self._verified_folds.add(self._active_record)
             self._active_selected=selected
             self.store.metrics['fold_window_admissions']=self.store.metrics.get('fold_window_admissions',0)+1
@@ -520,6 +521,7 @@ class CompactState:
                 self._activate(fold,record); self.check()
                 record=None
             require(len(self._verified_folds)==len(self.batch['folds']),'complete compact fold admission required')
+            self._remember_sources()
             complete=True
         finally:
             record=None

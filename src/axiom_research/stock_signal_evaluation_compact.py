@@ -1,10 +1,10 @@
 """Compact source admission only; masks, storage and statistics are shared.
 
 The owner hook admit_stock_signal_evaluation_fold(descriptor, *, batch) yields
-documents (manifest/fold/model/feature-slice/predictions JSON), common axes,
+documents (manifest/fold/model/predictions JSON), common axes,
 evaluation_targets (original descriptor, original header, readonly rows),
-source_records and source_fingerprints. Owner admission checks all saved stage
-files, including dataset/labels/evidence/booster bytes, in that same lease.
+source_records and source_fingerprints. Owner admission checks consumed saved bytes and OOS labels. Training outputs
+and ancestors remain immutable references; historical training is not replayed.
 Only the owner hook creates this payload; callers cannot supply a projection.
 """
 from copy import deepcopy
@@ -179,17 +179,19 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
         for descriptor in descriptors:
             with hook(descriptor, batch=batch) as lease:
                 pins = _sources_table(lease.source_records)
-                _require(set(lease.source_fingerprints) == set(pins), 'complete compact owner fingerprints required')
+                _require(set(lease.source_fingerprints)<=set(pins), 'compact consumed fingerprint outside source pins')
                 lease_marks = {}
                 for path, ref in pins.items():
                     _require(path not in records or records[path] == ref, 'conflicting compact source pin')
-                    mark = tuple(lease.source_fingerprints[path]); p = Path(path)
-                    _require(p not in marks or marks[p] == mark, 'compact source changed between leases')
-                    records[path] = ref; marks[p] = mark; lease_marks[p] = mark
+                    records[path] = ref
+                    if path in lease.source_fingerprints:
+                        mark = tuple(lease.source_fingerprints[path]); p = Path(path)
+                        _require(p not in marks or marks[p] == mark, 'compact source changed between leases')
+                        marks[p] = mark; lease_marks[p] = mark
                 if not _defer_source_checks: _check_marks(lease_marks)
                 documents = lease.documents; fold = documents['fold.json']; model = documents['model.json']
-                features, signal = documents['feature-slice.json'], documents['predictions.json']
-                _require(set(documents) == {'manifest.json', 'fold.json', 'model.json', 'feature-slice.json', 'predictions.json'},
+                signal = documents['predictions.json']
+                _require(set(documents) == {'manifest.json', 'fold.json', 'model.json', 'predictions.json'},
                     'exact owner saved evaluation documents required')
                 root = Path(descriptor['path']).parent; saved_manifest = documents['manifest.json']
                 _require(saved_manifest['contract_version'] == 'stock_ml_fold_manifest_v2' and
@@ -199,7 +201,7 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
                     all(pins.get(str(root/name)) == ref for name, ref in saved_manifest['files'].items()) and
                     str(root/'manifest.json') in pins, 'owner saved output pins incomplete')
                 for document, key in ((fold, 'content_digest'), (model, 'model_ref'),
-                        (features, 'feature_ref'), (signal, 'signal_run_ref')):
+                        (signal, 'signal_run_ref'),):
                     _verify_ref(document, key)
                 inputs, spec = fold['definition']['input_manifest'], fold['definition']['fold_spec']
                 _verify_ref(inputs, 'input_ref')
@@ -217,7 +219,7 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
                     Path(descriptor['path']).name == 'predictions.json' and Path(descriptor['path']).is_absolute() and
                     pins.get(descriptor['path']) == descriptor['file_digest'] and
                     descriptor['signal_run_ref'] == fold['signal_run_ref'] == signal['signal_run_ref'] and
-                    signal['model_ref'] == model['model_ref'] and signal['feature_ref'] == features['feature_ref'] and
+                    signal['model_ref'] == fold['model_ref'] == model['model_ref'] and signal['feature_ref'] == fold['feature_ref'] == model['feature_ref'] and
                     signal['fold_spec_ref'] == digest(spec),
                     'compact saved Signal/fold/model binding mismatch')
                 identity = {k: deepcopy(lease.common[k]) for k in ('snapshot', 'pit_policy', 'calendar', 'universe')}
@@ -226,20 +228,33 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
                 common = identity
                 _require(common['calendar'] == scope['calendar'] and wanted[0] <= set(common['universe']),
                     'compact frozen axes mismatch')
-                days = features['prediction_sessions']; indexed = _grid(signal['rows'], common['universe'], days, 'session', 'compact Signal')
+                days = sorted(spec['inference_cutoff_by_session']); indexed = _grid(signal['rows'], common['universe'], days, 'session', 'compact Signal')
                 _require(previous is None or previous < days[0], 'weekly Signals must be ordered and disjoint')
                 previous = days[-1]; _require(not rows.keys() & indexed.keys(), 'duplicate weekly Signal key')
-                feature_index = _grid(features['rows'], common['universe'], days, 'session', 'compact OOS Feature')
-                own_members, own_features = _compact_features(feature_index)
+                own_members={key:{'member':row['member']} for key,row in indexed.items()}
+                own_features={key:{'knowledge_cutoff':row['feature_knowledge_cutoff'],
+                    'feature_available_at':row['feature_available_at'],'source_refs':row['source_refs']}
+                    for key,row in indexed.items()}
                 clocks = [model['fit_cutoff'], model['simulated_available_at']]
-                for key, row in indexed.items():
-                    _require(_instant(row['available_at']) <= _instant(row['knowledge_cutoff']) <= _instant(scope['evaluation_cutoff']),
-                        'compact Signal source clock conflict')
-                    _require(key not in members or members[key] == own_members[key], 'weekly historical membership conflict')
-                    clocks.extend([row['knowledge_cutoff'], feature_index[key]['knowledge_cutoff']])
+                for key,row in indexed.items():
+                    knowledge=_instant(row['knowledge_cutoff']); available=_instant(row['available_at'])
+                    _require(available==knowledge==_instant(spec['inference_cutoff_by_session'][key[1]]) and
+                        knowledge<=_instant(scope['evaluation_cutoff']) and
+                        _instant(row['feature_knowledge_cutoff'])<=knowledge and
+                        (row['feature_available_at'] is None or _instant(row['feature_available_at'])<=_instant(row['feature_knowledge_cutoff'])) and
+                        _instant(row['simulated_model_available_at'])==_instant(model['simulated_available_at']) and
+                        _instant(model['fit_cutoff'])<_instant(model['simulated_available_at'])<knowledge,
+                        'saved prediction PIT/publication mismatch')
+                    from .stock_label_contracts import _finite
+                    _require(type(row['member']) is bool and type(row['valid']) is bool and
+                        (row['member'] and _finite(row['score']) and row['invalid_reason'] is None if row['valid']
+                         else row['score'] is None and bool(row['invalid_reason'])) and
+                        row['source_refs'][0]==signal['feature_ref'] and model['model_ref'] in row['source_refs'] and
+                        model['catalog_ref'] in row['source_refs'], 'saved prediction membership/value/source mismatch')
+                    clocks.extend([row['knowledge_cutoff'],row['feature_knowledge_cutoff']])
                 if _budget_check is not None:
                     _budget_check([projected, metadata, refs, closures, records, marks,
-                        rows, members, prediction_features], [indexed, feature_index, documents])
+                        rows, members, prediction_features], [indexed, documents])
                 rows.update(deepcopy(indexed)); members.update(own_members); prediction_features.update(own_features)
                 if not _signals_only:
                     _join(lease.evaluation_targets, inputs, spec, common, scope, pins, state, wanted)
@@ -247,14 +262,14 @@ def _admit_compact(signal_inputs, raw_label_input, scope, batch, *, _borrowed_le
                     'signal_run_ref': signal['signal_run_ref'], 'prediction_sessions': list(days),
                     'input_ref': inputs['input_ref'], 'fold_spec_ref': digest(spec), 'fold_ref': fold['fold_ref'],
                     **{k: signal[k] for k in ('signal_stage', 'score_unit', 'score_semantics')}, 'model': deepcopy(model),
-                    'feature_contract_version': features['contract_version'], 'feature_ref': features['feature_ref'],
+                    'feature_contract_version': 'stock_feature_slice_v3', 'feature_ref': signal['feature_ref'],
                     'snapshot': common['snapshot'], 'pit_policy': common['pit_policy'],
                     'evaluation_clock_floor': max(map(_instant, clocks)).isoformat().replace('+00:00', 'Z')})
                 refs[name].append(signal['signal_run_ref'])
                 closures[name].append({'signal_input': deepcopy(descriptor), 'model_ref': model['model_ref'],
-                    'feature_ref': features['feature_ref'], 'source_paths': sorted(pins)})
+                    'feature_ref': signal['feature_ref'], 'source_paths': sorted(pins)})
                 if not _defer_source_checks: _check_marks(lease_marks)
-            del lease, documents, fold, model, features, signal, indexed, feature_index, own_members, own_features, row
+            del lease, documents, fold, model, signal, indexed, own_members, own_features, row
         projected[name] = {'rows': rows, 'members': members, 'prediction_features': prediction_features}
     from .stock_batch import _data
     from .stock_signal_evaluation_build import _complete_owner_source_records

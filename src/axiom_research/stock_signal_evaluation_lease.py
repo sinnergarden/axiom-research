@@ -35,7 +35,7 @@ class _FoldLease:
 
     def _check_open(self):
         require(self._pid==os.getpid(),'evaluation lease belongs to another process')
-        require(not self._closed and self._projection is not None,'evaluation lease is closed')
+        require(not self._closed and self._value is not None,'evaluation lease is closed')
 
     def _prepare(self,ingress):
         # Output JSON is owned by ingress. Charge it alongside the Feature and
@@ -52,16 +52,32 @@ class _FoldLease:
         store=self._state.store
         try:
             require(inputs['contract_version'] in ('stock_ml_saved_inputs_v4','stock_ml_saved_inputs_v5'),'compact v4 evaluation lease required')
-            targets,records,marks=self._state.evaluation_sources(inputs,spec)
+            from .stock_compact_batch import read_target, _raw_binding
+            from .stock_compact_controls import evaluation_parts, validate_controls
+            from .stock_compact_store import _view_data
+            state=self._state
+            control=self._ingress.read_json(inputs['fold_control'],key='fold_control_ref')
+            validate_controls({'input_manifest':inputs,'fold_spec':spec},control,state.view,state.batch,
+                _view_data(state.feature)['row_index'])
+            targets=[]
+            for descriptor in evaluation_parts(control):
+                header,rows=read_target(self._ingress,descriptor)
+                _raw_binding(header['definition'],state.view['definition'],spec['evaluation_cutoff'])
+                targets.append((descriptor,header,rows))
+            records={inputs['prepared_view']['path']:inputs['prepared_view']['file_digest']}
+            marks={}
+            common=state.view['definition']
+            delta=self._ingress.resident_bytes-self._shared_charge
+            state._fixed_shared_bytes+=delta;self._shared_charge+=delta
+            state._sync_shared()
             for path,ref in self._ingress.hashes.items():
                 require(path not in records or records[path]==ref,'conflicting saved evaluation source pin')
-                require(path not in marks or marks[path]==self._ingress.marks[path],
-                        'conflicting saved evaluation source fingerprint')
-                records[path]=ref; marks[path]=self._ingress.marks[path]
+                records[path]=ref
+                if path in self._ingress.marks:marks[path]=self._ingress.marks[path]
             selected={'manifest.json':manifest,**{name:documents[name] for name in
-                ('fold.json','model.json','feature-slice.json','predictions.json')}}
-            metadata={'documents':selected,'common':{key:projection.common[key] for key in
-                ('snapshot','pit_policy','calendar','universe',*(['target_spec'] if 'target_spec' in projection.common else []))},
+                ('fold.json','model.json','predictions.json')}}
+            metadata={'documents':selected,'common':{key:common[key] for key in
+                ('snapshot','pit_policy','calendar','universe',*(['target_spec'] if 'target_spec' in common else []))},
                 'evaluation_targets':[{'descriptor':d,'header':h} for d,h,_ in targets],
                 'source_records':tuple(sorted(records.items())),'source_fingerprints':marks}
             # Ingress owns the immutable documents; the active batch/projection
@@ -99,7 +115,8 @@ class _FoldLease:
 
     def _check_sources(self):
         self._check_open()
-        require(self._projection._store is self._state.store, 'evaluation projection store mismatch')
+        require(self._projection is None or self._projection._store is self._state.store,
+                'evaluation projection store mismatch')
         self._ingress.check()
         self._batch._check_sources()
 
@@ -127,20 +144,18 @@ class _FoldLease:
         from .stock_fold_inputs import file_fingerprint
         self._check_open(); original=Path(original); destination=Path(destination)
         ingress=self._ingress
-        pairs=[]
-        for path,mark in ingress.marks.items():
-            require(Path(path).parent==original,'build output pin outside publication directory')
-            target=str(destination/Path(path).name)
-            require(file_fingerprint(target)==mark,'build output changed during publication')
-            pairs.append((path,target))
+        pairs=[(path,str(destination/Path(path).name)) for path in ingress.hashes if Path(path).parent==original]
+        for path,target in pairs:
+            if path in ingress.marks:require(file_fingerprint(target)==ingress.marks[path],'build output changed during publication')
         records=dict(self._value['source_records']); marks=self._value['source_fingerprints']
         for path,target in pairs:
-            records[target]=records.pop(path); marks[target]=marks.pop(path)
+            records[target]=records.pop(path)
+            if path in marks:marks[target]=marks.pop(path)
         self._value['source_records']=tuple(sorted(records.items()))
         for name in ('marks','hashes','json','charges','arrays'):
             values=getattr(ingress,name)
             for path,target in pairs:
-                if path in values: values[target]=values.pop(path)
+                if path in values:values[target]=values.pop(path)
         self._check_sources()
 
 
@@ -161,7 +176,8 @@ def _admit_build_fold(path,*,projection,batch):
     failed=True
     try:
         _load_matrix_fold(path,projection=projection,batch=batch,ingress=ingress,_lease=lease)
-        documents={Path(p).name:v for p,v in ingress.json.items() if Path(p).name!='manifest.json'}
+        documents={name:ingress.json[str(Path(path).resolve()/name)] for name in
+            ('fold.json','model.json','predictions.json')}
         run=_owned_fold(path,documents)
         lease._check_sources()
         yield lease,run

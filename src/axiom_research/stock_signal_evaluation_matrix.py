@@ -594,7 +594,7 @@ def _verify_matrix_root(root, ref, scope):
         compact_folds = _verify_raw(root, scope, records)
     else:
         _verify_legacy_raw(root, scope, records)
-    expanded = _expand_closure(receipt)
+    expanded = receipt['source_closure']
     by_day = {name: {} for name in names}
     for name in names:
         metadata, sources = root['signal_metadata'][name], expanded[name]
@@ -616,7 +616,7 @@ def _verify_matrix_root(root, ref, scope):
                     _instant(item['model']['fit_cutoff']) < _instant(item['model']['simulated_available_at']),
                     'frozen compact model/input contract mismatch')
                 inputs, spec = compact_folds[item['input_ref']]
-                source_records = _sources_table(source['source_records'])
+                source_records = _sources_table([receipt['source_records'][i] for i in source['source_record_indices']])
                 _require(item['fold_spec_ref'] == digest(spec) and
                     item['prediction_sessions'] == sorted(spec['inference_cutoff_by_session']) and
                     source_records.get(inputs['fold_control']['path']) == inputs['fold_control']['file_digest'],

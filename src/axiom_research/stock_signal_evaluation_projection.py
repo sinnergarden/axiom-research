@@ -515,7 +515,7 @@ def _load_inputs(input_ref, scope, *, marks=None, include_admission=False, _vali
             retained=_budget.shared_bytes)*2+65536
         _budget.reserve(charge);_budget.shared_bytes+=charge
     admission = {'projected': projected, 'labels': labels, 'raw': raw,
-        'refs': {name: root['signal_refs'][name] for name in names}, 'closures': _expand_closure(root['admission_receipt'])}
+        'refs': {name: root['signal_refs'][name] for name in names}, 'closures': root['admission_receipt']['source_closure']}
     if _admission_only:
         _require(include_admission,'admission-only read requires the original projection')
         return ref,root,None,admission
