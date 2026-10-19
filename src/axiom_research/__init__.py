@@ -10,7 +10,7 @@ from .stock_result_projection import (StockSavedProjection, load_stock_sequentia
     load_stock_ml_batch_manifest, load_stock_prediction_bindings, load_stock_fold_projection,
     load_stock_prediction_projection, load_stock_result_configuration)
 from .result_registration import (begin_stock_result_registration, publish_stock_result,
-                                  attach_stock_account_from_basis)
+                                  attach_stock_account, attach_stock_account_from_basis)
 from .stock_artifacts import (StockMLExperiment, load_stock_ml_experiment,
                               load_stock_model)
 from .stock_stage_report import export_stock_stage_report, load_stock_stage_report
